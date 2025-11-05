@@ -1,24 +1,31 @@
-# Express CSL Boilerplate
+# Cardano Governance API
 
-This is a boilerplate of building and submitting Cardano transaction using `cardano-serialization-lib`.
+The backend API the all other gov tools in Nomos
 
-## Getting Started
+## Documentation
 
-```shell
-npm install
-```
+API documentation is available at:
 
-```shell
-npm run start
-The server will start on http://localhost:3000 by default.
-```
+- GitHub Pages: nomos-guild.github.io/cgov-api/
 
-## Testing
+## Devs
 
-```shell
-npm run test
-```
+1. Install dependencies:
 
-## Error Handling
+   ```shell
+   npm install
+   ```
 
-The API handles errors and validation using custom middleware. It guards incorrect types in request body and path param.
+2. Create a `.env` file with your Blockfrost API key:
+
+   ```shell
+   MAINNET_BLOCKFROST_API_KEY=your_api_key_here
+   ```
+
+3. Start the development server:
+
+   ```shell
+   npm run dev
+   ```
+
+The server will start on <http://localhost:3000> by default.
