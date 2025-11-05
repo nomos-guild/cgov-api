@@ -5,3 +5,6 @@
 # dotenv
 .env*
 !.env.example
+
+# AI
+.claude

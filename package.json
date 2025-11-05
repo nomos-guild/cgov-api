@@ -19,7 +19,6 @@
     "cors": "^2.8.5",
     "dotenv": "^17.2.3",
     "express": "^5.1.0",
-    "express-jsdoc-swagger": "^1.8.0",
     "json-schema-to-ts": "^3.1.1",
     "swagger-jsdoc": "^6.2.8",
     "swagger-ui-express": "^5.0.1"
@@ -37,8 +36,6 @@
     "jest": "^30.2.0",
     "nodemon": "^3.1.10",
     "supertest": "^7.1.4",
-    "swagger-autogen": "^2.23.7",
-    "swagger-jsdoc-express": "^4.1.0",
     "test-node": "^0.0.2",
     "ts-jest": "^29.4.5",
     "typescript": "^5.9.3"

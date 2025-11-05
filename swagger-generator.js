@@ -28,16 +28,16 @@ const options = {
 
 const swaggerSpec = swaggerJsdoc(options);
 
-// Create swagger directory if it doesn't exist
-const swaggerDir = path.join(__dirname, 'swagger');
-if (!fs.existsSync(swaggerDir)) {
-  fs.mkdirSync(swaggerDir, { recursive: true });
+// Create docs directory if it doesn't exist
+const docsDir = path.join(__dirname, 'docs');
+if (!fs.existsSync(docsDir)) {
+  fs.mkdirSync(docsDir, { recursive: true });
 }
 
 // Write swagger.json file
-const outputPath = path.join(swaggerDir, 'swagger.json');
+const outputPath = path.join(docsDir, 'swagger.json');
 fs.writeFileSync(outputPath, JSON.stringify(swaggerSpec, null, 2));
 
-console.log('✅ Swagger spec generated at ./swagger/swagger.json');
+console.log('✅ Swagger spec generated at ./docs/swagger.json');
 console.log('📝 Routes scanned:', options.apis);
 console.log('🔗 View at: http://localhost:3000/api-docs');

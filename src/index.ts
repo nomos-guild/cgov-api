@@ -14,7 +14,7 @@ app.use(bodyParser.json());
 app.use(cors());
 
 // Serve Swagger documentation from static file
-const swaggerPath = path.join(__dirname, "../swagger/swagger.json");
+const swaggerPath = path.join(__dirname, "../docs/swagger.json");
 if (fs.existsSync(swaggerPath)) {
   const swaggerDocument = JSON.parse(fs.readFileSync(swaggerPath, "utf8"));
   app.use("/api-docs", swaggerUi.serve, swaggerUi.setup(swaggerDocument));
