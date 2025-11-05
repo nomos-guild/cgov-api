@@ -1,1 +1,1 @@
-export * as exampleTxController from './exampleTx'
+export * as dataController from "./data";

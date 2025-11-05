@@ -9,15 +9,20 @@
     "test:endpoints": "PORT=3001 jest --runInBand --testMatch='**/controller.test.ts' --forceExit",
     "test:validation": "PORT=3002 jest --runInBand --testMatch='**/validation.test.ts' --forceExit",
     "test:businessLogic": "PORT=3003 jest --runInBand --testMatch='**/routes.test.ts' --forceExit",
-    "test": "concurrently \"yarn test:endpoints\" \"yarn test:validation\" \"yarn test:businessLogic\""
+    "test": "concurrently \"yarn test:endpoints\" \"yarn test:validation\" \"yarn test:businessLogic\"",
+    "swagger:generate": "node swagger-generator.js"
   },
   "dependencies": {
     "@meshsdk/core": "^1.9.0-beta.86",
     "axios": "^1.12.2",
     "class-validator": "^0.14.2",
     "cors": "^2.8.5",
+    "dotenv": "^17.2.3",
     "express": "^5.1.0",
-    "json-schema-to-ts": "^3.1.1"
+    "express-jsdoc-swagger": "^1.8.0",
+    "json-schema-to-ts": "^3.1.1",
+    "swagger-jsdoc": "^6.2.8",
+    "swagger-ui-express": "^5.0.1"
   },
   "devDependencies": {
     "@types/body-parser": "^1.19.6",
@@ -26,10 +31,14 @@
     "@types/jest": "^30.0.0",
     "@types/node": "^24.7.2",
     "@types/supertest": "^6.0.3",
+    "@types/swagger-jsdoc": "^6.0.4",
+    "@types/swagger-ui-express": "^4.1.8",
     "concurrently": "^9.2.1",
     "jest": "^30.2.0",
     "nodemon": "^3.1.10",
     "supertest": "^7.1.4",
+    "swagger-autogen": "^2.23.7",
+    "swagger-jsdoc-express": "^4.1.0",
     "test-node": "^0.0.2",
     "ts-jest": "^29.4.5",
     "typescript": "^5.9.3"

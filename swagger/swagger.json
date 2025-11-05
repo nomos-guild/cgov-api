@@ -1,0 +1,128 @@
+{
+  "openapi": "3.0.0",
+  "info": {
+    "title": "Cardano Governance API",
+    "version": "1.0.0",
+    "description": "API for fetching Cardano governance proposals from Blockfrost",
+    "contact": {
+      "name": "API Support"
+    }
+  },
+  "servers": [
+    {
+      "url": "http://localhost:3000",
+      "description": "Development server"
+    }
+  ],
+  "paths": {
+    "/data/proposals": {
+      "get": {
+        "summary": "Get Cardano governance proposals",
+        "description": "Fetches governance action proposals from Blockfrost API. Default behavior fetches ALL proposals across all pages automatically. Specify the 'page' parameter to fetch only that specific page.",
+        "tags": [
+          "Governance"
+        ],
+        "parameters": [
+          {
+            "name": "count",
+            "in": "query",
+            "description": "Number of results per page (max 100)",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 100
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "description": "Page number (if omitted, fetches all pages automatically)",
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          {
+            "name": "order",
+            "in": "query",
+            "description": "Sort order",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "asc",
+                "desc"
+              ],
+              "default": "asc"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "List of governance proposals",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Proposal"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "Proposal": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Governance action ID",
+            "example": "gov_action1zhuz5djmmmjg8f9s8pe6grfc98xg3szglums8cgm6qwancp4eytqqmpu0pr"
+          },
+          "tx_hash": {
+            "type": "string",
+            "description": "Transaction hash",
+            "example": "15f82a365bdee483a4b03873a40d3829cc88c048ff3703e11bd01dd9e035c916"
+          },
+          "cert_index": {
+            "type": "integer",
+            "description": "Certificate index",
+            "example": 0
+          },
+          "governance_type": {
+            "type": "string",
+            "description": "Type of governance action",
+            "example": "info_action"
+          }
+        }
+      },
+      "ErrorResponse": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": "string",
+            "description": "Error message"
+          },
+          "message": {
+            "type": "string",
+            "description": "Detailed error description"
+          }
+        }
+      }
+    }
+  },
+  "tags": []
+}

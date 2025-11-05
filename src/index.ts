@@ -1,13 +1,30 @@
+import dotenv from "dotenv";
 import express, { Request, Response, NextFunction } from "express";
 import bodyParser from "body-parser";
 import cors from "cors";
-import exampleTxRouter from "./routes/exampleTx.route";
+import swaggerUi from "swagger-ui-express";
+import path from "path";
+import fs from "fs";
+import dataRouter from "./routes/data.route";
+
+dotenv.config();
 
 const app = express();
 app.use(bodyParser.json());
 app.use(cors());
 
-app.use("/exampleTx", exampleTxRouter);
+// Serve Swagger documentation from static file
+const swaggerPath = path.join(__dirname, "../swagger/swagger.json");
+if (fs.existsSync(swaggerPath)) {
+  const swaggerDocument = JSON.parse(fs.readFileSync(swaggerPath, "utf8"));
+  app.use("/api-docs", swaggerUi.serve, swaggerUi.setup(swaggerDocument));
+} else {
+  console.warn(
+    "⚠️  Swagger file not found. Run 'npm run swagger:generate' to create it."
+  );
+}
+
+app.use("/data", dataRouter);
 
 // Error handling middleware
 app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {

@@ -17,7 +17,8 @@
     "target": "es2020",
     "outDir": ".build",
     // "rootDir": "./",
-    "module": "commonjs"
+    "module": "commonjs",
+    "skipLibCheck": true
   },
   "include": ["src/**/*.ts", "src/*.ts"],
   "exclude": ["node_modules/**/*", ".vscode/**/*"]
