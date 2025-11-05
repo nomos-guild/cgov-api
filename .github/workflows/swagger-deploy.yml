@@ -1,17 +1,17 @@
-name: Generate and Deploy Swagger Docs
+name: Generate Swagger Docs
 
 on:
   push:
     branches:
       - main
+    paths-ignore:
+      - 'docs/swagger.json'
 
 permissions:
   contents: write
-  pages: write
-  id-token: write
 
 jobs:
-  deploy:
+  generate:
     runs-on: ubuntu-latest
 
     steps:
@@ -30,17 +30,16 @@ jobs:
       - name: Generate Swagger documentation
         run: npm run swagger:generate
 
-      - name: Prepare deployment files
+      - name: Check for changes
+        id: git-check
         run: |
-          mkdir -p deploy
-          cp -r docs/* deploy/
+          git diff --exit-code docs/swagger.json || echo "changed=true" >> $GITHUB_OUTPUT
 
-      - name: Deploy to GitHub Pages
-        uses: peaceiris/actions-gh-pages@v3
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: ./deploy
-          publish_branch: gh-pages
-          user_name: 'github-actions[bot]'
-          user_email: 'github-actions[bot]@users.noreply.github.com'
-          commit_message: 'docs: update swagger documentation'
+      - name: Commit and push if changed
+        if: steps.git-check.outputs.changed == 'true'
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git add docs/swagger.json
+          git commit -m "docs: update swagger documentation [skip ci]"
+          git push
