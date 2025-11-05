@@ -29,3 +29,5 @@ API documentation is available at:
    ```
 
 The server will start on <http://localhost:3000> by default.
+
+![Alt](https://repobeats.axiom.co/api/embed/87617f140cbc231931a3c7413c1c3dc7fdb30198.svg "Repobeats analytics image")
