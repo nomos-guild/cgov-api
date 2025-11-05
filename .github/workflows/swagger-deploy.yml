@@ -1,17 +1,21 @@
-name: Generate Swagger Docs
+name: Deploy Swagger Docs to GitHub Pages
 
 on:
   push:
     branches:
       - main
-    paths-ignore:
-      - 'docs/swagger.json'
 
 permissions:
-  contents: write
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
 
 jobs:
-  generate:
+  build:
     runs-on: ubuntu-latest
 
     steps:
@@ -30,16 +34,22 @@ jobs:
       - name: Generate Swagger documentation
         run: npm run swagger:generate
 
-      - name: Check for changes
-        id: git-check
-        run: |
-          git diff --exit-code docs/swagger.json || echo "changed=true" >> $GITHUB_OUTPUT
+      - name: Setup Pages
+        uses: actions/configure-pages@v4
 
-      - name: Commit and push if changed
-        if: steps.git-check.outputs.changed == 'true'
-        run: |
-          git config --local user.email "github-actions[bot]@users.noreply.github.com"
-          git config --local user.name "github-actions[bot]"
-          git add docs/swagger.json
-          git commit -m "docs: update swagger documentation [skip ci]"
-          git push
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: './docs'
+
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    needs: build
+
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
