@@ -1,0 +1,37 @@
+{
+  "name": "express-csl",
+  "version": "1.0.0",
+  "main": "src/index.ts",
+  "license": "MIT",
+  "scripts": {
+    "dev": "nodemon src/index.ts",
+    "start": "tsc && node .build/index.js",
+    "test:endpoints": "PORT=3001 jest --runInBand --testMatch='**/controller.test.ts' --forceExit",
+    "test:validation": "PORT=3002 jest --runInBand --testMatch='**/validation.test.ts' --forceExit",
+    "test:businessLogic": "PORT=3003 jest --runInBand --testMatch='**/routes.test.ts' --forceExit",
+    "test": "concurrently \"yarn test:endpoints\" \"yarn test:validation\" \"yarn test:businessLogic\""
+  },
+  "dependencies": {
+    "@meshsdk/core": "^1.9.0-beta.86",
+    "axios": "^1.12.2",
+    "class-validator": "^0.14.2",
+    "cors": "^2.8.5",
+    "express": "^5.1.0",
+    "json-schema-to-ts": "^3.1.1"
+  },
+  "devDependencies": {
+    "@types/body-parser": "^1.19.6",
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.3",
+    "@types/jest": "^30.0.0",
+    "@types/node": "^24.7.2",
+    "@types/supertest": "^6.0.3",
+    "concurrently": "^9.2.1",
+    "jest": "^30.2.0",
+    "nodemon": "^3.1.10",
+    "supertest": "^7.1.4",
+    "test-node": "^0.0.2",
+    "ts-jest": "^29.4.5",
+    "typescript": "^5.9.3"
+  }
+}
