@@ -31,7 +31,8 @@ model User {
   // offchainVotes          OffchainVote[]
 }
 
-model Drep {
+model Drep { // get drep list from https://api.koios.rest/api/v1/drep_list
+  // get drep info from https://api.koios.rest/api/v1/drep_info
   id           String        @id @default(uuid())
   drepId       String        @unique
   userId       String?       @unique
@@ -43,7 +44,8 @@ model Drep {
   onchainVotes OnchainVote[]
 }
 
-model SPO {
+model SPO { // get spo list from https://api.koios.rest/api/v1/pool_list
+  // get spo info from https://api.koios.rest/api/v1/pool_info
   id           String        @id @default(uuid())
   poolId       String        @unique
   userId       String?       @unique
@@ -56,7 +58,7 @@ model SPO {
   user         User?         @relation(fields: [userId], references: [id])
 }
 
-model CC {
+model CC { // get cc list from https://api.koios.rest/api/v1/committee_info
   id             String        @id @default(uuid())
   ccId           String        @unique
   userId         String?       @unique
@@ -108,8 +110,8 @@ model LastIngestedTime {
 
 // Viewer Types
 
-model Proposal {
-  id                   Int             @id @default(autoincrement())
+model Proposal { // get proposals from https://api.koios.rest/api/v1/proposal_list
+  id                   Int             @id @default(autoincrement()) 
   proposalId           String          @unique
   txHash               String
   certIndex            String
@@ -129,7 +131,7 @@ model Proposal {
   @@unique([txHash, certIndex])
 }
 
-model OnchainVote {
+model OnchainVote { // get votes from https://api.koios.rest/api/v1/vote_list
   id             String    @id @default(uuid())
   txHash         String
   proposal       Proposal  @relation(fields: [proposalId], references: [id])
@@ -165,7 +167,7 @@ model CrowdfundingCampaign {
   proposalDraft ProposalDraft @relation(fields: [proposalDraftId], references: [id])
 }
 
-model ProposalDraft {
+model ProposalDraft { // get from https://api.koios.rest/api/v1/vote_list
   id                   Int                   @id @default(autoincrement())
   governanceActionType GovernanceType
   title                String
