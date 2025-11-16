@@ -15,7 +15,8 @@
     "swagger:generate": "node swagger-generator.js",
     "db:seed": "ts-node prisma/seed.ts",
     "db:migrate": "npx prisma migrate deploy",
-    "db:generate": "npx prisma generate"
+    "db:generate": "npx prisma generate",
+    "deploy": "./scripts/deploy-gcp-cloud-run.sh"
   },
   "prisma": {
     "seed": "ts-node prisma/seed.ts"
