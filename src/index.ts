@@ -9,6 +9,7 @@ import dataRouter from "./routes/data.route";
 import userRouter from "./routes/user.route";
 import overviewRouter from "./routes/overview.route";
 import proposalRouter from "./routes/proposal.route";
+import { startAllJobs } from "./jobs";
 
 dotenv.config();
 
@@ -38,6 +39,9 @@ app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
   console.error(err.stack);
   res.status(statusCode).json({ error: err.message });
 });
+
+// Start cron jobs
+startAllJobs();
 
 // Start the server
 const port = parseInt(process.env.PORT || "3000");
