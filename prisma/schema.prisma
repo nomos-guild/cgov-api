@@ -34,11 +34,10 @@ model User {
 model Drep { // get drep list from https://api.koios.rest/api/v1/drep_list
   // get drep info from https://api.koios.rest/api/v1/drep_info
   id           String        @id @default(uuid())
-  drepId       String        @unique
+  drepId       String        @unique // drep_id value from drep_info api response
   userId       String?       @unique
   stakeKey     String
-  votingPower  Float
-  // or from https://api.koios.rest/api/v1/drep_voting_power_history?_epoch_no=320&_drep_id=drep17l6sywnwqu9aedd6aumev42w39ln5zfl9nw7j4ak6u8swyrwvz3
+  votingPower  Float   // get from https://api.koios.rest/api/v1/drep_voting_power_history?_epoch_no=320&_drep_id=drep17l6sywnwqu9aedd6aumev42w39ln5zfl9nw7j4ak6u8swyrwvz3 from amount value in response
   createdAt    DateTime?     @default(now())
   updatedAt    DateTime?     @updatedAt
   user         User?         @relation(fields: [userId], references: [id])
@@ -48,12 +47,11 @@ model Drep { // get drep list from https://api.koios.rest/api/v1/drep_list
 model SPO { // get spo list from https://api.koios.rest/api/v1/pool_list
   // get spo info from https://api.koios.rest/api/v1/pool_info
   id           String        @id @default(uuid())
-  poolId       String        @unique
+  poolId       String        @unique  // pool_id_bech32 value from pool_info api response
   userId       String?       @unique
-  poolName     String?
-  ticker       String?
-  votingPower  Float
-  // get from // get from https://api.koios.rest/api/v1/pool_voting_power_history?_epoch_no=320&_pool_bech32=pool155efqn9xpcf73pphkk88cmlkdwx4ulkg606tne970qswczg3asc
+  poolName     String?   // go to meta_url from pool_info api response and use the name value
+  ticker       String?  // ticker value from pool_info api response
+  votingPower  Float  // get from https://api.koios.rest/api/v1/pool_voting_power_history?_epoch_no=320&_pool_bech32=pool155efqn9xpcf73pphkk88cmlkdwx4ulkg606tne970qswczg3asc
   createdAt    DateTime?     @default(now())
   updatedAt    DateTime?     @updatedAt
   onchainVotes OnchainVote[]
@@ -62,12 +60,13 @@ model SPO { // get spo list from https://api.koios.rest/api/v1/pool_list
 
 model CC { // get cc list from https://api.koios.rest/api/v1/committee_info
   id             String        @id @default(uuid())
-  ccId           String        @unique
+  ccId           String        @unique // get members.cc_hot_id value from committee_info api response
   userId         String?       @unique
-  memberName     String?
-  hotCredential  String?
-  coldCredential String?
-  status         String?
+  memberName     String?  // go to https://api.koios.rest/api/v1/committee_votes?_cc_hot_id=cc_hot1qf5tkz6zwcpplq3kgpt2486d8za943vmymqkdjl249qgw3s2y5r9y and go to meta_url value to get the name value from authors[].name value
+  hotCredential  String?  // get members.cc_hot_id value from committee_info api response
+  coldCredential String?  // get members.cc_cold_id value from committee_info api response
+  status         String?  // get members.expiration_epoch value from committee_info api response and compare with current epoch to get status
+  // get epoch_no value from https://api.koios.rest/api/v1/tip to get current epoch
   createdAt      DateTime?     @default(now())
   updatedAt      DateTime?     @updatedAt
   onchainVotes   OnchainVote[]
@@ -114,17 +113,17 @@ model LastIngestedTime {
 
 model Proposal { // get proposals from https://api.koios.rest/api/v1/proposal_list
   id                   Int             @id @default(autoincrement()) 
-  proposalId           String          @unique
-  txHash               String
-  certIndex            String
-  title                String
-  description          String?
-  rationale            String?
-  governanceActionType GovernanceType?
-  status               ProposalStatus  @default(ACTIVE)
-  submissionEpoch      Int?
-  expiryEpoch          Int?
-  metadata             String?
+  proposalId           String          @unique  // proposal_id value from proposal_list api response
+  txHash               String  // proposal_tx_hash value from proposal_list api response
+  certIndex            String  // proposal_index value from proposal_list api response
+  title                String  // meta_json.body.title value from proposal_list api response if its not there, go to meta_url from proposal_list api response and use the body.title value
+  description          String?  // meta_json.body.abstract value from proposal_list api response if its not there, go to meta_url from proposal_list api response and use the body.abstract value
+  rationale            String?  // meta_json.body.rationale value from proposal_list api response if its not there, go to meta_url from proposal_list api response and use the body.rationale value
+  governanceActionType GovernanceType?  // proposal_type value from proposal_list api response 
+  status               ProposalStatus  @default(ACTIVE) // look at ratified_epoch, expired_epoch, enacted_epoch and dropped_epoch value from proposal_list api response and compare with current epoch to get status
+  submissionEpoch      Int?  // proposed_epoch value from proposal_list api response
+  expiryEpoch          Int?  // expired_epoch value from proposal_list api response
+  metadata             String?  // meta_json value from proposal_list api response, if not there, go to meta_url from proposal_list api response and use the response body as metadata
   createdAt            DateTime?       @default(now())
   updatedAt            DateTime?       @updatedAt
   onchainVotes         OnchainVote[]
@@ -135,27 +134,27 @@ model Proposal { // get proposals from https://api.koios.rest/api/v1/proposal_li
 
 model OnchainVote { // get votes from https://api.koios.rest/api/v1/vote_list
   id             String    @id @default(uuid())
-  txHash         String
+  txHash         String // vote_tx_hash value from vote_list api response
   proposal       Proposal  @relation(fields: [proposalId], references: [id])
-  proposalId     Int
-  vote           VoteType?
-  voterType      VoterType
+  proposalId     Int  // proposal_id value from vote_list api response
+  vote           VoteType? // vote value from vote_list api response
+  voterType      VoterType // proposal_type value from vote_list api response
   votingPower    String? 
   // get from https://api.koios.rest/api/v1/pool_voting_power_history?_epoch_no=320&_pool_bech32=pool155efqn9xpcf73pphkk88cmlkdwx4ulkg606tne970qswczg3asc
   // or from https://api.koios.rest/api/v1/drep_voting_power_history?_epoch_no=320&_drep_id=drep17l6sywnwqu9aedd6aumev42w39ln5zfl9nw7j4ak6u8swyrwvz3
   // based on voterType, get the voting power from the appropriate API
   votingPowerAda Float?
-  anchorUrl      String?
-  anchorHash     String?
-  votedAt        DateTime? @default(now())
-  createdAt      DateTime? @default(now())
+  anchorUrl      String?  // meta_url value from vote_list api response
+  anchorHash     String?  // meta_hash value from vote_list api response
+  votedAt        DateTime? @default(now())  // get block_time value from vote_list api response and convert to DateTime
+  createdAt      DateTime? @default(now())  
   updatedAt      DateTime? @updatedAt
   drep           Drep?     @relation(fields: [drepId], references: [id])
-  drepId         String?
+  drepId         String?  // voter_id value from vote_list api response
   spo            SPO?      @relation(fields: [spoId], references: [id])
-  spoId          String?
+  spoId          String?  // voter_id value from vote_list api response
   cc             CC?       @relation(fields: [ccId], references: [id])
-  ccId           String?
+  ccId           String?  // voter_id value from vote_list api response
 
   @@unique([proposalId, voterType, drepId, spoId, ccId])
 }
@@ -172,7 +171,7 @@ model CrowdfundingCampaign {
   proposalDraft ProposalDraft @relation(fields: [proposalDraftId], references: [id])
 }
 
-model ProposalDraft { // get from https://api.koios.rest/api/v1/vote_list
+model ProposalDraft { 
   id                   Int                   @id @default(autoincrement())
   governanceActionType GovernanceType
   title                String
