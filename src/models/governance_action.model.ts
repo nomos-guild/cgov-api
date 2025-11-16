@@ -8,9 +8,6 @@ export interface GovernanceAction {
   drep: GovernanceActionVoteInfo;
   spo?: GovernanceActionVoteInfo;
   cc?: CCGovernanceActionVoteInfo;
-  totalYes: number;
-  totalNo: number;
-  totalAbstain: number;
   submissionEpoch: number;
   expiryEpoch: number;
 }

@@ -32,22 +32,69 @@
  *           example: addr1qxy3w6z5...
  *     SignInResponse:
  *       type: object
- *       properties: {}
+ *       properties:
+ *         success:
+ *           type: boolean
+ *           description: Whether sign-in was successful
+ *           example: true
+ *         message:
+ *           type: string
+ *           description: Response message
+ *           example: "Successfully signed in"
+ *         token:
+ *           type: string
+ *           description: JWT authentication token
+ *           example: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+ *         user:
+ *           type: object
+ *           properties:
+ *             id:
+ *               type: string
+ *               description: User ID
+ *               example: "550e8400-e29b-41d4-a716-446655440000"
+ *             walletAddress:
+ *               type: string
+ *               description: User's wallet address
+ *               example: "addr1qxy3w6z5abc123def456ghi789jkl012mno345pqr678stu901vwx234yz"
  *     GetNCLDataResponse:
  *       type: object
  *       properties:
  *         year:
- *           type: string
+ *           type: number
  *           description: Year of the NCL data
- *           example: "2024"
+ *           example: 2024
  *         currentValue:
- *           type: string
+ *           type: number
  *           description: Current NCL value
- *           example: "1234.56"
+ *           example: 1234.56
  *         targetValue:
- *           type: string
+ *           type: number
  *           description: Target NCL value
- *           example: "5000.00"
+ *           example: 5000.00
+ *         totalProposals:
+ *           type: number
+ *           description: Total number of proposals
+ *           example: 150
+ *         activeProposals:
+ *           type: number
+ *           description: Number of active proposals
+ *           example: 25
+ *         ratifiedProposals:
+ *           type: number
+ *           description: Number of ratified proposals
+ *           example: 80
+ *         expiredProposals:
+ *           type: number
+ *           description: Number of expired proposals
+ *           example: 30
+ *         approvedProposals:
+ *           type: number
+ *           description: Number of approved proposals
+ *           example: 10
+ *         notApprovedProposals:
+ *           type: number
+ *           description: Number of not approved proposals
+ *           example: 5
  *     GetProposalListReponse:
  *       type: array
  *       items:
