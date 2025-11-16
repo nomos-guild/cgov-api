@@ -192,8 +192,15 @@ async function getPoolName(koiosSpo: KoiosSpo | undefined): Promise<string | nul
   // Fallback to fetching from meta_url
   if (koiosSpo.meta_url) {
     try {
+      // Convert IPFS URLs to use an HTTP gateway
+      let fetchUrl = koiosSpo.meta_url;
+      if (koiosSpo.meta_url.startsWith('ipfs://')) {
+        const ipfsHash = koiosSpo.meta_url.replace('ipfs://', '');
+        fetchUrl = `https://ipfs.io/ipfs/${ipfsHash}`;
+      }
+
       const axios = (await import("axios")).default;
-      const response = await axios.get(koiosSpo.meta_url, { timeout: 10000 });
+      const response = await axios.get(fetchUrl, { timeout: 10000 });
       return response.data?.name || null;
     } catch (error) {
       console.error(`Failed to fetch pool meta_url: ${koiosSpo.meta_url}`, error);
@@ -281,9 +288,16 @@ async function getCcMemberName(ccHotId: string): Promise<string | null> {
     const vote = committeeVotes?.[0];
     if (!vote?.meta_url) return null;
 
+    // Convert IPFS URLs to use an HTTP gateway
+    let fetchUrl = vote.meta_url;
+    if (vote.meta_url.startsWith('ipfs://')) {
+      const ipfsHash = vote.meta_url.replace('ipfs://', '');
+      fetchUrl = `https://ipfs.io/ipfs/${ipfsHash}`;
+    }
+
     // Fetch meta_url to get authors[].name
     const axios = (await import("axios")).default;
-    const response = await axios.get(vote.meta_url, { timeout: 10000 });
+    const response = await axios.get(fetchUrl, { timeout: 10000 });
     const metaData = response.data;
 
     // Get name from authors array

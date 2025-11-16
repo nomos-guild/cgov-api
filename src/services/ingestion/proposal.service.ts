@@ -35,29 +35,19 @@ export interface SyncAllProposalsResult {
 }
 
 /**
- * Ingests a single proposal and all its votes
+ * Internal function to ingest proposal data
  * Wrapped with retry logic for transient failures
  *
- * @param proposalHash - Transaction hash of the proposal
+ * @param koiosProposal - Proposal data from Koios API
  * @returns Result with proposal info and vote statistics
  */
-export async function ingestProposal(
-  proposalHash: string
+async function ingestProposalData(
+  koiosProposal: KoiosProposal
 ): Promise<ProposalIngestionResult> {
   // Wrap entire operation in retry logic
   return withRetry(async () => {
     // Use Prisma transaction to ensure atomicity
     return await prisma.$transaction(async (tx) => {
-      // 1. Fetch proposal data from Koios
-      const koiosProposals = await koiosGet<KoiosProposal[]>("/proposal_list", {
-        _proposal_tx_hash: proposalHash,
-      });
-
-      if (!koiosProposals || koiosProposals.length === 0) {
-        throw new Error(`Proposal not found in Koios: ${proposalHash}`);
-      }
-
-      const koiosProposal = koiosProposals[0];
 
       // 2. Get current epoch for status calculation
       const currentEpoch = await getCurrentEpoch();
@@ -118,6 +108,31 @@ export async function ingestProposal(
 }
 
 /**
+ * Ingests a single proposal by transaction hash
+ * Fetches proposal data from Koios API and processes it
+ *
+ * @param proposalHash - Transaction hash of the proposal
+ * @returns Result with proposal info and vote statistics
+ */
+export async function ingestProposal(
+  proposalHash: string
+): Promise<ProposalIngestionResult> {
+  // 1. Fetch proposal data from Koios
+  const koiosProposals = await koiosGet<KoiosProposal[]>("/proposal_list", {
+    _proposal_tx_hash: proposalHash,
+  });
+
+  if (!koiosProposals || koiosProposals.length === 0) {
+    throw new Error(`Proposal not found in Koios: ${proposalHash}`);
+  }
+
+  const koiosProposal = koiosProposals[0];
+
+  // 2. Ingest the proposal data
+  return ingestProposalData(koiosProposal);
+}
+
+/**
  * Syncs all proposals from Koios API
  * Used by cron job to keep database up to date
  *
@@ -146,7 +161,7 @@ export async function syncAllProposals(): Promise<SyncAllProposalsResult> {
   // 2. Process each proposal sequentially
   for (const koiosProposal of allProposals) {
     try {
-      await ingestProposal(koiosProposal.proposal_tx_hash);
+      await ingestProposalData(koiosProposal);
       results.success++;
       console.log(
         `[Proposal Sync] ✓ Synced ${koiosProposal.proposal_tx_hash} (${results.success}/${results.total})`
@@ -263,8 +278,16 @@ async function extractProposalMetadata(proposal: KoiosProposal): Promise<{
   // Fallback to fetching from meta_url
   if (proposal.meta_url) {
     try {
+      // Convert IPFS URLs to use an HTTP gateway
+      let fetchUrl = proposal.meta_url;
+      if (proposal.meta_url.startsWith('ipfs://')) {
+        const ipfsHash = proposal.meta_url.replace('ipfs://', '');
+        fetchUrl = `https://ipfs.io/ipfs/${ipfsHash}`;
+        console.log(`[Metadata] Converting IPFS URL to gateway: ${fetchUrl}`);
+      }
+
       const axios = (await import("axios")).default;
-      const response = await axios.get(proposal.meta_url, { timeout: 10000 });
+      const response = await axios.get(fetchUrl, { timeout: 10000 });
       const metaData = response.data;
 
       return {

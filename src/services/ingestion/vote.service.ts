@@ -7,7 +7,6 @@ import { PrismaClient, VoteType, VoterType } from "@prisma/client";
 import type { Prisma } from "@prisma/client";
 import { koiosGet } from "../koios";
 import { ensureVoterExists } from "./voter.service";
-import { lovelaceToAda } from "./utils";
 import type { KoiosVote } from "../../types/koios.types";
 
 const prisma = new PrismaClient();
@@ -35,11 +34,6 @@ export async function ingestVotesForProposal(
   proposalId: string,
   tx: Prisma.TransactionClient
 ): Promise<VoteIngestionStats> {
-  // Fetch all votes for this proposal from Koios using proposal_id
-  const koiosVotes = await koiosGet<KoiosVote[]>("/vote_list", {
-    _proposal_id: proposalId,
-  });
-
   const stats: VoteIngestionStats = {
     votesIngested: 0,
     votesUpdated: 0,
@@ -47,13 +41,28 @@ export async function ingestVotesForProposal(
     votersUpdated: { dreps: 0, spos: 0, ccs: 0 },
   };
 
-  if (!koiosVotes || koiosVotes.length === 0) {
-    return stats;
-  }
+  try {
+    // Fetch all votes for this proposal from Koios using proposal_id
+    const koiosVotes = await koiosGet<KoiosVote[]>("/vote_list", {
+      _proposal_id: proposalId,
+    });
 
-  // Process each vote
-  for (const koiosVote of koiosVotes) {
-    await ingestSingleVote(koiosVote, proposalDbId, tx, stats);
+    if (!koiosVotes || koiosVotes.length === 0) {
+      return stats;
+    }
+
+    // Process each vote
+    for (const koiosVote of koiosVotes) {
+      await ingestSingleVote(koiosVote, proposalDbId, tx, stats);
+    }
+  } catch (error: any) {
+    // If 404, it means no votes exist yet for this proposal - that's okay
+    if (error.message?.includes('404')) {
+      console.log(`[Vote Ingestion] No votes found for proposal ${proposalId} (404) - skipping`);
+      return stats;
+    }
+    // For other errors, rethrow
+    throw error;
   }
 
   return stats;
@@ -103,9 +112,9 @@ async function ingestSingleVote(
       : VoteType.ABSTAIN;
 
   // 4. Prepare foreign key IDs based on voter type
-  const drepId: string | null = voterType === VoterType.DREP ? voterResult.voterId : null;
-  const spoId: string | null = voterType === VoterType.SPO ? voterResult.voterId : null;
-  const ccId: string | null = voterType === VoterType.CC ? voterResult.voterId : null;
+  const drepId = voterType === VoterType.DREP ? voterResult.voterId : null;
+  const spoId = voterType === VoterType.SPO ? voterResult.voterId : null;
+  const ccId = voterType === VoterType.CC ? voterResult.voterId : null;
 
   // 5. Get voter's voting power for this vote
   const voter = await getVoterWithPower(voterType, voterResult.voterId, tx);
@@ -113,28 +122,24 @@ async function ingestSingleVote(
   const votingPower = votingPowerAda ? String(Math.round(votingPowerAda * 1_000_000)) : null;
 
   // 6. Check if vote already exists
+  const whereClause = {
+    proposalId: proposalDbId,
+    voterType,
+    drepId: drepId!,
+    spoId: spoId!,
+    ccId: ccId!,
+  };
+
   const existingVote = await tx.onchainVote.findUnique({
     where: {
-      proposalId_voterType_drepId_spoId_ccId: {
-        proposalId: proposalDbId,
-        voterType,
-        drepId,
-        spoId,
-        ccId,
-      },
+      proposalId_voterType_drepId_spoId_ccId: whereClause,
     },
   });
 
   // 7. Upsert the vote
   await tx.onchainVote.upsert({
     where: {
-      proposalId_voterType_drepId_spoId_ccId: {
-        proposalId: proposalDbId,
-        voterType,
-        drepId,
-        spoId,
-        ccId,
-      },
+      proposalId_voterType_drepId_spoId_ccId: whereClause,
     },
     create: {
       txHash: koiosVote.vote_tx_hash,
@@ -188,12 +193,12 @@ async function getVoterWithPower(
  *
  * Note: This requires knowing which proposal the vote belongs to
  */
-export async function ingestVoteByTxHash(txHash: string) {
+export async function ingestVoteByTxHash(_txHash: string) {
   // TODO: Koios API needs to provide a way to get vote by tx_hash
   // OR we need to pass proposal_hash as well
   // For now, return a placeholder implementation
 
-  return prisma.$transaction(async (tx) => {
+  return prisma.$transaction(async (_tx) => {
     // This would need to:
     // 1. Fetch vote from Koios by tx_hash
     // 2. Determine which proposal it belongs to

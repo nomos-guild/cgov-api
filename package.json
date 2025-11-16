@@ -10,7 +10,8 @@
     "test:validation": "PORT=3002 jest --runInBand --testMatch='**/validation.test.ts' --forceExit",
     "test:businessLogic": "PORT=3003 jest --runInBand --testMatch='**/routes.test.ts' --forceExit",
     "test": "concurrently \"yarn test:endpoints\" \"yarn test:validation\" \"yarn test:businessLogic\"",
-    "swagger:generate": "node swagger-generator.js"
+    "swagger:generate": "node swagger-generator.js",
+    "test:sync": "ts-node test-sync.ts"
   },
   "dependencies": {
     "@meshsdk/core": "^1.9.0-beta.86",
