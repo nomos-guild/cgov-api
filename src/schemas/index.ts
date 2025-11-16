@@ -125,18 +125,90 @@
  *             type: string
  *             description: Constitutionality status
  *             example: "Constitutional"
- *           totalYes:
- *             type: number
- *             description: Total yes votes
- *             example: 1500
- *           totalNo:
- *             type: number
- *             description: Total no votes
- *             example: 300
- *           totalAbstain:
- *             type: number
- *             description: Total abstain votes
- *             example: 200
+ *           drep:
+ *             type: object
+ *             description: DRep voting information
+ *             properties:
+ *               yesPercent:
+ *                 type: number
+ *                 description: Percentage of yes votes
+ *                 example: 65.5
+ *               noPercent:
+ *                 type: number
+ *                 description: Percentage of no votes
+ *                 example: 20.3
+ *               abstainPercent:
+ *                 type: number
+ *                 description: Percentage of abstain votes
+ *                 example: 14.2
+ *               yesAda:
+ *                 type: string
+ *                 description: Total ADA voted yes
+ *                 example: "5000000"
+ *               noAda:
+ *                 type: string
+ *                 description: Total ADA voted no
+ *                 example: "1500000"
+ *               abstainAda:
+ *                 type: string
+ *                 description: Total ADA voted abstain
+ *                 example: "1000000"
+ *           spo:
+ *             type: object
+ *             description: SPO voting information (optional)
+ *             properties:
+ *               yesPercent:
+ *                 type: number
+ *                 description: Percentage of yes votes
+ *                 example: 70.0
+ *               noPercent:
+ *                 type: number
+ *                 description: Percentage of no votes
+ *                 example: 15.0
+ *               abstainPercent:
+ *                 type: number
+ *                 description: Percentage of abstain votes
+ *                 example: 15.0
+ *               yesAda:
+ *                 type: string
+ *                 description: Total ADA voted yes
+ *                 example: "10000000"
+ *               noAda:
+ *                 type: string
+ *                 description: Total ADA voted no
+ *                 example: "2000000"
+ *               abstainAda:
+ *                 type: string
+ *                 description: Total ADA voted abstain
+ *                 example: "2000000"
+ *           cc:
+ *             type: object
+ *             description: Constitutional Committee voting information (optional)
+ *             properties:
+ *               yesPercent:
+ *                 type: number
+ *                 description: Percentage of yes votes
+ *                 example: 80.0
+ *               noPercent:
+ *                 type: number
+ *                 description: Percentage of no votes
+ *                 example: 10.0
+ *               abstainPercent:
+ *                 type: number
+ *                 description: Percentage of abstain votes
+ *                 example: 10.0
+ *               yesCount:
+ *                 type: number
+ *                 description: Number of yes votes
+ *                 example: 8
+ *               noCount:
+ *                 type: number
+ *                 description: Number of no votes
+ *                 example: 1
+ *               abstainCount:
+ *                 type: number
+ *                 description: Number of abstain votes
+ *                 example: 1
  *           submissionEpoch:
  *             type: number
  *             description: Epoch when submitted
@@ -181,18 +253,90 @@
  *           type: string
  *           description: Rationale behind the proposal
  *           example: "Current infrastructure requires upgrades to handle increased load..."
- *         totalYes:
- *           type: number
- *           description: Total yes votes
- *           example: 1500
- *         totalNo:
- *           type: number
- *           description: Total no votes
- *           example: 300
- *         totalAbstain:
- *           type: number
- *           description: Total abstain votes
- *           example: 200
+ *         drep:
+ *           type: object
+ *           description: DRep voting information
+ *           properties:
+ *             yesPercent:
+ *               type: number
+ *               description: Percentage of yes votes
+ *               example: 65.5
+ *             noPercent:
+ *               type: number
+ *               description: Percentage of no votes
+ *               example: 20.3
+ *             abstainPercent:
+ *               type: number
+ *               description: Percentage of abstain votes
+ *               example: 14.2
+ *             yesAda:
+ *               type: string
+ *               description: Total ADA voted yes
+ *               example: "5000000"
+ *             noAda:
+ *               type: string
+ *               description: Total ADA voted no
+ *               example: "1500000"
+ *             abstainAda:
+ *               type: string
+ *               description: Total ADA voted abstain
+ *               example: "1000000"
+ *         spo:
+ *           type: object
+ *           description: SPO voting information (optional)
+ *           properties:
+ *             yesPercent:
+ *               type: number
+ *               description: Percentage of yes votes
+ *               example: 70.0
+ *             noPercent:
+ *               type: number
+ *               description: Percentage of no votes
+ *               example: 15.0
+ *             abstainPercent:
+ *               type: number
+ *               description: Percentage of abstain votes
+ *               example: 15.0
+ *             yesAda:
+ *               type: string
+ *               description: Total ADA voted yes
+ *               example: "10000000"
+ *             noAda:
+ *               type: string
+ *               description: Total ADA voted no
+ *               example: "2000000"
+ *             abstainAda:
+ *               type: string
+ *               description: Total ADA voted abstain
+ *               example: "2000000"
+ *         cc:
+ *           type: object
+ *           description: Constitutional Committee voting information (optional)
+ *           properties:
+ *             yesPercent:
+ *               type: number
+ *               description: Percentage of yes votes
+ *               example: 80.0
+ *             noPercent:
+ *               type: number
+ *               description: Percentage of no votes
+ *               example: 10.0
+ *             abstainPercent:
+ *               type: number
+ *               description: Percentage of abstain votes
+ *               example: 10.0
+ *             yesCount:
+ *               type: number
+ *               description: Number of yes votes
+ *               example: 8
+ *             noCount:
+ *               type: number
+ *               description: Number of no votes
+ *               example: 1
+ *             abstainCount:
+ *               type: number
+ *               description: Number of abstain votes
+ *               example: 1
  *         submissionEpoch:
  *           type: number
  *           description: Epoch when submitted
