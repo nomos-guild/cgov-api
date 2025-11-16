@@ -57,6 +57,14 @@ async function ingestProposalData(
         koiosProposal.proposal_type
       );
 
+      // If Koios sends a proposal_type we don't recognize, log it for debugging
+      if (koiosProposal.proposal_type && !governanceActionType) {
+        console.warn(
+          "[Proposal Ingest] Unmapped proposal_type from Koios:",
+          koiosProposal.proposal_type
+        );
+      }
+
       // 4. Derive status from epoch fields
       const status = deriveProposalStatus(koiosProposal, currentEpoch);
 
@@ -82,6 +90,8 @@ async function ingestProposalData(
         update: {
           // Only update mutable fields
           status,
+          // Backfill governanceActionType when we have a valid mapping
+          ...(governanceActionType !== null && { governanceActionType }),
           expiryEpoch: koiosProposal.expired_epoch,
           metadata,
         },
@@ -196,20 +206,16 @@ function mapGovernanceType(
 ): GovernanceType | null {
   if (!koiosType) return null;
 
+  // Normalize Koios proposal_type values (handles both old descriptive strings and new canonical names)
   const typeMap: Record<string, GovernanceType> = {
-    info: GovernanceType.INFO,
-    "info action": GovernanceType.INFO,
-    treasury: GovernanceType.TREASURY,
-    "treasury withdrawals": GovernanceType.TREASURY,
-    constitution: GovernanceType.CONSTITUTION,
-    "new constitution": GovernanceType.CONSTITUTION,
-    "hard fork": GovernanceType.HARD_FORK,
-    "hard fork initiation": GovernanceType.HARD_FORK,
-    "protocol parameter change": GovernanceType.PROTOCOL_PARAMETER_CHANGE,
-    "parameter change": GovernanceType.PROTOCOL_PARAMETER_CHANGE,
-    "no confidence": GovernanceType.NO_CONFIDENCE,
-    "update committee": GovernanceType.UPDATE_COMMITTEE,
-    "committee update": GovernanceType.UPDATE_COMMITTEE,
+    // Canonical Koios names
+    parameterchange: GovernanceType.PROTOCOL_PARAMETER_CHANGE,
+    hardforkinitiation: GovernanceType.HARD_FORK,
+    treasurywithdrawals: GovernanceType.TREASURY,
+    noconfidence: GovernanceType.NO_CONFIDENCE,
+    newcommittee: GovernanceType.UPDATE_COMMITTEE,
+    newconstitution: GovernanceType.CONSTITUTION,
+    infoaction: GovernanceType.INFO
   };
 
   return typeMap[koiosType.toLowerCase()] || null;
