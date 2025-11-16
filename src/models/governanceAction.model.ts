@@ -36,7 +36,6 @@ export interface VoteRecord {
   voterName?: string;
   vote: "Yes" | "No" | "Abstain";
   votingPower?: string;
-  votingPowerAda?: number;
   anchorUrl?: string;
   anchorHash?: string;
   votedAt: string;
