@@ -227,8 +227,8 @@ async function getPoolMeta(
   }
 
   // Final fallback: use top-level Koios ticker if still missing
-  if (!ticker && koiosSpo.ticker) {
-    ticker = koiosSpo.ticker;
+  if (!ticker && koiosSpo.meta_json?.ticker) {
+    ticker = koiosSpo.meta_json.ticker;
   }
 
   return { poolName, ticker };
