@@ -26,6 +26,19 @@
 
 - Ingest into `Proposal` table
 
+Use Koios API
+
+Use Koios GET Proposals List (For most of the fields except for onchainVotes)
+
+For onchainVotes, we need to use below APIs:
+
+- Get Vote List
+- Get DReps Info
+- Get Pool Information
+- Get Committee Information
+- Get DReps Voting Power History
+- Get Pool's Voting Power History
+
 ### POST /data/vote/:tx_hash
 
 - Ingest into `OnchainVote` table
