@@ -42,27 +42,27 @@ export async function ingestVotesForProposal(
   };
 
   try {
-    // Fetch all votes for this proposal from Koios using proposal_id
-    const koiosVotes = await koiosGet<KoiosVote[]>("/vote_list", {
-      _proposal_id: proposalId,
-    });
+    // Fetch ALL votes from Koios (API doesn't support filtering)
+    const allVotes = await koiosGet<KoiosVote[]>("/vote_list");
 
-    if (!koiosVotes || koiosVotes.length === 0) {
+    // Filter in memory to find votes for this specific proposal
+    const koiosVotes = allVotes?.filter((vote) => vote.proposal_id === proposalId) || [];
+
+    if (koiosVotes.length === 0) {
+      console.log(`[Vote Ingestion] No votes found for proposal ${proposalId}`);
       return stats;
     }
+
+    console.log(`[Vote Ingestion] Found ${koiosVotes.length} votes for proposal ${proposalId}`);
 
     // Process each vote
     for (const koiosVote of koiosVotes) {
       await ingestSingleVote(koiosVote, proposalDbId, tx, stats);
     }
   } catch (error: any) {
-    // If 404, it means no votes exist yet for this proposal - that's okay
-    if (error.message?.includes('404')) {
-      console.log(`[Vote Ingestion] No votes found for proposal ${proposalId} (404) - skipping`);
-      return stats;
-    }
-    // For other errors, rethrow
-    throw error;
+    // If fetching all votes fails, log and return empty stats
+    console.error(`[Vote Ingestion] Failed to fetch votes:`, error.message);
+    return stats;
   }
 
   return stats;
@@ -121,54 +121,52 @@ async function ingestSingleVote(
   const votingPowerAda = voter?.votingPower || null;
   const votingPower = votingPowerAda ? String(Math.round(votingPowerAda * 1_000_000)) : null;
 
-  // 6. Check if vote already exists
-  const whereClause = {
-    proposalId: proposalDbId,
-    voterType,
-    drepId: drepId!,
-    spoId: spoId!,
-    ccId: ccId!,
-  };
-
-  const existingVote = await tx.onchainVote.findUnique({
+  // 6. Check if vote exists using findFirst (works with nullable fields)
+  const existingVote = await tx.onchainVote.findFirst({
     where: {
-      proposalId_voterType_drepId_spoId_ccId: whereClause,
-    },
-  });
-
-  // 7. Upsert the vote
-  await tx.onchainVote.upsert({
-    where: {
-      proposalId_voterType_drepId_spoId_ccId: whereClause,
-    },
-    create: {
-      txHash: koiosVote.vote_tx_hash,
       proposalId: proposalDbId,
-      vote: voteType,
       voterType,
-      votingPower,
-      votingPowerAda,
-      anchorUrl: koiosVote.meta_url,
-      anchorHash: koiosVote.meta_hash,
-      votedAt: koiosVote.block_time
-        ? new Date(koiosVote.block_time * 1000) // Convert Unix timestamp to Date
-        : undefined,
       drepId,
       spoId,
       ccId,
     },
-    update: {
-      // Update vote type and voting power in case they changed
-      vote: voteType,
-      votingPower,
-      votingPowerAda,
-      anchorUrl: koiosVote.meta_url,
-      anchorHash: koiosVote.meta_hash,
-    },
   });
 
-  // Update stats
-  existingVote ? stats.votesUpdated++ : stats.votesIngested++;
+  if (existingVote) {
+    // Update existing vote
+    await tx.onchainVote.update({
+      where: { id: existingVote.id },
+      data: {
+        vote: voteType,
+        votingPower,
+        votingPowerAda,
+        anchorUrl: koiosVote.meta_url,
+        anchorHash: koiosVote.meta_hash,
+      },
+    });
+    stats.votesUpdated++;
+  } else {
+    // Create new vote
+    await tx.onchainVote.create({
+      data: {
+        txHash: koiosVote.vote_tx_hash,
+        proposalId: proposalDbId,
+        vote: voteType,
+        voterType,
+        votingPower,
+        votingPowerAda,
+        anchorUrl: koiosVote.meta_url,
+        anchorHash: koiosVote.meta_hash,
+        votedAt: koiosVote.block_time
+          ? new Date(koiosVote.block_time * 1000) // Convert Unix timestamp to Date
+          : undefined,
+        drepId,
+        spoId,
+        ccId,
+      },
+    });
+    stats.votesIngested++;
+  }
 }
 
 /**

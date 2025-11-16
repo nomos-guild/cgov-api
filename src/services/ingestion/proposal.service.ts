@@ -47,6 +47,7 @@ async function ingestProposalData(
   // Wrap entire operation in retry logic
   return withRetry(async () => {
     // Use Prisma transaction to ensure atomicity
+    // Increase timeout to 60 seconds for proposals with many votes
     return await prisma.$transaction(async (tx) => {
 
       // 2. Get current epoch for status calculation
@@ -71,7 +72,14 @@ async function ingestProposalData(
       // 5. Extract metadata (from meta_json or fetch from meta_url)
       const { title, description, rationale, metadata } = await extractProposalMetadata(koiosProposal);
 
-      // 6. Upsert proposal
+      // 6. Check if proposal exists to determine if creating or updating
+      const existingProposal = await tx.proposal.findUnique({
+        where: { proposalId: koiosProposal.proposal_id },
+      });
+
+      const isUpdate = !!existingProposal;
+
+      // 7. Upsert proposal
       const proposal = await tx.proposal.upsert({
         where: { proposalId: koiosProposal.proposal_id },
         create: {
@@ -97,6 +105,12 @@ async function ingestProposalData(
         },
       });
 
+      console.log(
+        `[Proposal Ingest] ${isUpdate ? 'Updated' : 'Created'} proposal - ` +
+        `DB ID: ${proposal.id}, proposalId: ${proposal.proposalId}, ` +
+        `type: ${governanceActionType || 'null'}, koios_type: "${koiosProposal.proposal_type}"`
+      );
+
       // 7. Ingest all votes for this proposal
       const voteStats = await ingestVotesForProposal(
         proposal.id,
@@ -113,6 +127,8 @@ async function ingestProposalData(
         },
         stats: voteStats,
       };
+    }, {
+      timeout: 300000, // 5 minutes timeout for initial sync with many new voters
     });
   });
 }
@@ -127,18 +143,19 @@ async function ingestProposalData(
 export async function ingestProposal(
   proposalHash: string
 ): Promise<ProposalIngestionResult> {
-  // 1. Fetch proposal data from Koios
-  const koiosProposals = await koiosGet<KoiosProposal[]>("/proposal_list", {
-    _proposal_tx_hash: proposalHash,
-  });
+  // 1. Fetch ALL proposals from Koios (API doesn't support filtering)
+  const allProposals = await koiosGet<KoiosProposal[]>("/proposal_list");
 
-  if (!koiosProposals || koiosProposals.length === 0) {
+  // 2. Filter in memory to find the specific proposal
+  const koiosProposal = allProposals?.find(
+    (p) => p.proposal_tx_hash === proposalHash
+  );
+
+  if (!koiosProposal) {
     throw new Error(`Proposal not found in Koios: ${proposalHash}`);
   }
 
-  const koiosProposal = koiosProposals[0];
-
-  // 2. Ingest the proposal data
+  // 3. Ingest the proposal data
   return ingestProposalData(koiosProposal);
 }
 
@@ -168,8 +185,17 @@ export async function syncAllProposals(): Promise<SyncAllProposalsResult> {
 
   console.log(`[Proposal Sync] Found ${results.total} proposals to sync`);
 
-  // 2. Process each proposal sequentially
-  for (const koiosProposal of allProposals) {
+  // 2. Sort proposals by submission epoch (oldest first) for consistent DB ordering
+  const sortedProposals = allProposals.sort((a, b) => {
+    const epochA = a.proposed_epoch || 0;
+    const epochB = b.proposed_epoch || 0;
+    return epochA - epochB;
+  });
+
+  console.log(`[Proposal Sync] Processing proposals from epoch ${sortedProposals[0]?.proposed_epoch} to ${sortedProposals[sortedProposals.length - 1]?.proposed_epoch}`);
+
+  // 3. Process each proposal sequentially
+  for (const koiosProposal of sortedProposals) {
     try {
       await ingestProposalData(koiosProposal);
       results.success++;
@@ -199,26 +225,25 @@ export async function syncAllProposals(): Promise<SyncAllProposalsResult> {
 
 /**
  * Maps Koios governance action type to Prisma enum
- * TODO: Update this when exact Koios field values are documented
+ * Koios returns PascalCase values like "TreasuryWithdrawals", "InfoAction", etc.
  */
 function mapGovernanceType(
   koiosType: string | undefined
 ): GovernanceType | null {
   if (!koiosType) return null;
 
-  // Normalize Koios proposal_type values (handles both old descriptive strings and new canonical names)
+  // Koios uses PascalCase for proposal_type
   const typeMap: Record<string, GovernanceType> = {
-    // Canonical Koios names
-    parameterchange: GovernanceType.PROTOCOL_PARAMETER_CHANGE,
-    hardforkinitiation: GovernanceType.HARD_FORK,
-    treasurywithdrawals: GovernanceType.TREASURY,
-    noconfidence: GovernanceType.NO_CONFIDENCE,
-    newcommittee: GovernanceType.UPDATE_COMMITTEE,
-    newconstitution: GovernanceType.CONSTITUTION,
-    infoaction: GovernanceType.INFO
+    ParameterChange: GovernanceType.PROTOCOL_PARAMETER_CHANGE,
+    HardForkInitiation: GovernanceType.HARD_FORK,
+    TreasuryWithdrawals: GovernanceType.TREASURY,
+    NoConfidence: GovernanceType.NO_CONFIDENCE,
+    NewCommittee: GovernanceType.UPDATE_COMMITTEE,
+    NewConstitution: GovernanceType.CONSTITUTION,
+    InfoAction: GovernanceType.INFO
   };
 
-  return typeMap[koiosType.toLowerCase()] || null;
+  return typeMap[koiosType] || null;
 }
 
 /**

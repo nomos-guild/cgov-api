@@ -4,7 +4,7 @@
  */
 
 import type { Prisma } from "@prisma/client";
-import { koiosGet } from "../koios";
+import { koiosGet, koiosPost } from "../koios";
 import { lovelaceToAda } from "./utils";
 import type {
   KoiosDrep,
@@ -54,6 +54,12 @@ export async function ensureVoterExists(
   }
 }
 
+// Cache for API responses to avoid duplicate calls within a transaction
+const drepInfoCache = new Map<string, KoiosDrep | undefined>();
+const drepVotingPowerCache = new Map<string, number>();
+const spoInfoCache = new Map<string, KoiosSpo | undefined>();
+const spoVotingPowerCache = new Map<string, number>();
+
 /**
  * Ensures a DRep exists, creating if needed and updating voting power
  */
@@ -65,39 +71,38 @@ async function ensureDrepExists(
     where: { drepId },
   });
 
-  // Fetch DRep info from Koios
-  const koiosDrepResponse = await koiosGet<KoiosDrep[]>("/drep_info", {
-    _drep_id: drepId,
-  });
+  // If voter exists, just return it without updating (optimization for initial sync)
+  // Voting power updates can be done in a separate background job
+  if (existing) {
+    return { voterId: existing.id, created: false, updated: false };
+  }
 
-  const koiosDrep = koiosDrepResponse?.[0];
+  // Check cache first, then fetch if not cached
+  let koiosDrep = drepInfoCache.get(drepId);
+  if (koiosDrep === undefined) {
+    const koiosDrepResponse = await koiosPost<KoiosDrep[]>("/drep_info", {
+      _drep_ids: [drepId],
+    });
+    koiosDrep = koiosDrepResponse?.[0];
+    drepInfoCache.set(drepId, koiosDrep);
+  }
 
   // Get current epoch for voting power history
   const currentEpoch = await getCurrentEpoch();
+  const cacheKey = `${drepId}_${currentEpoch}`;
 
-  // Fetch voting power from history endpoint
-  const votingPowerHistory = await koiosGet<KoiosDrepVotingPower[]>(
-    "/drep_voting_power_history",
-    {
-      _epoch_no: currentEpoch,
-      _drep_id: drepId,
-    }
-  );
-
-  const votingPowerLovelace = votingPowerHistory?.[0]?.amount;
-  const votingPower = lovelaceToAda(votingPowerLovelace) || 0;
-
-  if (existing) {
-    // Update voting power (can change between syncs)
-    if (votingPowerLovelace) {
-      await tx.drep.update({
-        where: { drepId },
-        data: { votingPower },
-      });
-      return { voterId: existing.id, created: false, updated: true };
-    }
-
-    return { voterId: existing.id, created: false, updated: false };
+  let votingPower = drepVotingPowerCache.get(cacheKey);
+  if (votingPower === undefined) {
+    const votingPowerHistory = await koiosGet<KoiosDrepVotingPower[]>(
+      "/drep_voting_power_history",
+      {
+        _epoch_no: currentEpoch,
+        _drep_id: drepId,
+      }
+    );
+    const votingPowerLovelace = votingPowerHistory?.[0]?.amount;
+    votingPower = lovelaceToAda(votingPowerLovelace) || 0;
+    drepVotingPowerCache.set(cacheKey, votingPower);
   }
 
   // Create new DRep
@@ -123,47 +128,42 @@ async function ensureSpoExists(
     where: { poolId },
   });
 
-  // Fetch pool info from Koios
-  const koiosSpoResponse = await koiosGet<KoiosSpo[]>("/pool_info", {
-    _pool_bech32: poolId,
-  });
+  // If voter exists, just return it without updating (optimization for initial sync)
+  // Voting power updates can be done in a separate background job
+  if (existing) {
+    return { voterId: existing.id, created: false, updated: false };
+  }
 
-  const koiosSpo = koiosSpoResponse?.[0];
+  // Check cache first, then fetch if not cached
+  let koiosSpo = spoInfoCache.get(poolId);
+  if (koiosSpo === undefined) {
+    const koiosSpoResponse = await koiosPost<KoiosSpo[]>("/pool_info", {
+      _pool_bech32_ids: [poolId],
+    });
+    koiosSpo = koiosSpoResponse?.[0];
+    spoInfoCache.set(poolId, koiosSpo);
+  }
 
   // Get current epoch for voting power history
   const currentEpoch = await getCurrentEpoch();
+  const cacheKey = `${poolId}_${currentEpoch}`;
 
-  // Fetch voting power from history endpoint
-  const votingPowerHistory = await koiosGet<KoiosSpoVotingPower[]>(
-    "/pool_voting_power_history",
-    {
-      _epoch_no: currentEpoch,
-      _pool_bech32: poolId,
-    }
-  );
-
-  const votingPowerLovelace = votingPowerHistory?.[0]?.amount;
-  const votingPower = lovelaceToAda(votingPowerLovelace) || 0;
+  let votingPower = spoVotingPowerCache.get(cacheKey);
+  if (votingPower === undefined) {
+    const votingPowerHistory = await koiosGet<KoiosSpoVotingPower[]>(
+      "/pool_voting_power_history",
+      {
+        _epoch_no: currentEpoch,
+        _pool_bech32: poolId,
+      }
+    );
+    const votingPowerLovelace = votingPowerHistory?.[0]?.amount;
+    votingPower = lovelaceToAda(votingPowerLovelace) || 0;
+    spoVotingPowerCache.set(cacheKey, votingPower);
+  }
 
   // Get pool name from meta_url or meta_json
   const poolName = await getPoolName(koiosSpo);
-
-  if (existing) {
-    // Update voting power and other mutable fields
-    if (votingPowerLovelace) {
-      await tx.sPO.update({
-        where: { poolId },
-        data: {
-          votingPower,
-          poolName,
-          ticker: koiosSpo?.ticker,
-        },
-      });
-      return { voterId: existing.id, created: false, updated: true };
-    }
-
-    return { voterId: existing.id, created: false, updated: false };
-  }
 
   // Create new SPO
   const newSpo = await tx.sPO.create({
@@ -222,6 +222,11 @@ async function ensureCcExists(
     where: { ccId },
   });
 
+  // If voter exists, just return it without updating (optimization for initial sync)
+  if (existing) {
+    return { voterId: existing.id, created: false, updated: false };
+  }
+
   // Fetch committee info from Koios
   const committeeInfo = await koiosGet<KoiosCommitteeInfo[]>("/committee_info");
 
@@ -242,23 +247,6 @@ async function ensureCcExists(
   // Get member name from committee_votes meta_url
   const memberName = await getCcMemberName(ccId);
 
-  if (existing) {
-    // Update CC member details
-    if (ccMember) {
-      await tx.cC.update({
-        where: { ccId },
-        data: {
-          coldCredential: ccMember.cc_cold_id,
-          status,
-          memberName,
-        },
-      });
-      return { voterId: existing.id, created: false, updated: true };
-    }
-
-    return { voterId: existing.id, created: false, updated: false };
-  }
-
   // Create new CC member
   const newCc = await tx.cC.create({
     data: {
@@ -278,14 +266,13 @@ async function ensureCcExists(
  */
 async function getCcMemberName(ccHotId: string): Promise<string | null> {
   try {
-    const committeeVotes = await koiosGet<Array<{
+    // Fetch all committee votes and filter in memory
+    const allCommitteeVotes = await koiosGet<Array<{
       cc_hot_id: string;
       meta_url?: string | null;
-    }>>("/committee_votes", {
-      _cc_hot_id: ccHotId,
-    });
+    }>>("/committee_votes");
 
-    const vote = committeeVotes?.[0];
+    const vote = allCommitteeVotes?.find((v) => v.cc_hot_id === ccHotId);
     if (!vote?.meta_url) return null;
 
     // Convert IPFS URLs to use an HTTP gateway

@@ -9,7 +9,7 @@ import { syncAllProposals } from "../services/ingestion/proposal.service";
 /**
  * Starts the proposal sync cron job
  * Schedule is configurable via PROPOSAL_SYNC_SCHEDULE env variable
- * Defaults to every 5 minutes: "*/5 * * * *"
+ * Defaults to every 5 minutes
  */
 export const startProposalSyncJob = () => {
   const schedule = process.env.PROPOSAL_SYNC_SCHEDULE || "*/5 * * * *";
@@ -59,10 +59,7 @@ function startProposalSyncJobWithSchedule(schedule: string) {
         );
       }
     } catch (error: any) {
-      console.error(
-        `[${timestamp}] Proposal sync job failed:`,
-        error.message
-      );
+      console.error(`[${timestamp}] Proposal sync job failed:`, error.message);
     }
   });
 
