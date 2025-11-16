@@ -17,7 +17,7 @@ datasource db {
 
 model User {
   id               String    @id @default(uuid())
-  discordId        String    @unique
+  // discordId        String    @unique
   walletAddress    String?
   stakeKeyLovelace Float?
   jwt              String?

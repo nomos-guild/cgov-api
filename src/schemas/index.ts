@@ -21,6 +21,18 @@
  *           type: string
  *           description: Type of governance action
  *           example: info_action
+ *     SignInRequest:
+ *       type: object
+ *       required:
+ *         - walletAddress
+ *       properties:
+ *         walletAddress:
+ *           type: string
+ *           description: Cardano wallet address
+ *           example: addr1qxy3w6z5...
+ *     SignInResponse:
+ *       type: object
+ *       properties: {}
  *     ErrorResponse:
  *       type: object
  *       properties:
