@@ -13,7 +13,6 @@ CREATE TYPE "ProposalStatus" AS ENUM ('ACTIVE', 'RATIFIED', 'EXPIRED', 'APPROVED
 -- CreateTable
 CREATE TABLE "User" (
     "id" TEXT NOT NULL,
-    "discordId" TEXT NOT NULL,
     "walletAddress" TEXT,
     "stakeKeyLovelace" DOUBLE PRECISION,
     "jwt" TEXT,
@@ -75,7 +74,7 @@ CREATE TABLE "LastIngestedTime" (
 -- CreateTable
 CREATE TABLE "Proposal" (
     "id" SERIAL NOT NULL,
-    "postId" TEXT NOT NULL,
+    "proposalId" TEXT NOT NULL,
     "txHash" TEXT NOT NULL,
     "certIndex" TEXT NOT NULL,
     "title" TEXT NOT NULL,
@@ -95,6 +94,7 @@ CREATE TABLE "Proposal" (
 -- CreateTable
 CREATE TABLE "OnchainVote" (
     "id" TEXT NOT NULL,
+    "txHash" TEXT NOT NULL,
     "proposalId" INTEGER NOT NULL,
     "vote" "VoteType",
     "voterType" "VoterType" NOT NULL,
@@ -141,9 +141,6 @@ CREATE TABLE "ProposalDraft" (
 );
 
 -- CreateIndex
-CREATE UNIQUE INDEX "User_discordId_key" ON "User"("discordId");
-
--- CreateIndex
 CREATE UNIQUE INDEX "Drep_drepId_key" ON "Drep"("drepId");
 
 -- CreateIndex
@@ -162,7 +159,7 @@ CREATE UNIQUE INDEX "CC_ccId_key" ON "CC"("ccId");
 CREATE UNIQUE INDEX "CC_userId_key" ON "CC"("userId");
 
 -- CreateIndex
-CREATE UNIQUE INDEX "Proposal_postId_key" ON "Proposal"("postId");
+CREATE UNIQUE INDEX "Proposal_proposalId_key" ON "Proposal"("proposalId");
 
 -- CreateIndex
 CREATE UNIQUE INDEX "Proposal_txHash_certIndex_key" ON "Proposal"("txHash", "certIndex");
