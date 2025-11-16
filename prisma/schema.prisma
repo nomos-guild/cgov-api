@@ -131,6 +131,7 @@ model Proposal {
 
 model OnchainVote {
   id             String    @id @default(uuid())
+  txHash         String
   proposal       Proposal  @relation(fields: [proposalId], references: [id])
   proposalId     Int
   vote           VoteType?
