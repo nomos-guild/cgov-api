@@ -87,13 +87,9 @@ const percent = (value: number, total: number) =>
   total === 0 ? 0 : Number(((value / total) * 100).toFixed(2));
 
 const getAdaValue = (vote: VoteWithRelations) => {
-  if (typeof vote.votingPowerAda === "number" && !Number.isNaN(vote.votingPowerAda)) {
-    return vote.votingPowerAda;
-  }
-
-  if (vote.votingPower) {
-    const parsed = Number(vote.votingPower);
-    return Number.isFinite(parsed) ? parsed : 0;
+  if (vote.votingPowerLovelace) {
+    const parsed = Number(vote.votingPowerLovelace);
+    return Number.isFinite(parsed) ? parsed / 1_000_000 : 0; // Convert lovelace to ADA
   }
 
   return 0;
@@ -225,13 +221,8 @@ const mapVoteRecord = (vote: VoteWithRelations): VoteRecord => {
     record.voterName = voterName;
   }
 
-  if (vote.votingPower) {
-    record.votingPower = vote.votingPower;
-  }
-
-  const ada = getAdaValue(vote);
-  if (ada) {
-    record.votingPowerAda = ada;
+  if (vote.votingPowerLovelace) {
+    record.votingPower = vote.votingPowerLovelace;
   }
 
   if (vote.anchorUrl) {
@@ -263,13 +254,16 @@ const extractConstitutionality = (metadata: unknown): string | undefined => {
   }
 
   if (
-    "constitutionality" in metadata
-    && typeof (metadata as Record<string, unknown>).constitutionality === "string"
+    "constitutionality" in metadata &&
+    typeof (metadata as Record<string, unknown>).constitutionality === "string"
   ) {
     return (metadata as Record<string, string>).constitutionality;
   }
 
-  if ("status" in metadata && typeof (metadata as Record<string, unknown>).status === "string") {
+  if (
+    "status" in metadata &&
+    typeof (metadata as Record<string, unknown>).status === "string"
+  ) {
     return (metadata as Record<string, string>).status;
   }
 
@@ -287,7 +281,11 @@ const aggregateVotes = (votes: VoteWithRelations[]) => {
 
   const drepCountTally = tallyCountVotes(drepVotes);
   const spoCountTally = tallyCountVotes(spoVotes);
-  const totals = combineCountTallies(drepCountTally, spoCountTally, ccCountTally);
+  const totals = combineCountTallies(
+    drepCountTally,
+    spoCountTally,
+    ccCountTally
+  );
 
   return {
     drepVotes,
@@ -325,8 +323,7 @@ export const mapProposalToGovernanceAction = (
     : undefined;
 
   const metadata = parseMetadata(proposal.metadata);
-  const constitutionality =
-    extractConstitutionality(metadata) ?? "Unspecified";
+  const constitutionality = extractConstitutionality(metadata) ?? "Unspecified";
 
   return {
     proposalId: buildProposalIdentifier(proposal),
@@ -336,11 +333,8 @@ export const mapProposalToGovernanceAction = (
     status: formatStatus(proposal.status),
     constitutionality,
     drep: drepInfo,
-    spo: spoInfo,
-    cc: ccInfo,
-    totalYes: voteAggregation.totals.yes,
-    totalNo: voteAggregation.totals.no,
-    totalAbstain: voteAggregation.totals.abstain,
+    ...(spoInfo && { spo: spoInfo }),
+    ...(ccInfo && { cc: ccInfo }),
     submissionEpoch: proposal.submissionEpoch ?? 0,
     expiryEpoch: proposal.expiryEpoch ?? 0,
   };
@@ -351,9 +345,7 @@ export const mapProposalToGovernanceActionDetail = (
 ): GovernanceActionDetail => {
   const base = mapProposalToGovernanceAction(proposal);
   const votes = proposal.onchainVotes ?? [];
-  const standardVotes = votes.filter(
-    (vote) => vote.voterType !== VoterType.CC
-  );
+  const standardVotes = votes.filter((vote) => vote.voterType !== VoterType.CC);
   const ccVotes = votes.filter((vote) => vote.voterType === VoterType.CC);
 
   const mappedVotes = standardVotes.map(mapVoteRecord);

@@ -202,8 +202,7 @@ async function main() {
       vote: VoteType.YES,
       voterType: VoterType.DREP,
       drepId: drep1.id,
-      votingPower: "1500000",
-      votingPowerAda: 1.5,
+      votingPowerLovelace: "1500000000000", // 1.5M ADA
       anchorUrl: "https://example.com/vote-metadata/drep1-prop1",
       anchorHash: "abc123def456",
     },
@@ -216,8 +215,7 @@ async function main() {
       vote: VoteType.YES,
       voterType: VoterType.DREP,
       drepId: drep2.id,
-      votingPower: "3200000",
-      votingPowerAda: 3.2,
+      votingPowerLovelace: "3200000000000", // 3.2M ADA
       anchorUrl: "https://example.com/vote-metadata/drep2-prop1",
       anchorHash: "def789ghi012",
     },
@@ -230,8 +228,7 @@ async function main() {
       vote: VoteType.YES,
       voterType: VoterType.SPO,
       spoId: spo1.id,
-      votingPower: "10000000",
-      votingPowerAda: 10.0,
+      votingPowerLovelace: "10000000000000", // 10M ADA
     },
   });
 
@@ -242,8 +239,7 @@ async function main() {
       vote: VoteType.ABSTAIN,
       voterType: VoterType.SPO,
       spoId: spo2.id,
-      votingPower: "8500000",
-      votingPowerAda: 8.5,
+      votingPowerLovelace: "8500000000000", // 8.5M ADA
     },
   });
 
@@ -254,8 +250,7 @@ async function main() {
       vote: VoteType.YES,
       voterType: VoterType.CC,
       ccId: cc1.id,
-      votingPower: "1",
-      votingPowerAda: 1,
+      votingPowerLovelace: "1",
     },
   });
 
@@ -266,8 +261,7 @@ async function main() {
       vote: VoteType.YES,
       voterType: VoterType.CC,
       ccId: cc2.id,
-      votingPower: "1",
-      votingPowerAda: 1,
+      votingPowerLovelace: "1",
     },
   });
 
@@ -279,8 +273,7 @@ async function main() {
       vote: VoteType.NO,
       voterType: VoterType.DREP,
       drepId: drep1.id,
-      votingPower: "1500000",
-      votingPowerAda: 1.5,
+      votingPowerLovelace: "1500000000000", // 1.5M ADA
     },
   });
 
@@ -291,8 +284,7 @@ async function main() {
       vote: VoteType.YES,
       voterType: VoterType.DREP,
       drepId: drep2.id,
-      votingPower: "3200000",
-      votingPowerAda: 3.2,
+      votingPowerLovelace: "3200000000000", // 3.2M ADA
     },
   });
 
@@ -303,8 +295,7 @@ async function main() {
       vote: VoteType.ABSTAIN,
       voterType: VoterType.CC,
       ccId: cc1.id,
-      votingPower: "1",
-      votingPowerAda: 1,
+      votingPowerLovelace: "1",
     },
   });
 
@@ -316,8 +307,7 @@ async function main() {
       vote: VoteType.YES,
       voterType: VoterType.SPO,
       spoId: spo1.id,
-      votingPower: "10000000",
-      votingPowerAda: 10.0,
+      votingPowerLovelace: "10000000000000", // 10M ADA
     },
   });
 
@@ -328,8 +318,7 @@ async function main() {
       vote: VoteType.YES,
       voterType: VoterType.SPO,
       spoId: spo2.id,
-      votingPower: "8500000",
-      votingPowerAda: 8.5,
+      votingPowerLovelace: "8500000000000", // 8.5M ADA
     },
   });
 

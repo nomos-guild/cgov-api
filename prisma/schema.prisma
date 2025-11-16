@@ -130,25 +130,24 @@ model Proposal {
 }
 
 model OnchainVote {
-  id             String    @id @default(uuid())
-  txHash         String
-  proposal       Proposal  @relation(fields: [proposalId], references: [id])
-  proposalId     Int
-  vote           VoteType?
-  voterType      VoterType
-  votingPower    String?
-  votingPowerAda Float?
-  anchorUrl      String?
-  anchorHash     String?
-  votedAt        DateTime? @default(now())
-  createdAt      DateTime? @default(now())
-  updatedAt      DateTime? @updatedAt
-  drep           Drep?     @relation(fields: [drepId], references: [id])
-  drepId         String?
-  spo            SPO?      @relation(fields: [spoId], references: [id])
-  spoId          String?
-  cc             CC?       @relation(fields: [ccId], references: [id])
-  ccId           String?
+  id                  String    @id @default(uuid())
+  txHash              String
+  proposal            Proposal  @relation(fields: [proposalId], references: [id])
+  proposalId          Int
+  vote                VoteType?
+  voterType           VoterType
+  votingPowerLovelace String?
+  anchorUrl           String?
+  anchorHash          String?
+  votedAt             DateTime? @default(now())
+  createdAt           DateTime? @default(now())
+  updatedAt           DateTime? @updatedAt
+  drep                Drep?     @relation(fields: [drepId], references: [id])
+  drepId              String?
+  spo                 SPO?      @relation(fields: [spoId], references: [id])
+  spoId               String?
+  cc                  CC?       @relation(fields: [ccId], references: [id])
+  ccId                String?
 
   @@unique([proposalId, voterType, drepId, spoId, ccId])
 }
