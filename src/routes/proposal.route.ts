@@ -1,5 +1,5 @@
 import express from "express";
-import { placeholderGet } from "../controllers";
+import { proposalController } from "../controllers";
 
 const router = express.Router();
 
@@ -15,10 +15,10 @@ const router = express.Router();
  *       - name: proposal_id
  *         in: path
  *         required: true
- *         description: Unique identifier of the proposal
+ *         description: Proposal lookup key (tx hash or txHash:certIndex)
  *         schema:
  *           type: string
- *           example: "prop_123456"
+ *           example: "15f82a365bdee483a4b03873a40d3829cc88c048ff3703e11bd01dd9e035c916:0"
  *     responses:
  *       200:
  *         description: Successfully retrieved proposal details
@@ -39,6 +39,6 @@ const router = express.Router();
  *             schema:
  *               $ref: '#/components/schemas/ErrorResponse'
  */
-router.get("/:proposal_id", placeholderGet);
+router.get("/:proposal_id", proposalController.getProposalDetails);
 
 export default router;
