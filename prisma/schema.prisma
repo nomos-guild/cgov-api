@@ -110,7 +110,7 @@ model LastIngestedTime {
 
 model Proposal {
   id                   Int             @id @default(autoincrement())
-  postId               String          @unique
+  proposalId           String          @unique
   txHash               String
   certIndex            String
   title                String
