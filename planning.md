@@ -24,13 +24,23 @@
 
 ### POST /data/proposal/:proposal_hash
 
+- Ingest into `Proposal` table
+
 ### POST /data/vote/:tx_hash
+
+- Ingest into `OnchainVote` table
 
 ### POST /data/drep/:drep_id
 
+- Ingest into `Drep` table
+
 ### POST /data/cc/:cc_id
 
+- Ingest into `CC` table
+
 ### POST /data/spo/:spo_id
+
+- Ingest into `SPO` table
 
 ## Cron Job
 
