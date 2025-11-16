@@ -25,6 +25,14 @@ export interface EnsureVoterResult {
 }
 
 /**
+ * Gets current epoch from Koios API
+ */
+async function getCurrentEpoch(): Promise<number> {
+  const tip = await koiosGet<KoiosTip[]>("/tip");
+  return tip?.[0]?.epoch_no || 0;
+}
+
+/**
  * Ensures a voter exists in the database, creating or updating as needed
  *
  * @param voterRole - Type of voter (DRep, SPO, or CC)
@@ -57,17 +65,31 @@ async function ensureDrepExists(
     where: { drepId },
   });
 
-  // Fetch latest data from Koios
+  // Fetch DRep info from Koios
   const koiosDrepResponse = await koiosGet<KoiosDrep[]>("/drep_info", {
     _drep_id: drepId,
   });
 
   const koiosDrep = koiosDrepResponse?.[0];
 
+  // Get current epoch for voting power history
+  const currentEpoch = await getCurrentEpoch();
+
+  // Fetch voting power from history endpoint
+  const votingPowerHistory = await koiosGet<KoiosDrepVotingPower[]>(
+    "/drep_voting_power_history",
+    {
+      _epoch_no: currentEpoch,
+      _drep_id: drepId,
+    }
+  );
+
+  const votingPowerLovelace = votingPowerHistory?.[0]?.amount;
+  const votingPower = lovelaceToAda(votingPowerLovelace) || 0;
+
   if (existing) {
-    // Update voting power if available (can change between syncs)
-    if (koiosDrep?.voting_power) {
-      const votingPower = lovelaceToAda(koiosDrep.voting_power) || 0;
+    // Update voting power (can change between syncs)
+    if (votingPowerLovelace) {
       await tx.drep.update({
         where: { drepId },
         data: { votingPower },
@@ -83,8 +105,7 @@ async function ensureDrepExists(
     data: {
       drepId,
       stakeKey: koiosDrep?.drep_id || drepId,
-      votingPower: lovelaceToAda(koiosDrep?.voting_power) || 0,
-      // Add other fields as needed when inline docs are available
+      votingPower,
     },
   });
 
@@ -102,23 +123,40 @@ async function ensureSpoExists(
     where: { poolId },
   });
 
-  // Fetch latest data from Koios
+  // Fetch pool info from Koios
   const koiosSpoResponse = await koiosGet<KoiosSpo[]>("/pool_info", {
     _pool_bech32: poolId,
   });
 
   const koiosSpo = koiosSpoResponse?.[0];
 
+  // Get current epoch for voting power history
+  const currentEpoch = await getCurrentEpoch();
+
+  // Fetch voting power from history endpoint
+  const votingPowerHistory = await koiosGet<KoiosSpoVotingPower[]>(
+    "/pool_voting_power_history",
+    {
+      _epoch_no: currentEpoch,
+      _pool_bech32: poolId,
+    }
+  );
+
+  const votingPowerLovelace = votingPowerHistory?.[0]?.amount;
+  const votingPower = lovelaceToAda(votingPowerLovelace) || 0;
+
+  // Get pool name from meta_url or meta_json
+  const poolName = await getPoolName(koiosSpo);
+
   if (existing) {
     // Update voting power and other mutable fields
-    if (koiosSpo?.voting_power) {
-      const votingPower = lovelaceToAda(koiosSpo.voting_power) || 0;
+    if (votingPowerLovelace) {
       await tx.sPO.update({
         where: { poolId },
         data: {
           votingPower,
-          poolName: koiosSpo.pool_name,
-          ticker: koiosSpo.ticker,
+          poolName,
+          ticker: koiosSpo?.ticker,
         },
       });
       return { voterId: existing.id, created: false, updated: true };
@@ -131,10 +169,9 @@ async function ensureSpoExists(
   const newSpo = await tx.sPO.create({
     data: {
       poolId,
-      poolName: koiosSpo?.pool_name,
+      poolName,
       ticker: koiosSpo?.ticker,
-      votingPower: lovelaceToAda(koiosSpo?.voting_power) || 0,
-      // Add other fields as needed when inline docs are available
+      votingPower,
     },
   });
 
@@ -142,10 +179,33 @@ async function ensureSpoExists(
 }
 
 /**
+ * Gets pool name from meta_json or fetches from meta_url
+ */
+async function getPoolName(koiosSpo: KoiosSpo | undefined): Promise<string | null> {
+  if (!koiosSpo) return null;
+
+  // Try meta_json first
+  if (koiosSpo.meta_json?.name) {
+    return koiosSpo.meta_json.name;
+  }
+
+  // Fallback to fetching from meta_url
+  if (koiosSpo.meta_url) {
+    try {
+      const axios = (await import("axios")).default;
+      const response = await axios.get(koiosSpo.meta_url, { timeout: 10000 });
+      return response.data?.name || null;
+    } catch (error) {
+      console.error(`Failed to fetch pool meta_url: ${koiosSpo.meta_url}`, error);
+    }
+  }
+
+  return null;
+}
+
+/**
  * Ensures a CC member exists, creating if needed
- *
- * Note: Constitutional Committee data may need to be extracted from
- * vote metadata or a different Koios endpoint once documented.
+ * Fetches from /committee_info and /committee_votes endpoints
  */
 async function ensureCcExists(
   ccId: string,
@@ -155,21 +215,87 @@ async function ensureCcExists(
     where: { ccId },
   });
 
+  // Fetch committee info from Koios
+  const committeeInfo = await koiosGet<KoiosCommitteeInfo[]>("/committee_info");
+
+  // Find this specific CC member by cc_hot_id
+  const ccMember = committeeInfo?.[0]?.members?.find(
+    (member) => member.cc_hot_id === ccId
+  );
+
+  // Get current epoch to determine status
+  const currentEpoch = await getCurrentEpoch();
+
+  // Determine status based on expiration_epoch
+  let status = "active";
+  if (ccMember?.expiration_epoch && ccMember.expiration_epoch <= currentEpoch) {
+    status = "expired";
+  }
+
+  // Get member name from committee_votes meta_url
+  const memberName = await getCcMemberName(ccId);
+
   if (existing) {
+    // Update CC member details
+    if (ccMember) {
+      await tx.cC.update({
+        where: { ccId },
+        data: {
+          coldCredential: ccMember.cc_cold_id,
+          status,
+          memberName,
+        },
+      });
+      return { voterId: existing.id, created: false, updated: true };
+    }
+
     return { voterId: existing.id, created: false, updated: false };
   }
 
-  // TODO: Update this when CC data source is confirmed
-  // For now, create with minimal data
+  // Create new CC member
   const newCc = await tx.cC.create({
     data: {
       ccId,
-      hotCredential: ccId, // May need to parse this differently
-      // Add other fields when CC endpoint/structure is documented
+      hotCredential: ccMember?.cc_hot_id || ccId,
+      coldCredential: ccMember?.cc_cold_id,
+      status,
+      memberName,
     },
   });
 
   return { voterId: newCc.id, created: true, updated: false };
+}
+
+/**
+ * Gets CC member name from committee_votes meta_url
+ */
+async function getCcMemberName(ccHotId: string): Promise<string | null> {
+  try {
+    const committeeVotes = await koiosGet<Array<{
+      cc_hot_id: string;
+      meta_url?: string | null;
+    }>>("/committee_votes", {
+      _cc_hot_id: ccHotId,
+    });
+
+    const vote = committeeVotes?.[0];
+    if (!vote?.meta_url) return null;
+
+    // Fetch meta_url to get authors[].name
+    const axios = (await import("axios")).default;
+    const response = await axios.get(vote.meta_url, { timeout: 10000 });
+    const metaData = response.data;
+
+    // Get name from authors array
+    if (metaData?.authors && Array.isArray(metaData.authors) && metaData.authors.length > 0) {
+      return metaData.authors[0]?.name || null;
+    }
+
+    return null;
+  } catch (error) {
+    console.error(`Failed to fetch CC member name for ${ccHotId}:`, error);
+    return null;
+  }
 }
 
 /**

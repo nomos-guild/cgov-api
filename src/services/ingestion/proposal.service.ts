@@ -97,10 +97,10 @@ export async function ingestProposal(
         },
       });
 
-      // 5. Ingest all votes for this proposal
+      // 7. Ingest all votes for this proposal
       const voteStats = await ingestVotesForProposal(
         proposal.id,
-        proposalHash,
+        koiosProposal.proposal_id,
         tx
       );
 

@@ -103,11 +103,16 @@ async function ingestSingleVote(
       : VoteType.ABSTAIN;
 
   // 4. Prepare foreign key IDs based on voter type
-  const drepId = voterType === VoterType.DREP ? voterResult.voterId : null;
-  const spoId = voterType === VoterType.SPO ? voterResult.voterId : null;
-  const ccId = voterType === VoterType.CC ? voterResult.voterId : null;
+  const drepId: string | null = voterType === VoterType.DREP ? voterResult.voterId : null;
+  const spoId: string | null = voterType === VoterType.SPO ? voterResult.voterId : null;
+  const ccId: string | null = voterType === VoterType.CC ? voterResult.voterId : null;
 
-  // 5. Check if vote already exists
+  // 5. Get voter's voting power for this vote
+  const voter = await getVoterWithPower(voterType, voterResult.voterId, tx);
+  const votingPowerAda = voter?.votingPower || null;
+  const votingPower = votingPowerAda ? String(Math.round(votingPowerAda * 1_000_000)) : null;
+
+  // 6. Check if vote already exists
   const existingVote = await tx.onchainVote.findUnique({
     where: {
       proposalId_voterType_drepId_spoId_ccId: {
@@ -120,7 +125,7 @@ async function ingestSingleVote(
     },
   });
 
-  // 6. Upsert the vote
+  // 7. Upsert the vote
   await tx.onchainVote.upsert({
     where: {
       proposalId_voterType_drepId_spoId_ccId: {
@@ -136,8 +141,8 @@ async function ingestSingleVote(
       proposalId: proposalDbId,
       vote: voteType,
       voterType,
-      votingPower: koiosVote.meta_url,  // Note: voting power comes from voting_power_history API
-      votingPowerAda: null, // Will be fetched from voting power history
+      votingPower,
+      votingPowerAda,
       anchorUrl: koiosVote.meta_url,
       anchorHash: koiosVote.meta_hash,
       votedAt: koiosVote.block_time
@@ -148,8 +153,10 @@ async function ingestSingleVote(
       ccId,
     },
     update: {
-      // Update vote type in case it changed
+      // Update vote type and voting power in case they changed
       vote: voteType,
+      votingPower,
+      votingPowerAda,
       anchorUrl: koiosVote.meta_url,
       anchorHash: koiosVote.meta_hash,
     },
@@ -157,6 +164,23 @@ async function ingestSingleVote(
 
   // Update stats
   existingVote ? stats.votesUpdated++ : stats.votesIngested++;
+}
+
+/**
+ * Gets voter with their voting power
+ */
+async function getVoterWithPower(
+  voterType: VoterType,
+  voterId: string,
+  tx: Prisma.TransactionClient
+): Promise<{ votingPower: number } | null> {
+  if (voterType === VoterType.DREP) {
+    return await tx.drep.findUnique({ where: { id: voterId }, select: { votingPower: true } });
+  } else if (voterType === VoterType.SPO) {
+    return await tx.sPO.findUnique({ where: { id: voterId }, select: { votingPower: true } });
+  }
+  // CC members don't have voting power tracked
+  return null;
 }
 
 /**
