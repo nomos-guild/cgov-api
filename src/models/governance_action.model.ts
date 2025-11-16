@@ -56,9 +56,9 @@ export type GovernanceActionType = "All" | "Info" | "Treasury" | "Constitution";
 export type VoteType = "All" | "Yes" | "No" | "Abstain";
 
 export interface NCLData {
-  year: string;
-  currentValue: string;
-  targetValue: string;
+  year: number;
+  currentValue: number;
+  targetValue: number;
 }
 
 export interface ProposalSummary {

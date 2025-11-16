@@ -27,4 +27,28 @@ const router = express.Router();
  */
 router.get("/", placeholderGet);
 
+/**
+ * @openapi
+ * /overview/proposals:
+ *   get:
+ *     summary: Get governance proposals list
+ *     description: Retrieves a list of governance action proposals
+ *     tags:
+ *       - Overview
+ *     responses:
+ *       200:
+ *         description: Successfully retrieved proposals list
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/GetProposalListReponse'
+ *       500:
+ *         description: Server error
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ */
+router.get("/proposals", placeholderGet);
+
 export default router;

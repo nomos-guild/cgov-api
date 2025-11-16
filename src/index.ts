@@ -8,6 +8,7 @@ import fs from "fs";
 import dataRouter from "./routes/data.route";
 import userRouter from "./routes/user.route";
 import overviewRouter from "./routes/overview.route";
+import proposalRouter from "./routes/proposal.route";
 
 dotenv.config();
 
@@ -29,6 +30,7 @@ if (fs.existsSync(swaggerPath)) {
 app.use("/data", dataRouter);
 app.use("/user", userRouter);
 app.use("/overview", overviewRouter);
+app.use("/proposal", proposalRouter);
 
 // Error handling middleware
 app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
