@@ -347,7 +347,7 @@
  *           example: 500
  *         votes:
  *           type: array
- *           description: List of individual votes
+ *           description: List of individual votes (DRep and SPO only)
  *           items:
  *             type: object
  *             properties:
@@ -362,7 +362,7 @@
  *                 example: "drep_123"
  *               voterName:
  *                 type: string
- *                 description: Voter name
+ *                 description: Voter name (optional)
  *                 example: "John Doe"
  *               vote:
  *                 type: string
@@ -371,27 +371,23 @@
  *                 example: "Yes"
  *               votingPower:
  *                 type: string
- *                 description: Voting power
- *                 example: "1000000"
- *               votingPowerAda:
- *                 type: number
- *                 description: Voting power in ADA
- *                 example: 1000000
+ *                 description: Voting power in lovelace (optional)
+ *                 example: "1500000000000"
  *               anchorUrl:
  *                 type: string
- *                 description: Anchor URL for vote metadata
+ *                 description: Anchor URL for vote metadata (optional)
  *                 example: "https://example.com/vote-metadata"
  *               anchorHash:
  *                 type: string
- *                 description: Hash of the anchor
+ *                 description: Hash of the anchor (optional)
  *                 example: "abc123def456"
  *               votedAt:
  *                 type: string
- *                 description: Timestamp when vote was cast
+ *                 description: Timestamp when vote was cast (ISO 8601 format)
  *                 example: "2024-01-15T10:30:00Z"
  *         ccVotes:
  *           type: array
- *           description: Constitutional Committee votes
+ *           description: Constitutional Committee votes (optional)
  *           items:
  *             type: object
  *             properties:
@@ -406,7 +402,7 @@
  *                 example: "cc_123"
  *               voterName:
  *                 type: string
- *                 description: Voter name
+ *                 description: Voter name (optional)
  *                 example: "Jane Smith"
  *               vote:
  *                 type: string
@@ -415,23 +411,19 @@
  *                 example: "Yes"
  *               votingPower:
  *                 type: string
- *                 description: Voting power
+ *                 description: Voting power in lovelace (optional)
  *                 example: "1"
- *               votingPowerAda:
- *                 type: number
- *                 description: Voting power in ADA
- *                 example: 1
  *               anchorUrl:
  *                 type: string
- *                 description: Anchor URL for vote metadata
+ *                 description: Anchor URL for vote metadata (optional)
  *                 example: "https://example.com/cc-vote-metadata"
  *               anchorHash:
  *                 type: string
- *                 description: Hash of the anchor
+ *                 description: Hash of the anchor (optional)
  *                 example: "xyz789ghi012"
  *               votedAt:
  *                 type: string
- *                 description: Timestamp when vote was cast
+ *                 description: Timestamp when vote was cast (ISO 8601 format)
  *                 example: "2024-01-15T11:00:00Z"
  *     ErrorResponse:
  *       type: object
