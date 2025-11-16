@@ -1,5 +1,5 @@
 import express from "express";
-import { placeholderGet } from "../controllers";
+import { overviewController } from "../controllers";
 
 const router = express.Router();
 
@@ -25,7 +25,7 @@ const router = express.Router();
  *             schema:
  *               $ref: '#/components/schemas/ErrorResponse'
  */
-router.get("/", placeholderGet);
+router.get("/", overviewController.getOverviewSummary);
 
 /**
  * @openapi
@@ -49,6 +49,6 @@ router.get("/", placeholderGet);
  *             schema:
  *               $ref: '#/components/schemas/ErrorResponse'
  */
-router.get("/proposals", placeholderGet);
+router.get("/proposals", overviewController.getOverviewProposals);
 
 export default router;
