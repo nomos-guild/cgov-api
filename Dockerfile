@@ -1,21 +1,47 @@
-FROM node:18
+# Use Node.js 22 Alpine for smaller image size
+FROM node:22-alpine AS builder
 
-# Working Dir
+# Working directory
 WORKDIR /usr/src/app
 
-# Copy Package Json
-COPY package.json yarn.lock* ./
+# Copy package files
+COPY package.json package-lock.json* ./
 
-# Install Files
-RUN yarn install
+# Install dependencies (including devDependencies for build)
+RUN npm ci
 
-# Compile typescript
-RUN yarn add -D typescript
-
-# Copy Source Files
+# Copy source files and prisma schema
 COPY . .
 
-# Start
-EXPOSE 3000
+# Generate Prisma Client
+RUN npx prisma generate
 
-CMD ["yarn", "start"]
+# Build TypeScript
+RUN npx tsc
+
+# Production stage
+FROM node:22-alpine
+
+WORKDIR /usr/src/app
+
+# Copy package files
+COPY package.json package-lock.json* ./
+
+# Install production dependencies only
+RUN npm ci --omit=dev
+
+# Copy built files from builder
+COPY --from=builder /usr/src/app/.build ./.build
+COPY --from=builder /usr/src/app/node_modules/.prisma ./node_modules/.prisma
+
+# Copy prisma schema for migrations
+COPY prisma ./prisma
+
+# Cloud Run sets PORT environment variable
+ENV NODE_ENV=production
+
+# Expose port (Cloud Run will override this)
+EXPOSE 8080
+
+# Start the application
+CMD ["node", ".build/index.js"]

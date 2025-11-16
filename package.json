@@ -2,16 +2,20 @@
   "name": "express-csl",
   "version": "1.0.0",
   "main": "src/index.ts",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "scripts": {
     "dev": "nodemon src/index.ts",
-    "start": "tsc && node .build/index.js",
+    "build": "tsc",
+    "start": "node .build/index.js",
+    "start:prod": "npm run build && npm start",
     "test:endpoints": "PORT=3001 jest --runInBand --testMatch='**/controller.test.ts' --forceExit",
     "test:validation": "PORT=3002 jest --runInBand --testMatch='**/validation.test.ts' --forceExit",
     "test:businessLogic": "PORT=3003 jest --runInBand --testMatch='**/routes.test.ts' --forceExit",
-    "test": "concurrently \"yarn test:endpoints\" \"yarn test:validation\" \"yarn test:businessLogic\"",
+    "test": "concurrently \"npm run test:endpoints\" \"npm run test:validation\" \"npm run test:businessLogic\"",
     "swagger:generate": "node swagger-generator.js",
-    "db:seed": "ts-node prisma/seed.ts"
+    "db:seed": "ts-node prisma/seed.ts",
+    "db:migrate": "npx prisma migrate deploy",
+    "db:generate": "npx prisma generate"
   },
   "prisma": {
     "seed": "ts-node prisma/seed.ts"
