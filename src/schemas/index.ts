@@ -33,6 +33,21 @@
  *     SignInResponse:
  *       type: object
  *       properties: {}
+ *     GetNCLDataResponse:
+ *       type: object
+ *       properties:
+ *         year:
+ *           type: string
+ *           description: Year of the NCL data
+ *           example: "2024"
+ *         currentValue:
+ *           type: string
+ *           description: Current NCL value
+ *           example: "1234.56"
+ *         targetValue:
+ *           type: string
+ *           description: Target NCL value
+ *           example: "5000.00"
  *     ErrorResponse:
  *       type: object
  *       properties:
