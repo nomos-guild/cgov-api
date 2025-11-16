@@ -5,7 +5,7 @@
 
 import { PrismaClient, ProposalStatus, GovernanceType } from "@prisma/client";
 import { koiosGet } from "../koios";
-import { ingestVotesForProposal, VoteIngestionStats } from "./vote.service";
+import { ingestVotesForProposal, VoteIngestionStats, clearVoteCache } from "./vote.service";
 import { withRetry } from "./utils";
 import type { KoiosProposal } from "../../types/koios.types";
 
@@ -168,6 +168,9 @@ export async function ingestProposal(
 export async function syncAllProposals(): Promise<SyncAllProposalsResult> {
   console.log("[Proposal Sync] Starting sync of all proposals...");
 
+  // Clear vote cache to ensure fresh data
+  clearVoteCache();
+
   // 1. Fetch all proposals from Koios
   const allProposals = await koiosGet<KoiosProposal[]>("/proposal_list");
 
@@ -327,8 +330,14 @@ async function extractProposalMetadata(proposal: KoiosProposal): Promise<{
         rationale: metaData?.body?.rationale || null,
         metadata: JSON.stringify(metaData),
       };
-    } catch (error) {
-      console.error(`Failed to fetch meta_url: ${proposal.meta_url}`, error);
+    } catch (error: any) {
+      const status = error.response?.status;
+      const errorMsg = status === 404
+        ? `Metadata URL not found (404): ${proposal.meta_url}`
+        : `Failed to fetch metadata from ${proposal.meta_url}`;
+
+      console.warn(`[Metadata] ${errorMsg}`);
+      // Continue with default values instead of failing
     }
   }
 

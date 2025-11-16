@@ -11,6 +11,9 @@ import type { KoiosVote } from "../../types/koios.types";
 
 const prisma = new PrismaClient();
 
+// Cache all votes at module level to avoid fetching multiple times during sync
+let cachedVotes: KoiosVote[] | null = null;
+
 /**
  * Statistics for vote ingestion
  */
@@ -19,6 +22,13 @@ export interface VoteIngestionStats {
   votesUpdated: number;
   votersCreated: { dreps: number; spos: number; ccs: number };
   votersUpdated: { dreps: number; spos: number; ccs: number };
+}
+
+/**
+ * Clears the vote cache - should be called at the start of each sync
+ */
+export function clearVoteCache() {
+  cachedVotes = null;
 }
 
 /**
@@ -42,11 +52,41 @@ export async function ingestVotesForProposal(
   };
 
   try {
-    // Fetch ALL votes from Koios (API doesn't support filtering)
-    const allVotes = await koiosGet<KoiosVote[]>("/vote_list");
+    // Fetch ALL votes from Koios with pagination (use cache if available)
+    if (!cachedVotes) {
+      let allVotes: KoiosVote[] = [];
+      let offset = 0;
+      const limit = 1000; // Max limit per request
+      let hasMore = true;
+
+      console.log(`[Vote Ingestion] Fetching all votes with pagination...`);
+
+      while (hasMore) {
+        const batch = await koiosGet<KoiosVote[]>("/vote_list", {
+          limit,
+          offset,
+        });
+
+        if (!batch || batch.length === 0) {
+          hasMore = false;
+        } else {
+          allVotes = allVotes.concat(batch);
+          offset += batch.length;
+          console.log(`[Vote Ingestion]   Fetched ${allVotes.length} votes so far...`);
+
+          if (batch.length < limit) {
+            // Last batch was smaller than limit, no more pages
+            hasMore = false;
+          }
+        }
+      }
+
+      cachedVotes = allVotes;
+      console.log(`[Vote Ingestion] ✓ Fetched ${cachedVotes.length} total votes from Koios`);
+    }
 
     // Filter in memory to find votes for this specific proposal
-    const koiosVotes = allVotes?.filter((vote) => vote.proposal_id === proposalId) || [];
+    const koiosVotes = cachedVotes.filter((vote) => vote.proposal_id === proposalId);
 
     if (koiosVotes.length === 0) {
       console.log(`[Vote Ingestion] No votes found for proposal ${proposalId}`);
@@ -93,6 +133,17 @@ async function ingestSingleVote(
     if (koiosVote.voter_role === "DRep") stats.votersUpdated.dreps++;
     else if (koiosVote.voter_role === "SPO") stats.votersUpdated.spos++;
     else stats.votersUpdated.ccs++;
+  }
+
+  // 1b. For CC votes, update member name from vote metadata
+  if (koiosVote.voter_role === "ConstitutionalCommittee" && koiosVote.meta_json?.authors) {
+    const memberName = koiosVote.meta_json.authors[0]?.name;
+    if (memberName) {
+      await tx.cC.update({
+        where: { id: voterResult.voterId },
+        data: { memberName },
+      });
+    }
   }
 
   // 2. Map Koios voter role to Prisma VoterType enum

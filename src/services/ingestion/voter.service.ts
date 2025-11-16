@@ -219,7 +219,10 @@ async function getPoolMeta(
         ticker = meta?.ticker || null;
       }
     } catch (error) {
-      console.error(`Failed to fetch pool meta_url: ${koiosSpo.meta_url}`, error);
+      console.error(
+        `Failed to fetch pool meta_url: ${koiosSpo.meta_url}`,
+        error
+      );
     }
   }
 
@@ -265,8 +268,8 @@ async function ensureCcExists(
     status = "expired";
   }
 
-  // Get member name from committee_votes meta_url
-  const memberName = await getCcMemberName(ccId);
+  // Note: memberName will be populated later when we process their first vote
+  // The vote metadata contains the author name which we'll use to update the CC member
 
   // Create new CC member
   const newCc = await tx.cC.create({
@@ -275,49 +278,11 @@ async function ensureCcExists(
       hotCredential: ccMember?.cc_hot_id || ccId,
       coldCredential: ccMember?.cc_cold_id,
       status,
-      memberName,
+      memberName: null, // Will be updated when processing votes
     },
   });
 
   return { voterId: newCc.id, created: true, updated: false };
-}
-
-/**
- * Gets CC member name from committee_votes meta_url
- */
-async function getCcMemberName(ccHotId: string): Promise<string | null> {
-  try {
-    // Fetch all committee votes and filter in memory
-    const allCommitteeVotes = await koiosGet<Array<{
-      cc_hot_id: string;
-      meta_url?: string | null;
-    }>>("/committee_votes");
-
-    const vote = allCommitteeVotes?.find((v) => v.cc_hot_id === ccHotId);
-    if (!vote?.meta_url) return null;
-
-    // Convert IPFS URLs to use an HTTP gateway
-    let fetchUrl = vote.meta_url;
-    if (vote.meta_url.startsWith('ipfs://')) {
-      const ipfsHash = vote.meta_url.replace('ipfs://', '');
-      fetchUrl = `https://ipfs.io/ipfs/${ipfsHash}`;
-    }
-
-    // Fetch meta_url to get authors[].name
-    const axios = (await import("axios")).default;
-    const response = await axios.get(fetchUrl, { timeout: 10000 });
-    const metaData = response.data;
-
-    // Get name from authors array
-    if (metaData?.authors && Array.isArray(metaData.authors) && metaData.authors.length > 0) {
-      return metaData.authors[0]?.name || null;
-    }
-
-    return null;
-  } catch (error) {
-    console.error(`Failed to fetch CC member name for ${ccHotId}:`, error);
-    return null;
-  }
 }
 
 /**
@@ -343,9 +308,6 @@ export async function ingestSpo(
 /**
  * Directly ingest a CC member (for POST /data/cc/:cc_id endpoint)
  */
-export async function ingestCc(
-  ccId: string,
-  prisma: Prisma.TransactionClient
-) {
+export async function ingestCc(ccId: string, prisma: Prisma.TransactionClient) {
   return ensureCcExists(ccId, prisma);
 }

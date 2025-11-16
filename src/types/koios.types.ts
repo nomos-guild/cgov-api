@@ -43,6 +43,13 @@ export interface KoiosVote {
   vote: "Yes" | "No" | "Abstain"; // Maps to OnchainVote.vote
   meta_url?: string | null; // Maps to OnchainVote.anchorUrl
   meta_hash?: string | null; // Maps to OnchainVote.anchorHash
+  meta_json?: {
+    authors?: Array<{
+      name?: string; // For CC votes, this is the member name
+      witness?: any;
+    }>;
+    body?: any;
+  } | null;
   block_time?: number; // Maps to OnchainVote.votedAt (convert to DateTime)
 }
 
@@ -69,12 +76,11 @@ export interface KoiosDrepVotingPower {
 
 /**
  * Pool Info from Koios API
- * Endpoint: GET /pool_info
+ * Endpoint: POST /pool_info
  */
 export interface KoiosSpo {
   pool_id_bech32: string; // Maps to SPO.poolId
   pool_id_hex?: string;
-  ticker?: string; // Maps to SPO.ticker
   meta_url?: string | null; // Fetch this URL to get pool name
   meta_json?: {
     name?: string; // Maps to SPO.poolName
@@ -82,6 +88,7 @@ export interface KoiosSpo {
   } | null;
   active_stake?: string;
   live_stake?: string;
+  voting_power?: string;
 }
 
 /**
