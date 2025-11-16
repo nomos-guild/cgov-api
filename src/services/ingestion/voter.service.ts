@@ -162,15 +162,15 @@ async function ensureSpoExists(
     spoVotingPowerCache.set(cacheKey, votingPower);
   }
 
-  // Get pool name from meta_url or meta_json
-  const poolName = await getPoolName(koiosSpo);
+  // Get pool name and ticker from meta_json or meta_url
+  const { poolName, ticker } = await getPoolMeta(koiosSpo);
 
   // Create new SPO
   const newSpo = await tx.sPO.create({
     data: {
       poolId,
       poolName,
-      ticker: koiosSpo?.ticker,
+      ticker,
       votingPower,
     },
   });
@@ -179,14 +179,22 @@ async function ensureSpoExists(
 }
 
 /**
- * Gets pool name from meta_json or fetches from meta_url
+ * Gets pool name and ticker from meta_json or fetches from meta_url
  */
-async function getPoolName(koiosSpo: KoiosSpo | undefined): Promise<string | null> {
-  if (!koiosSpo) return null;
+async function getPoolMeta(
+  koiosSpo: KoiosSpo | undefined
+): Promise<{ poolName: string | null; ticker: string | null }> {
+  if (!koiosSpo) {
+    return { poolName: null, ticker: null };
+  }
 
-  // Try meta_json first
-  if (koiosSpo.meta_json?.name) {
-    return koiosSpo.meta_json.name;
+  // Start with values from Koios response
+  let poolName: string | null = koiosSpo.meta_json?.name ?? null;
+  let ticker: string | null = koiosSpo.meta_json?.ticker ?? null;
+
+  // If both already present in meta_json, no need to fetch
+  if (poolName && ticker) {
+    return { poolName, ticker };
   }
 
   // Fallback to fetching from meta_url
@@ -194,20 +202,33 @@ async function getPoolName(koiosSpo: KoiosSpo | undefined): Promise<string | nul
     try {
       // Convert IPFS URLs to use an HTTP gateway
       let fetchUrl = koiosSpo.meta_url;
-      if (koiosSpo.meta_url.startsWith('ipfs://')) {
-        const ipfsHash = koiosSpo.meta_url.replace('ipfs://', '');
+      if (koiosSpo.meta_url.startsWith("ipfs://")) {
+        const ipfsHash = koiosSpo.meta_url.replace("ipfs://", "");
         fetchUrl = `https://ipfs.io/ipfs/${ipfsHash}`;
       }
 
       const axios = (await import("axios")).default;
       const response = await axios.get(fetchUrl, { timeout: 10000 });
-      return response.data?.name || null;
+      const meta = response.data;
+
+      // Only fill missing fields from fetched metadata
+      if (!poolName) {
+        poolName = meta?.name || null;
+      }
+      if (!ticker) {
+        ticker = meta?.ticker || null;
+      }
     } catch (error) {
       console.error(`Failed to fetch pool meta_url: ${koiosSpo.meta_url}`, error);
     }
   }
 
-  return null;
+  // Final fallback: use top-level Koios ticker if still missing
+  if (!ticker && koiosSpo.ticker) {
+    ticker = koiosSpo.ticker;
+  }
+
+  return { poolName, ticker };
 }
 
 /**

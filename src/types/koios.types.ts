@@ -78,6 +78,7 @@ export interface KoiosSpo {
   meta_url?: string | null; // Fetch this URL to get pool name
   meta_json?: {
     name?: string; // Maps to SPO.poolName
+    ticker?: string; // Maps to SPO.ticker (preferred source)
   } | null;
   active_stake?: string;
   live_stake?: string;
