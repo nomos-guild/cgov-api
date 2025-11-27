@@ -6,6 +6,9 @@
 import cron from "node-cron";
 import { syncAllProposals } from "../services/ingestion/proposal.service";
 
+// Simple in-process guard to prevent overlapping runs in a single Node process
+let isProposalSyncRunning = false;
+
 /**
  * Starts the proposal sync cron job
  * Schedule is configurable via PROPOSAL_SYNC_SCHEDULE env variable
@@ -38,6 +41,16 @@ export const startProposalSyncJob = () => {
  */
 function startProposalSyncJobWithSchedule(schedule: string) {
   cron.schedule(schedule, async () => {
+    // In-process guard: skip this run if the previous one is still in progress
+    if (isProposalSyncRunning) {
+      const timestamp = new Date().toISOString();
+      console.log(
+        `[${timestamp}] Proposal sync job is still running from a previous trigger. Skipping this run.`
+      );
+      return;
+    }
+
+    isProposalSyncRunning = true;
     const timestamp = new Date().toISOString();
     console.log(`\n[${timestamp}] Starting proposal sync job...`);
 
@@ -59,7 +72,12 @@ function startProposalSyncJobWithSchedule(schedule: string) {
         );
       }
     } catch (error: any) {
-      console.error(`[${timestamp}] Proposal sync job failed:`, error.message);
+      console.error(
+        `[${timestamp}] Proposal sync job failed:`,
+        error.message
+      );
+    } finally {
+      isProposalSyncRunning = false;
     }
   });
 

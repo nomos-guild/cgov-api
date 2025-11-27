@@ -36,7 +36,12 @@ export interface SyncAllProposalsResult {
 
 /**
  * Internal function to ingest proposal data
- * Wrapped with retry logic for transient failures
+ * Wrapped with retry logic for transient failures.
+ *
+ * Note: We intentionally avoid a long-running interactive transaction here.
+ * The proposal row is upserted in a single DB operation, and votes/voters are
+ * ingested in smaller operations so that partial progress is preserved and
+ * retries can safely resume without starting from scratch.
  *
  * @param koiosProposal - Proposal data from Koios API
  * @returns Result with proposal info and vote statistics
@@ -46,90 +51,90 @@ async function ingestProposalData(
 ): Promise<ProposalIngestionResult> {
   // Wrap entire operation in retry logic
   return withRetry(async () => {
-    // Use Prisma transaction to ensure atomicity
-    // Increase timeout to 60 seconds for proposals with many votes
-    return await prisma.$transaction(async (tx) => {
+    // 1. Get current epoch for status calculation
+    const currentEpoch = await getCurrentEpoch();
 
-      // 2. Get current epoch for status calculation
-      const currentEpoch = await getCurrentEpoch();
+    // 2. Map Koios governance type to Prisma enum
+    const governanceActionType = mapGovernanceType(
+      koiosProposal.proposal_type
+    );
 
-      // 3. Map Koios governance type to Prisma enum
-      const governanceActionType = mapGovernanceType(
+    // If Koios sends a proposal_type we don't recognize, log it for debugging
+    if (koiosProposal.proposal_type && !governanceActionType) {
+      console.warn(
+        "[Proposal Ingest] Unmapped proposal_type from Koios:",
         koiosProposal.proposal_type
       );
+    }
 
-      // If Koios sends a proposal_type we don't recognize, log it for debugging
-      if (koiosProposal.proposal_type && !governanceActionType) {
-        console.warn(
-          "[Proposal Ingest] Unmapped proposal_type from Koios:",
-          koiosProposal.proposal_type
-        );
-      }
+    // 3. Derive status from epoch fields
+    const status = deriveProposalStatus(koiosProposal, currentEpoch);
 
-      // 4. Derive status from epoch fields
-      const status = deriveProposalStatus(koiosProposal, currentEpoch);
+    // 4. Extract metadata (from meta_json or fetch from meta_url)
+    const { title, description, rationale, metadata } =
+      await extractProposalMetadata(koiosProposal);
 
-      // 5. Extract metadata (from meta_json or fetch from meta_url)
-      const { title, description, rationale, metadata } = await extractProposalMetadata(koiosProposal);
-
-      // 6. Check if proposal exists to determine if creating or updating
-      const existingProposal = await tx.proposal.findUnique({
-        where: { proposalId: koiosProposal.proposal_id },
-      });
-
-      const isUpdate = !!existingProposal;
-
-      // 7. Upsert proposal
-      const proposal = await tx.proposal.upsert({
-        where: { proposalId: koiosProposal.proposal_id },
-        create: {
-          proposalId: koiosProposal.proposal_id,
-          txHash: koiosProposal.proposal_tx_hash,
-          certIndex: String(koiosProposal.proposal_index),
-          title,
-          description,
-          rationale,
-          governanceActionType,
-          status,
-          submissionEpoch: koiosProposal.proposed_epoch,
-          expiryEpoch: koiosProposal.expired_epoch,
-          metadata,
-        },
-        update: {
-          // Only update mutable fields
-          status,
-          // Backfill governanceActionType when we have a valid mapping
-          ...(governanceActionType !== null && { governanceActionType }),
-          expiryEpoch: koiosProposal.expired_epoch,
-          metadata,
-        },
-      });
-
-      console.log(
-        `[Proposal Ingest] ${isUpdate ? 'Updated' : 'Created'} proposal - ` +
-        `DB ID: ${proposal.id}, proposalId: ${proposal.proposalId}, ` +
-        `type: ${governanceActionType || 'null'}, koios_type: "${koiosProposal.proposal_type}"`
-      );
-
-      // 7. Ingest all votes for this proposal
-      const voteStats = await ingestVotesForProposal(
-        proposal.id,
-        koiosProposal.proposal_id,
-        tx
-      );
-
-      return {
-        success: true,
-        proposal: {
-          id: proposal.id,
-          proposalId: proposal.proposalId,
-          status: proposal.status,
-        },
-        stats: voteStats,
-      };
-    }, {
-      timeout: 300000, // 5 minutes timeout for initial sync with many new voters
+    // 5. Check if proposal exists to determine if creating or updating
+    const existingProposal = await prisma.proposal.findUnique({
+      where: { proposalId: koiosProposal.proposal_id },
     });
+
+    const isUpdate = !!existingProposal;
+
+    // 6. Upsert proposal (single atomic DB operation, no long transaction)
+    const proposal = await prisma.proposal.upsert({
+      where: { proposalId: koiosProposal.proposal_id },
+      create: {
+        proposalId: koiosProposal.proposal_id,
+        txHash: koiosProposal.proposal_tx_hash,
+        certIndex: String(koiosProposal.proposal_index),
+        title,
+        description,
+        rationale,
+        governanceActionType,
+        status,
+        submissionEpoch: koiosProposal.proposed_epoch,
+        expiryEpoch: koiosProposal.expired_epoch,
+        metadata,
+      },
+      update: {
+        // Only update mutable fields
+        status,
+        // Backfill governanceActionType when we have a valid mapping
+        ...(governanceActionType !== null && { governanceActionType }),
+        expiryEpoch: koiosProposal.expired_epoch,
+        metadata,
+      },
+    });
+
+    console.log(
+      `[Proposal Ingest] ${isUpdate ? "Updated" : "Created"} proposal - ` +
+        `DB ID: ${proposal.id}, proposalId: ${proposal.proposalId}, ` +
+        `type: ${governanceActionType || "null"}, koios_type: "${
+          koiosProposal.proposal_type
+        }"`
+    );
+
+    // 7. Ingest all votes for this proposal using the root Prisma client.
+    // This runs outside of a long-lived transaction so that:
+    // - Individual vote/voter inserts can commit as they go.
+    // - If we hit a timeout or other error part-way through, a retry will
+    //   see existing rows and continue without duplicating work.
+    const voteStats = await ingestVotesForProposal(
+      proposal.id,
+      koiosProposal.proposal_id,
+      prisma
+    );
+
+    return {
+      success: true,
+      proposal: {
+        id: proposal.id,
+        proposalId: proposal.proposalId,
+        status: proposal.status,
+      },
+      stats: voteStats,
+    };
   });
 }
 

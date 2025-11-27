@@ -1,7 +1,17 @@
 import axios, { AxiosInstance } from "axios";
-import { withRetry } from "./ingestion/utils";
+import { withRetry, type RetryOptions } from "./ingestion/utils";
 
 const BASE_URL = process.env.KOIOS_BASE_URL || "https://api.koios.rest/api/v1";
+
+// Dedicated retry configuration for Koios API calls.
+// Koios rate limits can be hit during heavy syncs, so we:
+// - Allow more retries
+// - Use slightly longer base/max delays than the generic defaults
+const KOIOS_RETRY_OPTIONS: RetryOptions = {
+  maxRetries: 5,
+  baseDelay: 3000, // 3 seconds
+  maxDelay: 30000, // 30 seconds
+};
 
 /**
  * Creates and configures an Axios instance for Koios API
@@ -45,10 +55,13 @@ export const getKoiosService = (): AxiosInstance => {
 export async function koiosGet<T>(url: string, params?: any): Promise<T> {
   const koios = getKoiosService();
 
-  return withRetry(async () => {
-    const response = await koios.get<T>(url, { params });
-    return response.data;
-  });
+  return withRetry(
+    async () => {
+      const response = await koios.get<T>(url, { params });
+      return response.data;
+    },
+    KOIOS_RETRY_OPTIONS
+  );
 }
 
 /**
@@ -60,8 +73,11 @@ export async function koiosGet<T>(url: string, params?: any): Promise<T> {
 export async function koiosPost<T>(url: string, data?: any): Promise<T> {
   const koios = getKoiosService();
 
-  return withRetry(async () => {
-    const response = await koios.post<T>(url, data);
-    return response.data;
-  });
+  return withRetry(
+    async () => {
+      const response = await koios.post<T>(url, data);
+      return response.data;
+    },
+    KOIOS_RETRY_OPTIONS
+  );
 }

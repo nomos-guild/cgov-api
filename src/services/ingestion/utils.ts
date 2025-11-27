@@ -23,6 +23,10 @@ const DEFAULT_RETRY_OPTIONS: RetryOptions = {
 /**
  * Wraps an async operation with retry logic and exponential backoff
  *
+ * Special handling:
+ * - Treats HTTP 429 (Too Many Requests) as *retryable* even though it's a 4xx
+ * - Respects `Retry-After` header when present for rate-limited responses
+ *
  * @param operation - The async function to execute
  * @param options - Retry configuration options
  * @returns Promise resolving to the operation result
@@ -47,10 +51,18 @@ export async function withRetry<T>(
     } catch (error: any) {
       lastError = error;
 
+      const status = error?.response?.status as number | undefined;
+
       // Don't retry on client errors (4xx) or validation errors
-      if (error.response?.status >= 400 && error.response?.status < 500) {
+      // EXCEPT 429 (Too Many Requests), which we *do* want to retry with backoff
+      if (
+        status &&
+        status >= 400 &&
+        status < 500 &&
+        status !== 429
+      ) {
         console.error(
-          `Non-retryable error (${error.response.status}):`,
+          `Non-retryable error (${status}):`,
           error.message
         );
         throw error;
@@ -62,16 +74,37 @@ export async function withRetry<T>(
           `Operation failed after ${options.maxRetries} retries: ${error.message}`
         );
       }
-
-      // Calculate exponential backoff delay
-      const delay = Math.min(
+      
+      // Calculate delay:
+      // - If 429 and Retry-After header is present, prefer that
+      // - Otherwise, fall back to exponential backoff
+      let delay = Math.min(
         options.baseDelay * Math.pow(2, attempt),
         options.maxDelay
       );
 
-      console.log(
-        `Retry attempt ${attempt + 1}/${options.maxRetries} after ${delay}ms delay...`
-      );
+      if (status === 429) {
+        const retryAfterHeader =
+          error.response?.headers?.["retry-after"] ??
+          error.response?.headers?.["Retry-After"];
+
+        const retryAfterSeconds = retryAfterHeader
+          ? parseInt(retryAfterHeader, 10)
+          : NaN;
+
+        if (!Number.isNaN(retryAfterSeconds) && retryAfterSeconds > 0) {
+          delay = Math.min(retryAfterSeconds * 1000, options.maxDelay);
+        }
+
+        console.warn(
+          `[withRetry] Rate limited (429). Waiting ${delay}ms before retry ` +
+          `(${attempt + 1}/${options.maxRetries})...`
+        );
+      } else {
+        console.log(
+          `Retry attempt ${attempt + 1}/${options.maxRetries} after ${delay}ms delay...`
+        );
+      }
 
       // Wait before retrying
       await new Promise((resolve) => setTimeout(resolve, delay));
