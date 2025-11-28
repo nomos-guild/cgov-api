@@ -44,15 +44,23 @@ export interface SyncAllProposalsResult {
  * retries can safely resume without starting from scratch.
  *
  * @param koiosProposal - Proposal data from Koios API
+ * @param currentEpochOverride - Optional current epoch to reuse across calls
+ * @param minVotesEpochOverride - Optional minimum epoch to fetch votes from
  * @returns Result with proposal info and vote statistics
  */
 async function ingestProposalData(
-  koiosProposal: KoiosProposal
+  koiosProposal: KoiosProposal,
+  currentEpochOverride?: number,
+  minVotesEpochOverride?: number
 ): Promise<ProposalIngestionResult> {
   // Wrap entire operation in retry logic
   return withRetry(async () => {
     // 1. Get current epoch for status calculation
-    const currentEpoch = await getCurrentEpoch();
+    //    Allow caller to provide it so we don't call Koios /tip for every proposal
+    const currentEpoch =
+      typeof currentEpochOverride === "number"
+        ? currentEpochOverride
+        : await getCurrentEpoch();
 
     // 2. Map Koios governance type to Prisma enum
     const governanceActionType = mapGovernanceType(
@@ -123,7 +131,8 @@ async function ingestProposalData(
     const voteStats = await ingestVotesForProposal(
       proposal.id,
       koiosProposal.proposal_id,
-      prisma
+      prisma,
+      minVotesEpochOverride
     );
 
     return {
@@ -160,15 +169,24 @@ export async function ingestProposal(
     throw new Error(`Proposal not found in Koios: ${proposalHash}`);
   }
 
-  // 3. Ingest the proposal data
-  return ingestProposalData(koiosProposal);
+  // 3. Ingest the proposal data (let it fetch current epoch itself) and
+  //    only fetch votes from this proposal's submission epoch onward.
+  return ingestProposalData(koiosProposal, undefined, koiosProposal.proposed_epoch);
 }
 
 /**
- * Syncs all proposals from Koios API
- * Used by cron job to keep database up to date
+ * Syncs proposals from Koios API
+ * Used by cron job to keep database up to date.
  *
- * @returns Summary of sync operation
+ * Behavior:
+ * - On first run (empty DB): ingests all proposals from Koios.
+ * - On subsequent runs: only processes
+ *   - proposals that do not yet exist in the DB, and
+ *   - proposals that are currently ACTIVE in the DB (to keep their status/votes up to date).
+ *
+ * This significantly reduces Koios load while still converging the DB state.
+ *
+ * @returns Summary of sync operation for proposals that were actually processed.
  */
 export async function syncAllProposals(): Promise<SyncAllProposalsResult> {
   console.log("[Proposal Sync] Starting sync of all proposals...");
@@ -176,36 +194,91 @@ export async function syncAllProposals(): Promise<SyncAllProposalsResult> {
   // Clear vote cache to ensure fresh data
   clearVoteCache();
 
-  // 1. Fetch all proposals from Koios
+  // 1. Snapshot existing proposals from DB (IDs + status)
+  const existingProposals = await prisma.proposal.findMany({
+    select: { proposalId: true, status: true },
+  });
+
+  const existingIds = new Set(existingProposals.map((p) => p.proposalId));
+  const activeIdsInDb = new Set(
+    existingProposals
+      .filter((p) => p.status === ProposalStatus.ACTIVE)
+      .map((p) => p.proposalId)
+  );
+
+  // 2. Fetch all proposals from Koios (API does not support server-side filtering)
   const allProposals = await koiosGet<KoiosProposal[]>("/proposal_list");
 
+  if (!allProposals || allProposals.length === 0) {
+    console.log("[Proposal Sync] No proposals found in Koios");
+    return {
+      total: 0,
+      success: 0,
+      failed: 0,
+      errors: [],
+    };
+  }
+
+  // 3. Decide which proposals to (re)ingest:
+  //    - Any proposal missing from DB
+  //    - Any proposal that is ACTIVE in the DB (so its status/votes stay fresh)
+  const proposalsToProcess = allProposals.filter((p) => {
+    const proposalId = p.proposal_id;
+    if (!existingIds.has(proposalId)) {
+      return true; // New proposal
+    }
+    if (activeIdsInDb.has(proposalId)) {
+      return true; // Still active in DB, keep it updated
+    }
+    return false; // Historical proposal that can remain as-is
+  });
+
   const results: SyncAllProposalsResult = {
-    total: allProposals?.length || 0,
+    // "total" now reflects how many proposals we are actually processing this run
+    total: proposalsToProcess.length,
     success: 0,
     failed: 0,
     errors: [],
   };
 
-  if (!allProposals || allProposals.length === 0) {
-    console.log("[Proposal Sync] No proposals found in Koios");
+  if (results.total === 0) {
+    console.log(
+      "[Proposal Sync] No new or active proposals to sync - database is up to date for historical proposals"
+    );
     return results;
   }
 
-  console.log(`[Proposal Sync] Found ${results.total} proposals to sync`);
+  console.log(
+    `[Proposal Sync] Found ${results.total} proposals to sync (new or currently ACTIVE in DB)`
+  );
 
-  // 2. Sort proposals by submission epoch (oldest first) for consistent DB ordering
-  const sortedProposals = allProposals.sort((a, b) => {
+  // 4. Sort proposals by submission epoch (oldest first) for consistent DB ordering
+  const sortedProposals = proposalsToProcess.sort((a, b) => {
     const epochA = a.proposed_epoch || 0;
     const epochB = b.proposed_epoch || 0;
     return epochA - epochB;
   });
 
-  console.log(`[Proposal Sync] Processing proposals from epoch ${sortedProposals[0]?.proposed_epoch} to ${sortedProposals[sortedProposals.length - 1]?.proposed_epoch}`);
+  console.log(
+    `[Proposal Sync] Processing proposals from epoch ${sortedProposals[0]?.proposed_epoch} to ${
+      sortedProposals[sortedProposals.length - 1]?.proposed_epoch
+    }`
+  );
 
-  // 3. Process each proposal sequentially
+  // Determine the earliest proposal submission epoch among the proposals
+  // we are actually processing. Votes for these proposals cannot exist
+  // before this epoch, so we can safely avoid fetching older votes.
+  const earliestProposalEpoch = sortedProposals[0]?.proposed_epoch;
+  const minVotesEpoch =
+    typeof earliestProposalEpoch === "number" ? earliestProposalEpoch : undefined;
+
+  // 5. Get current epoch once for the whole run and reuse it
+  const currentEpoch = await getCurrentEpoch();
+
+  // 6. Process each proposal sequentially
   for (const koiosProposal of sortedProposals) {
     try {
-      await ingestProposalData(koiosProposal);
+      await ingestProposalData(koiosProposal, currentEpoch, minVotesEpoch);
       results.success++;
       console.log(
         `[Proposal Sync] ✓ Synced ${koiosProposal.proposal_tx_hash} (${results.success}/${results.total})`
