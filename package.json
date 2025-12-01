@@ -5,7 +5,8 @@
   "license": "MIT",
   "scripts": {
     "dev": "nodemon src/index.ts",
-    "start": "tsc && node .build/index.js",
+    "build": "tsc",
+    "start": "node .build/index.js",
     "test:endpoints": "PORT=3001 jest --runInBand --testMatch='**/controller.test.ts' --forceExit",
     "test:validation": "PORT=3002 jest --runInBand --testMatch='**/validation.test.ts' --forceExit",
     "test:businessLogic": "PORT=3003 jest --runInBand --testMatch='**/routes.test.ts' --forceExit",

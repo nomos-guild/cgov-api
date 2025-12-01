@@ -40,8 +40,14 @@ app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
   res.status(statusCode).json({ error: err.message });
 });
 
-// Start cron jobs
-startAllJobs();
+// Start cron jobs only if not disabled
+// When running in separate containers, set DISABLE_CRON_IN_API=true
+if (process.env.DISABLE_CRON_IN_API !== "true") {
+  console.log("Starting cron jobs in API process...");
+  startAllJobs();
+} else {
+  console.log("Cron jobs disabled in API process (running in separate service)");
+}
 
 // Start the server
 const port = parseInt(process.env.PORT || "3000");
