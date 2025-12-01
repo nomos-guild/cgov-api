@@ -35,14 +35,18 @@ export function clearVoteCache() {
  * Ingests all votes for a specific proposal
  *
  * @param proposalDbId - Database ID of the proposal
- * @param proposalHash - Transaction hash of the proposal
+ * @param proposalId - Koios proposal_id
  * @param tx - Prisma transaction client
+ * @param minEpoch - Optional minimum epoch to fetch votes from (inclusive).
+ *                   Used to avoid fetching historical votes that cannot belong
+ *                   to the proposals we are currently syncing.
  * @returns Statistics about votes and voters created/updated
  */
 export async function ingestVotesForProposal(
   proposalDbId: number,
   proposalId: string,
-  tx: Prisma.TransactionClient
+  tx: Prisma.TransactionClient,
+  minEpoch?: number
 ): Promise<VoteIngestionStats> {
   const stats: VoteIngestionStats = {
     votesIngested: 0,
@@ -52,20 +56,36 @@ export async function ingestVotesForProposal(
   };
 
   try {
-    // Fetch ALL votes from Koios with pagination (use cache if available)
+    // Fetch votes from Koios with pagination (use cache if available)
     if (!cachedVotes) {
       let allVotes: KoiosVote[] = [];
       let offset = 0;
       const limit = 1000; // Max limit per request
       let hasMore = true;
 
-      console.log(`[Vote Ingestion] Fetching all votes with pagination...`);
+      console.log(
+        `[Vote Ingestion] Fetching votes with pagination${
+          typeof minEpoch === "number" ? ` from epoch >= ${minEpoch}` : ""
+        }...`
+      );
 
       while (hasMore) {
-        const batch = await koiosGet<KoiosVote[]>("/vote_list", {
+        // Koios exposes horizontal filtering via query params (PostgREST style).
+        // We rely on an `epoch_no` column being available on /vote_list so that
+        // we can avoid fetching votes from epochs that are strictly before the
+        // earliest proposal epoch we care about in this sync run.
+        const params: any = {
           limit,
           offset,
-        });
+        };
+
+        if (typeof minEpoch === "number") {
+          // Fetch only votes where epoch_no >= minEpoch
+          // Example: /vote_list?epoch_no=gte.597&limit=1000&offset=0
+          params.epoch_no = `gte.${minEpoch}`;
+        }
+
+        const batch = await koiosGet<KoiosVote[]>("/vote_list", params);
 
         if (!batch || batch.length === 0) {
           hasMore = false;
