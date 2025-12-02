@@ -162,7 +162,7 @@ CREATE UNIQUE INDEX "CC_ccId_key" ON "CC"("ccId");
 CREATE UNIQUE INDEX "CC_userId_key" ON "CC"("userId");
 
 -- CreateIndex
-CREATE UNIQUE INDEX "Proposal_postId_key" ON "Proposal"("postId");
+CREATE UNIQUE INDEX "Proposal_proposalId_key" ON "Proposal"("proposalId");
 
 -- CreateIndex
 CREATE UNIQUE INDEX "Proposal_txHash_certIndex_key" ON "Proposal"("txHash", "certIndex");
