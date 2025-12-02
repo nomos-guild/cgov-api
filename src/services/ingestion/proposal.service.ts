@@ -117,7 +117,7 @@ async function ingestProposalData(
 
     console.log(
       `[Proposal Ingest] ${isUpdate ? "Updated" : "Created"} proposal - ` +
-        `DB ID: ${proposal.id}, proposalId: ${proposal.proposalId}, ` +
+        `proposalId: ${proposal.proposalId}, ` +
         `type: ${governanceActionType || "null"}, koios_type: "${
           koiosProposal.proposal_type
         }"`
@@ -129,8 +129,7 @@ async function ingestProposalData(
     // - If we hit a timeout or other error part-way through, a retry will
     //   see existing rows and continue without duplicating work.
     const voteStats = await ingestVotesForProposal(
-      proposal.id,
-      koiosProposal.proposal_id,
+      proposal.proposalId,
       prisma,
       minVotesEpochOverride
     );

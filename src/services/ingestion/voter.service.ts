@@ -74,7 +74,7 @@ async function ensureDrepExists(
   // If voter exists, just return it without updating (optimization for initial sync)
   // Voting power updates can be done in a separate background job
   if (existing) {
-    return { voterId: existing.id, created: false, updated: false };
+    return { voterId: existing.drepId, created: false, updated: false };
   }
 
   // Check cache first, then fetch if not cached
@@ -105,16 +105,57 @@ async function ensureDrepExists(
     drepVotingPowerCache.set(cacheKey, votingPower);
   }
 
+  // Fetch name, payment address, and icon URL from drep_updates endpoint
+  // Note: these are nested in meta_json.body
+  let name: string | undefined;
+  let paymentAddress: string | undefined;
+  let iconUrl: string | undefined;
+  try {
+    const drepUpdates = await koiosGet<
+      Array<{
+        meta_json?: {
+          body?: {
+            givenName?: string;
+            paymentAddress?: string;
+            image?: {
+              contentUrl?: string;
+            };
+          };
+        } | null;
+      }>
+    >("/drep_updates", { _drep_id: drepId });
+    // Find the first record that has metadata in meta_json
+    for (const update of drepUpdates || []) {
+      if (update.meta_json?.body) {
+        if (!name && update.meta_json.body.givenName) {
+          name = update.meta_json.body.givenName;
+        }
+        if (!paymentAddress && update.meta_json.body.paymentAddress) {
+          paymentAddress = update.meta_json.body.paymentAddress;
+        }
+        if (!iconUrl && update.meta_json.body.image?.contentUrl) {
+          iconUrl = update.meta_json.body.image.contentUrl;
+        }
+        // Break if we have all values
+        if (name && paymentAddress && iconUrl) break;
+      }
+    }
+  } catch (error) {
+    console.warn(`[Voter Service] Failed to fetch metadata for DRep ${drepId}`);
+  }
+
   // Create new DRep
   const newDrep = await tx.drep.create({
     data: {
       drepId,
-      stakeKey: koiosDrep?.drep_id || drepId,
       votingPower,
+      ...(name && { name }), // Only include if exists
+      ...(paymentAddress && { paymentAddress }), // Only include if exists
+      ...(iconUrl && { iconUrl }), // Only include if exists
     },
   });
 
-  return { voterId: newDrep.id, created: true, updated: false };
+  return { voterId: newDrep.drepId, created: true, updated: false };
 }
 
 /**
@@ -131,7 +172,7 @@ async function ensureSpoExists(
   // If voter exists, just return it without updating (optimization for initial sync)
   // Voting power updates can be done in a separate background job
   if (existing) {
-    return { voterId: existing.id, created: false, updated: false };
+    return { voterId: existing.poolId, created: false, updated: false };
   }
 
   // Check cache first, then fetch if not cached
@@ -162,8 +203,8 @@ async function ensureSpoExists(
     spoVotingPowerCache.set(cacheKey, votingPower);
   }
 
-  // Get pool name and ticker from meta_json or meta_url
-  const { poolName, ticker } = await getPoolMeta(koiosSpo);
+  // Get pool name, ticker, and icon URL from meta_json or meta_url
+  const { poolName, ticker, iconUrl } = await getPoolMeta(koiosSpo);
 
   // Create new SPO
   const newSpo = await tx.sPO.create({
@@ -172,30 +213,33 @@ async function ensureSpoExists(
       poolName,
       ticker,
       votingPower,
+      ...(iconUrl && { iconUrl }), // Only include if exists
     },
   });
 
-  return { voterId: newSpo.id, created: true, updated: false };
+  return { voterId: newSpo.poolId, created: true, updated: false };
 }
 
 /**
- * Gets pool name and ticker from meta_json or fetches from meta_url
+ * Gets pool name, ticker, and icon URL from meta_json or fetches from meta_url
+ * For iconUrl: meta_url → fetch extended URL → fetch url_png_icon_64x64
  */
 async function getPoolMeta(
   koiosSpo: KoiosSpo | undefined
-): Promise<{ poolName: string | null; ticker: string | null }> {
+): Promise<{
+  poolName: string | null;
+  ticker: string | null;
+  iconUrl: string | null;
+}> {
   if (!koiosSpo) {
-    return { poolName: null, ticker: null };
+    return { poolName: null, ticker: null, iconUrl: null };
   }
 
   // Start with values from Koios response
   let poolName: string | null = koiosSpo.meta_json?.name ?? null;
   let ticker: string | null = koiosSpo.meta_json?.ticker ?? null;
-
-  // If both already present in meta_json, no need to fetch
-  if (poolName && ticker) {
-    return { poolName, ticker };
-  }
+  let iconUrl: string | null = null;
+  let extendedUrl: string | null = null;
 
   // Fallback to fetching from meta_url
   if (koiosSpo.meta_url) {
@@ -218,10 +262,34 @@ async function getPoolMeta(
       if (!ticker) {
         ticker = meta?.ticker || null;
       }
+
+      // Get extended URL for icon
+      extendedUrl = meta?.extended || null;
     } catch (error) {
-      console.error(
-        `Failed to fetch pool meta_url: ${koiosSpo.meta_url}`,
-        error
+      console.warn(
+        `[Voter Service] Failed to fetch pool meta_url: ${koiosSpo.meta_url}`
+      );
+    }
+  }
+
+  // Fetch icon URL from extended metadata
+  if (extendedUrl) {
+    try {
+      // Convert IPFS URLs to use an HTTP gateway
+      let fetchUrl = extendedUrl;
+      if (extendedUrl.startsWith("ipfs://")) {
+        const ipfsHash = extendedUrl.replace("ipfs://", "");
+        fetchUrl = `https://ipfs.io/ipfs/${ipfsHash}`;
+      }
+
+      const axios = (await import("axios")).default;
+      const response = await axios.get(fetchUrl, { timeout: 10000 });
+      const extendedMeta = response.data;
+
+      iconUrl = extendedMeta?.info?.url_png_icon_64x64 || null;
+    } catch (error) {
+      console.warn(
+        `[Voter Service] Failed to fetch pool extended metadata: ${extendedUrl}`
       );
     }
   }
@@ -231,7 +299,7 @@ async function getPoolMeta(
     ticker = koiosSpo.meta_json.ticker;
   }
 
-  return { poolName, ticker };
+  return { poolName, ticker, iconUrl };
 }
 
 /**
@@ -248,7 +316,7 @@ async function ensureCcExists(
 
   // If voter exists, just return it without updating (optimization for initial sync)
   if (existing) {
-    return { voterId: existing.id, created: false, updated: false };
+    return { voterId: existing.ccId, created: false, updated: false };
   }
 
   // Fetch committee info from Koios
@@ -282,7 +350,7 @@ async function ensureCcExists(
     },
   });
 
-  return { voterId: newCc.id, created: true, updated: false };
+  return { voterId: newCc.ccId, created: true, updated: false };
 }
 
 /**

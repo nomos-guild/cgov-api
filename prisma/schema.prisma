@@ -33,15 +33,17 @@ model User {
 
 model Drep { // get drep list from https://api.koios.rest/api/v1/drep_list
   // get drep info from https://api.koios.rest/api/v1/drep_info
-  id           String        @id @default(uuid())
-  drepId       String        @unique // drep_id value from drep_info api response
-  userId       String?       @unique
-  stakeKey     String
-  votingPower  Float   // get from https://api.koios.rest/api/v1/drep_voting_power_history?_epoch_no=320&_drep_id=drep17l6sywnwqu9aedd6aumev42w39ln5zfl9nw7j4ak6u8swyrwvz3 from amount value in response
-  createdAt    DateTime?     @default(now())
-  updatedAt    DateTime?     @updatedAt
-  user         User?         @relation(fields: [userId], references: [id])
-  onchainVotes OnchainVote[]
+  id              String        @id @default(uuid())
+  drepId          String        @unique // drep_id value from drep_info api response (CIP-129 format)
+  userId          String?       @unique
+  name            String?       // meta_json.body.givenName from https://api.koios.rest/api/v1/drep_updates?_drep_id=<drep_id>
+  paymentAddress  String?       // meta_json.body.paymentAddress from https://api.koios.rest/api/v1/drep_updates?_drep_id=<drep_id>
+  iconUrl        String?       // meta_json.body.image.contentUrl from https://api.koios.rest/api/v1/drep_updates?_drep_id=<drep_id>
+  votingPower     Float   // get from https://api.koios.rest/api/v1/drep_voting_power_history?_epoch_no=320&_drep_id=drep17l6sywnwqu9aedd6aumev42w39ln5zfl9nw7j4ak6u8swyrwvz3 from amount value in response
+  createdAt       DateTime?     @default(now())
+  updatedAt       DateTime?     @updatedAt
+  user            User?         @relation(fields: [userId], references: [id])
+  onchainVotes    OnchainVote[]
 }
 
 model SPO { // get spo list from https://api.koios.rest/api/v1/pool_list
@@ -51,6 +53,7 @@ model SPO { // get spo list from https://api.koios.rest/api/v1/pool_list
   userId       String?       @unique
   poolName     String?   // go to meta_url from pool_info api response and use the name value
   ticker       String?  // ticker value from pool_info api response
+  iconUrl      String?  // go to meta_url from pool_info api response and go to the url specified under the extended field and look for url_png_icon_64x64 field
   votingPower  Float  // get from https://api.koios.rest/api/v1/pool_voting_power_history?_epoch_no=320&_pool_bech32=pool155efqn9xpcf73pphkk88cmlkdwx4ulkg606tne970qswczg3asc
   createdAt    DateTime?     @default(now())
   updatedAt    DateTime?     @updatedAt
@@ -135,11 +138,11 @@ model Proposal { // get proposals from https://api.koios.rest/api/v1/proposal_li
 model OnchainVote { // get votes from https://api.koios.rest/api/v1/vote_list
   id             String    @id @default(uuid())
   txHash         String // vote_tx_hash value from vote_list api response
-  proposal       Proposal  @relation(fields: [proposalId], references: [id])
-  proposalId     Int  // proposal_id value from vote_list api response
+  proposal       Proposal  @relation(fields: [proposalId], references: [proposalId])
+  proposalId     String  // proposal_id value from vote_list api response (Cardano governance action ID)
   vote           VoteType? // vote value from vote_list api response
   voterType      VoterType // proposal_type value from vote_list api response
-  votingPower    String? 
+  votingPower    String?
   // get from https://api.koios.rest/api/v1/pool_voting_power_history?_epoch_no=320&_pool_bech32=pool155efqn9xpcf73pphkk88cmlkdwx4ulkg606tne970qswczg3asc
   // or from https://api.koios.rest/api/v1/drep_voting_power_history?_epoch_no=320&_drep_id=drep17l6sywnwqu9aedd6aumev42w39ln5zfl9nw7j4ak6u8swyrwvz3
   // based on voterType, get the voting power from the appropriate API
@@ -147,14 +150,14 @@ model OnchainVote { // get votes from https://api.koios.rest/api/v1/vote_list
   anchorUrl      String?  // meta_url value from vote_list api response
   anchorHash     String?  // meta_hash value from vote_list api response
   votedAt        DateTime? @default(now())  // get block_time value from vote_list api response and convert to DateTime
-  createdAt      DateTime? @default(now())  
+  createdAt      DateTime? @default(now())
   updatedAt      DateTime? @updatedAt
-  drep           Drep?     @relation(fields: [drepId], references: [id])
-  drepId         String?  // voter_id value from vote_list api response
-  spo            SPO?      @relation(fields: [spoId], references: [id])
-  spoId          String?  // voter_id value from vote_list api response
-  cc             CC?       @relation(fields: [ccId], references: [id])
-  ccId           String?  // voter_id value from vote_list api response
+  drep           Drep?     @relation(fields: [drepId], references: [drepId])
+  drepId         String?  // drep_id in CIP-129 format from vote_list api response
+  spo            SPO?      @relation(fields: [spoId], references: [poolId])
+  spoId          String?  // pool_id_bech32 from vote_list api response
+  cc             CC?       @relation(fields: [ccId], references: [ccId])
+  ccId           String?  // cc_hot_id from vote_list api response
 
   @@unique([proposalId, voterType, drepId, spoId, ccId])
 }
@@ -187,7 +190,7 @@ model ProposalDraft {
   crowdfundingCampaign CrowdfundingCampaign?
 }
 
-// Delegators Engagement Types - Ignore for now
+// Delegators Engagement Types - To be implemented in future releases
 
 // model OffchainVote {
 //   proposal   Proposal  @relation(fields: [proposalId], references: [id])
