@@ -75,7 +75,7 @@ CREATE TABLE "LastIngestedTime" (
 -- CreateTable
 CREATE TABLE "Proposal" (
     "id" SERIAL NOT NULL,
-    "postId" TEXT NOT NULL,
+    "proposalId" TEXT NOT NULL,
     "txHash" TEXT NOT NULL,
     "certIndex" TEXT NOT NULL,
     "title" TEXT NOT NULL,
