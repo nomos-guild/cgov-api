@@ -39,6 +39,7 @@ model Drep { // get drep list from https://api.koios.rest/api/v1/drep_list
   name            String?       // meta_json.body.givenName from https://api.koios.rest/api/v1/drep_updates?_drep_id=<drep_id>
   paymentAddress  String?       // meta_json.body.paymentAddress from https://api.koios.rest/api/v1/drep_updates?_drep_id=<drep_id>
   iconUrl        String?       // meta_json.body.image.contentUrl from https://api.koios.rest/api/v1/drep_updates?_drep_id=<drep_id>
+  doNotList      Boolean? // meta_json.body.doNotList from https://api.koios.rest/api/v1/drep_updates?_drep_id=<drep_id>
   votingPower     Float   // get from https://api.koios.rest/api/v1/drep_voting_power_history?_epoch_no=320&_drep_id=drep17l6sywnwqu9aedd6aumev42w39ln5zfl9nw7j4ak6u8swyrwvz3 from amount value in response
   createdAt       DateTime?     @default(now())
   updatedAt       DateTime?     @updatedAt

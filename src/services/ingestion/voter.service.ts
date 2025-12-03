@@ -16,6 +16,62 @@ import type {
 } from "../../types/koios.types";
 
 /**
+ * Some Koios metadata fields (e.g. from /drep_updates) can be returned either
+ * as plain strings or as objects of the form `{ "@value": "..." }`.
+ * This helper normalises them to plain strings so they can be stored in
+ * Prisma `String` columns without causing runtime validation errors.
+ */
+function extractStringField(value: unknown): string | undefined {
+  if (value == null) return undefined;
+
+  if (typeof value === "string") {
+    return value;
+  }
+
+  if (typeof value === "object") {
+    // Common pattern for Koios / CIP-129 style fields
+    const withValue = value as { [key: string]: unknown };
+    const candidate = (withValue["@value"] ?? withValue["value"]) as unknown;
+
+    if (typeof candidate === "string") {
+      return candidate;
+    }
+  }
+
+  return undefined;
+}
+
+/**
+ * Normalises Koios boolean-like metadata fields.
+ * Accepts:
+ * - booleans
+ * - "true"/"false" (case-insensitive) strings
+ * - objects of the form `{ "@value": "true" }` or `{ value: false }`
+ */
+function extractBooleanField(value: unknown): boolean | undefined {
+  if (value == null) return undefined;
+
+  if (typeof value === "boolean") {
+    return value;
+  }
+
+  if (typeof value === "string") {
+    const normalised = value.trim().toLowerCase();
+    if (normalised === "true") return true;
+    if (normalised === "false") return false;
+    return undefined;
+  }
+
+  if (typeof value === "object") {
+    const withValue = value as { [key: string]: unknown };
+    const candidate = withValue["@value"] ?? withValue["value"];
+    return extractBooleanField(candidate);
+  }
+
+  return undefined;
+}
+
+/**
  * Result of ensuring a voter exists
  */
 export interface EnsureVoterResult {
@@ -105,39 +161,54 @@ async function ensureDrepExists(
     drepVotingPowerCache.set(cacheKey, votingPower);
   }
 
-  // Fetch name, payment address, and icon URL from drep_updates endpoint
-  // Note: these are nested in meta_json.body
+  // Fetch name, payment address, icon URL, and doNotList from drep_updates endpoint
+  // Note: these are nested in meta_json.body and can sometimes be structured
+  // as `{ "@value": "..." }` objects instead of plain strings.
   let name: string | undefined;
   let paymentAddress: string | undefined;
   let iconUrl: string | undefined;
+  let doNotList: boolean | undefined;
   try {
     const drepUpdates = await koiosGet<
       Array<{
         meta_json?: {
           body?: {
-            givenName?: string;
-            paymentAddress?: string;
+            // Koios can return either `string` or `{ "@value": string }`
+            givenName?: unknown;
+            paymentAddress?: unknown;
+            doNotList?: unknown;
             image?: {
-              contentUrl?: string;
+              contentUrl?: unknown;
             };
           };
         } | null;
       }>
     >("/drep_updates", { _drep_id: drepId });
-    // Find the first record that has metadata in meta_json
+
+    // Find the first record that has usable metadata in meta_json
     for (const update of drepUpdates || []) {
-      if (update.meta_json?.body) {
-        if (!name && update.meta_json.body.givenName) {
-          name = update.meta_json.body.givenName;
-        }
-        if (!paymentAddress && update.meta_json.body.paymentAddress) {
-          paymentAddress = update.meta_json.body.paymentAddress;
-        }
-        if (!iconUrl && update.meta_json.body.image?.contentUrl) {
-          iconUrl = update.meta_json.body.image.contentUrl;
-        }
-        // Break if we have all values
-        if (name && paymentAddress && iconUrl) break;
+      const body = update.meta_json?.body;
+      if (!body) continue;
+
+      if (!name && body.givenName !== undefined) {
+        name = extractStringField(body.givenName);
+      }
+
+      if (!paymentAddress && body.paymentAddress !== undefined) {
+        paymentAddress = extractStringField(body.paymentAddress);
+      }
+
+      if (!iconUrl && body.image?.contentUrl !== undefined) {
+        iconUrl = extractStringField(body.image.contentUrl);
+      }
+
+      if (doNotList === undefined && body.doNotList !== undefined) {
+        doNotList = extractBooleanField(body.doNotList);
+      }
+
+      // Break if we have all values
+      if (name && paymentAddress && iconUrl && doNotList !== undefined) {
+        break;
       }
     }
   } catch (error) {
@@ -152,6 +223,7 @@ async function ensureDrepExists(
       ...(name && { name }), // Only include if exists
       ...(paymentAddress && { paymentAddress }), // Only include if exists
       ...(iconUrl && { iconUrl }), // Only include if exists
+      ...(typeof doNotList === "boolean" && { doNotList }), // Only include if resolved
     },
   });
 
@@ -221,8 +293,41 @@ async function ensureSpoExists(
 }
 
 /**
+ * Recursively searches an extended metadata object for icon URLs.
+ * Prefers `url_png_icon_64x64`, then falls back to `url_png_logo`.
+ */
+function findIconUrlInExtendedMeta(obj: unknown): string | null {
+  if (!obj || typeof obj !== "object") {
+    return null;
+  }
+
+  const record = obj as Record<string, unknown>;
+
+  const icon64 = record["url_png_icon_64x64"];
+  if (typeof icon64 === "string" && icon64.trim()) {
+    return icon64;
+  }
+
+  const logo = record["url_png_logo"];
+  if (typeof logo === "string" && logo.trim()) {
+    return logo;
+  }
+
+  for (const value of Object.values(record)) {
+    if (value && typeof value === "object") {
+      const found = findIconUrlInExtendedMeta(value);
+      if (found) {
+        return found;
+      }
+    }
+  }
+
+  return null;
+}
+
+/**
  * Gets pool name, ticker, and icon URL from meta_json or fetches from meta_url
- * For iconUrl: meta_url → fetch extended URL → fetch url_png_icon_64x64
+ * For iconUrl: meta_url → fetch extended URL → search for url_png_icon_64x64 / url_png_logo
  */
 async function getPoolMeta(
   koiosSpo: KoiosSpo | undefined
@@ -252,7 +357,18 @@ async function getPoolMeta(
       }
 
       const axios = (await import("axios")).default;
-      const response = await axios.get(fetchUrl, { timeout: 10000 });
+      const response = await axios.get(fetchUrl, {
+        timeout: 10000,
+        maxRedirects: 5,
+        headers: {
+          // Some metadata hosts / short-url providers behave differently
+          // for non-browser User-Agents. Use a browser-like UA so that
+          // HTTP redirects (e.g. short URLs) are honoured consistently.
+          "User-Agent":
+            "Mozilla/5.0 (compatible; cgov-api/1.0; +https://github.com/input-output-hk)",
+          Accept: "application/json, text/plain, */*",
+        },
+      });
       const meta = response.data;
 
       // Only fill missing fields from fetched metadata
@@ -283,10 +399,18 @@ async function getPoolMeta(
       }
 
       const axios = (await import("axios")).default;
-      const response = await axios.get(fetchUrl, { timeout: 10000 });
+      const response = await axios.get(fetchUrl, {
+        timeout: 10000,
+        maxRedirects: 5,
+        headers: {
+          "User-Agent":
+            "Mozilla/5.0 (compatible; cgov-api/1.0; +https://github.com/input-output-hk)",
+          Accept: "application/json, text/plain, */*",
+        },
+      });
       const extendedMeta = response.data;
 
-      iconUrl = extendedMeta?.info?.url_png_icon_64x64 || null;
+      iconUrl = findIconUrlInExtendedMeta(extendedMeta);
     } catch (error) {
       console.warn(
         `[Voter Service] Failed to fetch pool extended metadata: ${extendedUrl}`
