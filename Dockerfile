@@ -1,4 +1,4 @@
-FROM node:20-alpine AS builder
+FROM node:20 AS builder
 
 # Working Dir
 WORKDIR /base
@@ -22,9 +22,30 @@ RUN npx prisma generate
 RUN yarn build
 
 # Production stage
-FROM node:20-alpine AS runner
+FROM node:20 AS runner
 
 WORKDIR /usr/src/app
+
+# Install system dependencies required by Puppeteer's bundled Chromium
+RUN apt-get update && apt-get install -y \
+    libnss3 \
+    libatk-bridge2.0-0 \
+    libatk1.0-0 \
+    libcups2 \
+    libdrm2 \
+    libxkbcommon0 \
+    libxcomposite1 \
+    libxdamage1 \
+    libxrandr2 \
+    libxfixes3 \
+    libasound2 \
+    libpangocairo-1.0-0 \
+    libpango-1.0-0 \
+    libgtk-3-0 \
+    libx11-xcb1 \
+    libxshmfence1 \
+    libgbm1 \
+    && rm -rf /var/lib/apt/lists/*
 
 # Copy built files from builder
 COPY --from=builder /base/.build ./.build

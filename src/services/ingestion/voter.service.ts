@@ -326,6 +326,181 @@ function findIconUrlInExtendedMeta(obj: unknown): string | null {
 }
 
 /**
+ * Ensures a URL has an HTTP/HTTPS scheme. Many metadata URLs are provided
+ * without protocol (e.g. "git.io/abc123" or "bit.ly/xyz"), which Puppeteer
+ * cannot navigate to directly.
+ */
+function normaliseToHttpUrl(rawUrl: string): string {
+  if (!rawUrl) return rawUrl;
+
+  const trimmed = rawUrl.trim();
+  if (/^https?:\/\//i.test(trimmed)) {
+    return trimmed;
+  }
+
+  // Default to HTTPS for bare host paths like "git.io/abc123"
+  return `https://${trimmed}`;
+}
+
+/**
+ * Fetches JSON from a URL using a real browser (Puppeteer) to work around
+ * providers that block plain HTTP clients such as Axios.
+ */
+async function fetchJsonWithBrowserLikeClient(
+  url: string,
+  redirectDepth = 0
+): Promise<any | null> {
+  const targetUrl = normaliseToHttpUrl(url);
+
+  // Prevent infinite redirect loops
+  if (redirectDepth > 5) {
+    console.warn(
+      `[Voter Service] Too many redirects while fetching JSON via browser-like client for URL ${targetUrl}`
+    );
+    return null;
+  }
+
+  try {
+    const puppeteerModule = await import("puppeteer");
+    const puppeteer: any =
+      (puppeteerModule as any).default || (puppeteerModule as any);
+
+    const browser = await puppeteer.launch({
+      headless: true,
+      args: [
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+        "--disable-dev-shm-usage",
+      ],
+    });
+
+    try {
+      const page = await browser.newPage();
+      await page.setUserAgent(
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+      );
+
+      // For URLs that trigger a "download" (e.g. JSON served with
+      // Content-Disposition: attachment) Chrome will often abort the
+      // navigation and Puppeteer may return `null` from page.goto or
+      // throw net::ERR_ABORTED. However, the underlying HTTP response
+      // still exists, so we race `page.goto` with `waitForResponse`
+      // and use the captured response body. We explicitly ignore
+      // non-GET / preflight (OPTIONS) responses which don't have
+      // readable bodies.
+      const [response] = await Promise.all([
+        page.waitForResponse((res: any) => {
+          try {
+            const resUrl = res.url();
+            const req = typeof res.request === "function" ? res.request() : null;
+            const method =
+              req && typeof req.method === "function" ? req.method() : null;
+
+            // Only consider real GET requests for this URL (or redirects),
+            // and filter out preflight / OPTIONS requests which may not
+            // expose a readable body.
+            if (method && method.toUpperCase() !== "GET") {
+              return false;
+            }
+
+            // Match the exact URL or a redirect derived from it.
+            return resUrl === targetUrl || resUrl.startsWith(targetUrl);
+          } catch {
+            return false;
+          }
+        }, { timeout: 15000 }),
+        page
+          .goto(targetUrl, {
+            waitUntil: "networkidle0",
+            timeout: 15000,
+          })
+          .catch(() => null), // downloads often cause net::ERR_ABORTED
+      ]);
+
+      if (!response) {
+        return null;
+      }
+
+      const headers = response.headers?.() ?? {};
+      const status =
+        typeof (response as any).status === "function"
+          ? (response as any).status()
+          : 0;
+
+      // Follow HTTP redirects explicitly. For some providers (e.g. git.io),
+      // the initial response is a 3xx with no readable body. In that case we
+      // read the Location header and recursively fetch the target URL.
+      if (status >= 300 && status < 400) {
+        const locationHeader =
+          (headers["location"] as string | undefined) ||
+          (headers["Location"] as string | undefined);
+
+        if (locationHeader) {
+          try {
+            const nextUrl = new URL(locationHeader, response.url()).toString();
+            return await fetchJsonWithBrowserLikeClient(
+              nextUrl,
+              redirectDepth + 1
+            );
+          } catch {
+            // If we can't parse the redirect URL, fall through to normal handling
+          }
+        }
+      }
+
+      const contentType = (headers["content-type"] || "").toLowerCase();
+
+      // If the response declares JSON, try to parse it directly
+      if (contentType.includes("application/json")) {
+        try {
+          const text = await response.text();
+          return JSON.parse(text);
+        } catch {
+          // Fall through to the generic parsing logic below
+        }
+      }
+
+      // Fallback: try to parse the whole body as JSON
+      const text = await response.text();
+      try {
+        return JSON.parse(text);
+      } catch {
+        // As a last resort, try to read structured data from the page context
+        try {
+          const fromWindow = await page.evaluate(() => {
+            const w: any = globalThis as any;
+            return (
+              w.metadata ||
+              w.__metadata ||
+              w.pool ||
+              w.__NEXT_DATA__?.props?.pageProps?.data ||
+              null
+            );
+          });
+
+          return fromWindow ?? null;
+        } catch {
+          return null;
+        }
+      }
+    } finally {
+      try {
+        await browser.close();
+      } catch {
+        // Ignore close errors
+      }
+    }
+  } catch (error) {
+    const message =
+      (error as any)?.message || (error as any)?.toString?.() || String(error);
+    console.warn(
+      `[Voter Service] Failed to fetch JSON via browser-like client for URL ${url}. Error: ${message}`
+    );
+    return null;
+  }
+}
+
+/**
  * Gets pool name, ticker, and icon URL from meta_json or fetches from meta_url
  * For iconUrl: meta_url → fetch extended URL → search for url_png_icon_64x64 / url_png_logo
  */
@@ -346,41 +521,37 @@ async function getPoolMeta(
   let iconUrl: string | null = null;
   let extendedUrl: string | null = null;
 
-  // Fetch icon URL from extended metadata
-  if (extendedUrl) {
+  // Fetch metadata from meta_url using browser-like client only
+  if (koiosSpo.meta_url) {
+    // Convert IPFS URLs to use an HTTP gateway
+    let metaUrlFetch = koiosSpo.meta_url;
+    if (koiosSpo.meta_url.startsWith("ipfs://")) {
+      const ipfsHash = koiosSpo.meta_url.replace("ipfs://", "");
+      metaUrlFetch = `https://ipfs.io/ipfs/${ipfsHash}`;
+    }
+
+    // Ensure we always have a valid HTTP/HTTPS URL (handles bare git.io/bit.ly, etc.)
+    metaUrlFetch = normaliseToHttpUrl(metaUrlFetch);
+
+    // Browser-like client (Puppeteer) for all meta URLs
     try {
-      // Convert IPFS URLs to use an HTTP gateway
-      let fetchUrl = extendedUrl;
-      if (extendedUrl.startsWith("ipfs://")) {
-        const ipfsHash = extendedUrl.replace("ipfs://", "");
-        fetchUrl = `https://ipfs.io/ipfs/${ipfsHash}`;
+      const metaFromBrowser = await fetchJsonWithBrowserLikeClient(metaUrlFetch);
+      if (metaFromBrowser) {
+        if (!poolName) {
+          poolName = metaFromBrowser?.name || null;
+        }
+        if (!ticker) {
+          ticker = metaFromBrowser?.ticker || null;
+        }
+        extendedUrl = metaFromBrowser?.extended || null;
       }
-
-      const axios = (await import("axios")).default;
-      const response = await axios.get(fetchUrl, {
-        timeout: 10000,
-        maxRedirects: 5,
-        headers: {
-          // Some metadata hosts / short-url providers behave differently
-          // for non-browser User-Agents. Use a browser-like UA so that
-          // HTTP redirects (e.g. short URLs) are honoured consistently.
-          "User-Agent":
-            "Mozilla/5.0 (compatible; cgov-api/1.0; +https://github.com/input-output-hk)",
-          Accept: "application/json, text/plain, */*",
-        },
-      });
-      const meta = response.data;
-
-      const extendedMeta = await fetchJsonWithBrowserLikeClient(fetchUrl);
-      if (extendedMeta) {
-        iconUrl = findIconUrlInExtendedMeta(extendedMeta);
-      }
-
-      // Get extended URL for icon
-      extendedUrl = meta?.extended || null;
-    } catch (error) {
+    } catch (browserError) {
+      const msg =
+        (browserError as any)?.message ||
+        (browserError as any)?.toString?.() ||
+        String(browserError);
       console.warn(
-        `[Voter Service] Failed to fetch pool meta_url: ${koiosSpo.meta_url}`
+        `[Voter Service] Failed to fetch pool metadata (type=meta) from URL: ${metaUrlFetch}. Error: ${msg}`
       );
     }
   }
@@ -395,22 +566,19 @@ async function getPoolMeta(
         fetchUrl = `https://ipfs.io/ipfs/${ipfsHash}`;
       }
 
-      const axios = (await import("axios")).default;
-      const response = await axios.get(fetchUrl, {
-        timeout: 10000,
-        maxRedirects: 5,
-        headers: {
-          "User-Agent":
-            "Mozilla/5.0 (compatible; cgov-api/1.0; +https://github.com/input-output-hk)",
-          Accept: "application/json, text/plain, */*",
-        },
-      });
-      const extendedMeta = response.data;
+      fetchUrl = normaliseToHttpUrl(fetchUrl);
 
-      iconUrl = findIconUrlInExtendedMeta(extendedMeta);
+      const extendedMeta = await fetchJsonWithBrowserLikeClient(fetchUrl);
+      if (extendedMeta) {
+        iconUrl = findIconUrlInExtendedMeta(extendedMeta);
+      }
     } catch (error) {
+      const msg =
+        (error as any)?.message ||
+        (error as any)?.toString?.() ||
+        String(error);
       console.warn(
-        `[Voter Service] Failed to fetch pool extended metadata: ${extendedUrl}`
+        `[Voter Service] Failed to fetch pool metadata (type=extended) from URL: ${extendedUrl}. Error: ${msg}`
       );
     }
   }
