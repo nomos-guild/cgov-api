@@ -1,4 +1,6 @@
-/**
+import axios from "axios";
+
+ /**
  * Voter Ingestion Service
  * Handles creation and updates of DRep, SPO, and CC voters
  */
@@ -327,8 +329,8 @@ function findIconUrlInExtendedMeta(obj: unknown): string | null {
 
 /**
  * Ensures a URL has an HTTP/HTTPS scheme. Many metadata URLs are provided
- * without protocol (e.g. "git.io/abc123" or "bit.ly/xyz"), which Puppeteer
- * cannot navigate to directly.
+ * without protocol (e.g. "git.io/abc123" or "bit.ly/xyz"), which plain HTTP
+ * clients and Puppeteer cannot navigate to directly.
  */
 function normaliseToHttpUrl(rawUrl: string): string {
   if (!rawUrl) return rawUrl;
@@ -343,8 +345,10 @@ function normaliseToHttpUrl(rawUrl: string): string {
 }
 
 /**
- * Fetches JSON from a URL using a real browser (Puppeteer) to work around
- * providers that block plain HTTP clients such as Axios.
+ * Fetches JSON from a URL.
+ * Tries a normal HTTP client (Axios) first for simple JSON endpoints, then
+ * falls back to a real browser (Puppeteer) for providers that block plain
+ * HTTP clients or require full browser behaviour.
  */
 async function fetchJsonWithBrowserLikeClient(
   url: string,
@@ -360,6 +364,35 @@ async function fetchJsonWithBrowserLikeClient(
     return null;
   }
 
+  // 1) Try a simple HTTP GET via Axios first – this is fast and works for most
+  // plain JSON endpoints (including
+  // `http://dataDyne.earth/cardano/dataDyneCardanoPoolExtended.json`).
+  try {
+    const response = await axios.get(targetUrl, {
+      timeout: 15000,
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        Accept: "application/json, text/plain;q=0.9, */*;q=0.8",
+      },
+      validateStatus: () => true,
+    });
+
+    if (response.status >= 200 && response.status < 300 && response.data) {
+      return response.data;
+    }
+  } catch (axiosError) {
+    const msg =
+      (axiosError as any)?.message ||
+      (axiosError as any)?.toString?.() ||
+      String(axiosError);
+    console.warn(
+      `[Voter Service] Axios JSON fetch failed for URL ${targetUrl}. Error: ${msg}`
+    );
+  }
+
+  // 2) Fallback to Puppeteer for providers that block plain HTTP clients or
+  // serve JSON only behind browser-like behaviour.
   try {
     const puppeteerModule = await import("puppeteer");
     const puppeteer: any =
@@ -389,26 +422,30 @@ async function fetchJsonWithBrowserLikeClient(
       // non-GET / preflight (OPTIONS) responses which don't have
       // readable bodies.
       const [response] = await Promise.all([
-        page.waitForResponse((res: any) => {
-          try {
-            const resUrl = res.url();
-            const req = typeof res.request === "function" ? res.request() : null;
-            const method =
-              req && typeof req.method === "function" ? req.method() : null;
+        page.waitForResponse(
+          (res: any) => {
+            try {
+              const resUrl = res.url();
+              const req =
+                typeof res.request === "function" ? res.request() : null;
+              const method =
+                req && typeof req.method === "function" ? req.method() : null;
 
-            // Only consider real GET requests for this URL (or redirects),
-            // and filter out preflight / OPTIONS requests which may not
-            // expose a readable body.
-            if (method && method.toUpperCase() !== "GET") {
+              // Only consider real GET requests for this URL (or redirects),
+              // and filter out preflight / OPTIONS requests which may not
+              // expose a readable body.
+              if (method && method.toUpperCase() !== "GET") {
+                return false;
+              }
+
+              // Match the exact URL or a redirect derived from it.
+              return resUrl === targetUrl || resUrl.startsWith(targetUrl);
+            } catch {
               return false;
             }
-
-            // Match the exact URL or a redirect derived from it.
-            return resUrl === targetUrl || resUrl.startsWith(targetUrl);
-          } catch {
-            return false;
-          }
-        }, { timeout: 15000 }),
+          },
+          { timeout: 15000 }
+        ),
         page
           .goto(targetUrl, {
             waitUntil: "networkidle0",
@@ -494,7 +531,7 @@ async function fetchJsonWithBrowserLikeClient(
     const message =
       (error as any)?.message || (error as any)?.toString?.() || String(error);
     console.warn(
-      `[Voter Service] Failed to fetch JSON via browser-like client for URL ${url}. Error: ${message}`
+      `[Voter Service] Failed to fetch JSON via browser-like client for URL ${targetUrl}. Error: ${message}`
     );
     return null;
   }
@@ -521,7 +558,7 @@ async function getPoolMeta(
   let iconUrl: string | null = null;
   let extendedUrl: string | null = null;
 
-  // Fetch metadata from meta_url using browser-like client only
+  // Fetch metadata from meta_url using the JSON fetch helper
   if (koiosSpo.meta_url) {
     // Convert IPFS URLs to use an HTTP gateway
     let metaUrlFetch = koiosSpo.meta_url;
@@ -533,7 +570,7 @@ async function getPoolMeta(
     // Ensure we always have a valid HTTP/HTTPS URL (handles bare git.io/bit.ly, etc.)
     metaUrlFetch = normaliseToHttpUrl(metaUrlFetch);
 
-    // Browser-like client (Puppeteer) for all meta URLs
+    // JSON fetch helper (Axios first, then Puppeteer fallback) for all meta URLs
     try {
       const metaFromBrowser = await fetchJsonWithBrowserLikeClient(metaUrlFetch);
       if (metaFromBrowser) {
