@@ -346,13 +346,13 @@ async function getPoolMeta(
   let iconUrl: string | null = null;
   let extendedUrl: string | null = null;
 
-  // Fallback to fetching from meta_url
-  if (koiosSpo.meta_url) {
+  // Fetch icon URL from extended metadata
+  if (extendedUrl) {
     try {
       // Convert IPFS URLs to use an HTTP gateway
-      let fetchUrl = koiosSpo.meta_url;
-      if (koiosSpo.meta_url.startsWith("ipfs://")) {
-        const ipfsHash = koiosSpo.meta_url.replace("ipfs://", "");
+      let fetchUrl = extendedUrl;
+      if (extendedUrl.startsWith("ipfs://")) {
+        const ipfsHash = extendedUrl.replace("ipfs://", "");
         fetchUrl = `https://ipfs.io/ipfs/${ipfsHash}`;
       }
 
@@ -371,12 +371,9 @@ async function getPoolMeta(
       });
       const meta = response.data;
 
-      // Only fill missing fields from fetched metadata
-      if (!poolName) {
-        poolName = meta?.name || null;
-      }
-      if (!ticker) {
-        ticker = meta?.ticker || null;
+      const extendedMeta = await fetchJsonWithBrowserLikeClient(fetchUrl);
+      if (extendedMeta) {
+        iconUrl = findIconUrlInExtendedMeta(extendedMeta);
       }
 
       // Get extended URL for icon

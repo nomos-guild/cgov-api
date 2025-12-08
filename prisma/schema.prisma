@@ -31,7 +31,7 @@ model User {
   // offchainVotes          OffchainVote[]
 }
 
-model Drep { // get drep list from https://api.koios.rest/api/v1/drep_list
+model Drep {
   // get drep info from https://api.koios.rest/api/v1/drep_info
   id              String        @id @default(uuid())
   drepId          String        @unique // drep_id value from drep_info api response (CIP-129 format)
@@ -47,10 +47,10 @@ model Drep { // get drep list from https://api.koios.rest/api/v1/drep_list
   onchainVotes    OnchainVote[]
 }
 
-model SPO { // get spo list from https://api.koios.rest/api/v1/pool_list
+model SPO {
   // get spo info from https://api.koios.rest/api/v1/pool_info
   id           String        @id @default(uuid())
-  poolId       String        @unique  // pool_id_bech32 value from pool_info api response
+  poolId       String        @unique // pool_id_bech32 value from pool_info api response
   userId       String?       @unique
   poolName     String?   // go to meta_url from pool_info api response and use the name value
   ticker       String?  // ticker value from pool_info api response
@@ -62,14 +62,14 @@ model SPO { // get spo list from https://api.koios.rest/api/v1/pool_list
   user         User?         @relation(fields: [userId], references: [id])
 }
 
-model CC { // get cc list from https://api.koios.rest/api/v1/committee_info
+model CC {
   id             String        @id @default(uuid())
   ccId           String        @unique // get members.cc_hot_id value from committee_info api response
   userId         String?       @unique
-  memberName     String?  // go to https://api.koios.rest/api/v1/committee_votes?_cc_hot_id=cc_hot1qf5tkz6zwcpplq3kgpt2486d8za943vmymqkdjl249qgw3s2y5r9y and go to meta_url value to get the name value from authors[].name value
-  hotCredential  String?  // get members.cc_hot_id value from committee_info api response
-  coldCredential String?  // get members.cc_cold_id value from committee_info api response
-  status         String?  // get members.expiration_epoch value from committee_info api response and compare with current epoch to get status
+  memberName     String? // go to https://api.koios.rest/api/v1/committee_votes?_cc_hot_id=cc_hot1qf5tkz6zwcpplq3kgpt2486d8za943vmymqkdjl249qgw3s2y5r9y and go to meta_url value to get the name value from authors[].name value
+  hotCredential  String? // get members.cc_hot_id value from committee_info api response
+  coldCredential String? // get members.cc_cold_id value from committee_info api response
+  status         String? // get members.expiration_epoch value from committee_info api response and compare with current epoch to get status
   // get epoch_no value from https://api.koios.rest/api/v1/tip to get current epoch
   createdAt      DateTime?     @default(now())
   updatedAt      DateTime?     @updatedAt
@@ -115,19 +115,19 @@ model LastIngestedTime {
 
 // Viewer Types
 
-model Proposal { // get proposals from https://api.koios.rest/api/v1/proposal_list
-  id                   Int             @id @default(autoincrement()) 
-  proposalId           String          @unique  // proposal_id value from proposal_list api response
-  txHash               String  // proposal_tx_hash value from proposal_list api response
-  certIndex            String  // proposal_index value from proposal_list api response
-  title                String  // meta_json.body.title value from proposal_list api response if its not there, go to meta_url from proposal_list api response and use the body.title value
-  description          String?  // meta_json.body.abstract value from proposal_list api response if its not there, go to meta_url from proposal_list api response and use the body.abstract value
-  rationale            String?  // meta_json.body.rationale value from proposal_list api response if its not there, go to meta_url from proposal_list api response and use the body.rationale value
-  governanceActionType GovernanceType?  // proposal_type value from proposal_list api response 
+model Proposal {
+  id                   Int             @id @default(autoincrement())
+  proposalId           String          @unique // proposal_id value from proposal_list api response
+  txHash               String // proposal_tx_hash value from proposal_list api response
+  certIndex            String // proposal_index value from proposal_list api response
+  title                String // meta_json.body.title value from proposal_list api response if its not there, go to meta_url from proposal_list api response and use the body.title value
+  description          String? // meta_json.body.abstract value from proposal_list api response if its not there, go to meta_url from proposal_list api response and use the body.abstract value
+  rationale            String? // meta_json.body.rationale value from proposal_list api response if its not there, go to meta_url from proposal_list api response and use the body.rationale value
+  governanceActionType GovernanceType? // proposal_type value from proposal_list api response 
   status               ProposalStatus  @default(ACTIVE) // look at ratified_epoch, expired_epoch, enacted_epoch and dropped_epoch value from proposal_list api response and compare with current epoch to get status
-  submissionEpoch      Int?  // proposed_epoch value from proposal_list api response
-  expiryEpoch          Int?  // expired_epoch value from proposal_list api response
-  metadata             String?  // meta_json value from proposal_list api response, if not there, go to meta_url from proposal_list api response and use the response body as metadata
+  submissionEpoch      Int? // proposed_epoch value from proposal_list api response
+  expiryEpoch          Int? // expired_epoch value from proposal_list api response
+  metadata             String? // meta_json value from proposal_list api response, if not there, go to meta_url from proposal_list api response and use the response body as metadata
   createdAt            DateTime?       @default(now())
   updatedAt            DateTime?       @updatedAt
   onchainVotes         OnchainVote[]
@@ -136,7 +136,7 @@ model Proposal { // get proposals from https://api.koios.rest/api/v1/proposal_li
   @@unique([txHash, certIndex])
 }
 
-model OnchainVote { // get votes from https://api.koios.rest/api/v1/vote_list
+model OnchainVote {
   id             String    @id @default(uuid())
   txHash         String // vote_tx_hash value from vote_list api response
   proposal       Proposal  @relation(fields: [proposalId], references: [proposalId])
@@ -175,7 +175,7 @@ model CrowdfundingCampaign {
   proposalDraft ProposalDraft @relation(fields: [proposalDraftId], references: [id])
 }
 
-model ProposalDraft { 
+model ProposalDraft {
   id                   Int                   @id @default(autoincrement())
   governanceActionType GovernanceType
   title                String
