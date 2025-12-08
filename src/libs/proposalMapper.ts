@@ -202,7 +202,8 @@ const resolveVoterId = (vote: VoteWithRelations): string => {
 
 const resolveVoterName = (vote: VoteWithRelations): string | undefined => {
   if (vote.voterType === VoterType.DREP) {
-    return vote.drep?.stakeKey;
+    // Prefer the DRep's display name, falling back to their payment address if available
+    return vote.drep?.name ?? vote.drep?.paymentAddress ?? undefined;
   }
 
   if (vote.voterType === VoterType.SPO) {

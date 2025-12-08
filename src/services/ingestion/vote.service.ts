@@ -34,8 +34,7 @@ export function clearVoteCache() {
 /**
  * Ingests all votes for a specific proposal
  *
- * @param proposalDbId - Database ID of the proposal
- * @param proposalId - Koios proposal_id
+ * @param proposalId - Cardano governance action ID (proposal_id from Koios)
  * @param tx - Prisma transaction client
  * @param minEpoch - Optional minimum epoch to fetch votes from (inclusive).
  *                   Used to avoid fetching historical votes that cannot belong
@@ -43,7 +42,6 @@ export function clearVoteCache() {
  * @returns Statistics about votes and voters created/updated
  */
 export async function ingestVotesForProposal(
-  proposalDbId: number,
   proposalId: string,
   tx: Prisma.TransactionClient,
   minEpoch?: number
@@ -117,7 +115,7 @@ export async function ingestVotesForProposal(
 
     // Process each vote
     for (const koiosVote of koiosVotes) {
-      await ingestSingleVote(koiosVote, proposalDbId, tx, stats);
+      await ingestSingleVote(koiosVote, proposalId, tx, stats);
     }
   } catch (error: any) {
     // If fetching all votes fails, log and return empty stats
@@ -133,7 +131,7 @@ export async function ingestVotesForProposal(
  */
 async function ingestSingleVote(
   koiosVote: KoiosVote,
-  proposalDbId: number,
+  proposalId: string,
   tx: Prisma.TransactionClient,
   stats: VoteIngestionStats
 ): Promise<void> {
@@ -160,7 +158,7 @@ async function ingestSingleVote(
     const memberName = koiosVote.meta_json.authors[0]?.name;
     if (memberName) {
       await tx.cC.update({
-        where: { id: voterResult.voterId },
+        where: { ccId: voterResult.voterId },
         data: { memberName },
       });
     }
@@ -195,7 +193,7 @@ async function ingestSingleVote(
   // 6. Check if vote exists using findFirst (works with nullable fields)
   const existingVote = await tx.onchainVote.findFirst({
     where: {
-      proposalId: proposalDbId,
+      proposalId,
       voterType,
       drepId,
       spoId,
@@ -221,7 +219,7 @@ async function ingestSingleVote(
     await tx.onchainVote.create({
       data: {
         txHash: koiosVote.vote_tx_hash,
-        proposalId: proposalDbId,
+        proposalId,
         vote: voteType,
         voterType,
         votingPower,
@@ -249,9 +247,9 @@ async function getVoterWithPower(
   tx: Prisma.TransactionClient
 ): Promise<{ votingPower: number } | null> {
   if (voterType === VoterType.DREP) {
-    return await tx.drep.findUnique({ where: { id: voterId }, select: { votingPower: true } });
+    return await tx.drep.findUnique({ where: { drepId: voterId }, select: { votingPower: true } });
   } else if (voterType === VoterType.SPO) {
-    return await tx.sPO.findUnique({ where: { id: voterId }, select: { votingPower: true } });
+    return await tx.sPO.findUnique({ where: { poolId: voterId }, select: { votingPower: true } });
   }
   // CC members don't have voting power tracked
   return null;

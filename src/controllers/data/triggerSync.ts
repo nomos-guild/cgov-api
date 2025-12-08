@@ -6,7 +6,7 @@ import { syncAllProposals } from "../../services/ingestion/proposal.service";
  *
  * Manually trigger proposal sync (for testing/admin use)
  */
-export const postTriggerSync = async (req: Request, res: Response) => {
+export const postTriggerSync = async (_req: Request, res: Response) => {
   try {
     console.log("[Manual Sync] Triggered via API endpoint");
 
