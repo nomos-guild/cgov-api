@@ -1,9 +1,28 @@
+/**
+ * Voting threshold requirements per voter type
+ * null means this voter type does not participate in ratification for this action type
+ */
+export interface VotingThreshold {
+  ccThreshold: number | null; // CC threshold (e.g., 2/3 = 0.67), null if CC doesn't vote
+  drepThreshold: number; // DRep threshold (e.g., 0.67)
+  spoThreshold: number | null; // SPO threshold (e.g., 0.51), null if SPO doesn't vote
+}
+
+/**
+ * Voting status per voter type indicating if threshold is met
+ */
+export interface VotingStatus {
+  ccPassing: boolean | null; // null if CC doesn't participate
+  drepPassing: boolean;
+  spoPassing: boolean | null; // null if SPO doesn't participate
+}
+
 export interface GovernanceAction {
   proposalId: string;
-  txHash: string;
+  hash: string; // txHash:certIndex format
   title: string;
   type: string;
-  status: "Active" | "Ratified" | "Expired" | "Approved" | "Not approved";
+  status: "Active" | "Ratified" | "Enacted" | "Expired" | "Closed";
   constitutionality: string;
   drep: GovernanceActionVoteInfo;
   spo?: GovernanceActionVoteInfo;
@@ -13,15 +32,19 @@ export interface GovernanceAction {
   totalAbstain: number;
   submissionEpoch: number;
   expiryEpoch: number;
+  // Voting threshold and status fields
+  threshold: VotingThreshold;
+  votingStatus: VotingStatus;
+  passing: boolean; // Overall: true if all required voter types meet their thresholds
 }
 
 export interface GovernanceActionVoteInfo {
   yesPercent: number;
   noPercent: number;
   abstainPercent: number;
-  yesAda: string;
-  noAda: string;
-  abstainAda: string;
+  yesLovelace: string; // Voting power in lovelace (string for BigInt serialization)
+  noLovelace: string;
+  abstainLovelace: string;
 }
 
 export interface CCGovernanceActionVoteInfo {
@@ -38,8 +61,7 @@ export interface VoteRecord {
   voterId: string;
   voterName?: string;
   vote: "Yes" | "No" | "Abstain";
-  votingPower?: string;
-  votingPowerAda?: number;
+  votingPower?: string; // Voting power in lovelace (string for BigInt serialization)
   anchorUrl?: string;
   anchorHash?: string;
   votedAt: string;
@@ -52,20 +74,28 @@ export interface GovernanceActionDetail extends GovernanceAction {
   ccVotes?: VoteRecord[];
 }
 
-export type GovernanceActionType = "All" | "Info" | "Treasury" | "Constitution";
+export type GovernanceActionType =
+  | "All"
+  | "Info Action"
+  | "Treasury Withdrawals"
+  | "New Constitution"
+  | "Hard Fork Initiation"
+  | "Protocol Parameter Change"
+  | "No Confidence"
+  | "Update Committee";
 export type VoteType = "All" | "Yes" | "No" | "Abstain";
 
 export interface NCLData {
   year: number;
-  currentValue: number;
-  targetValue: number;
+  currentValue: string; // In lovelace (string for BigInt serialization)
+  targetValue: string;  // In lovelace (string for BigInt serialization)
 }
 
 export interface ProposalSummary {
   totalProposals: number;
   activeProposals: number;
   ratifiedProposals: number;
+  enactedProposals: number;
   expiredProposals: number;
-  approvedProposals: number;
-  notApprovedProposals: number;
+  closedProposals: number; // Only for INFO governance actions
 }

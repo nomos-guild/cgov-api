@@ -185,10 +185,9 @@ async function ingestSingleVote(
   const spoId = voterType === VoterType.SPO ? voterResult.voterId : null;
   const ccId = voterType === VoterType.CC ? voterResult.voterId : null;
 
-  // 5. Get voter's voting power for this vote
+  // 5. Get voter's voting power for this vote (stored in lovelace as BigInt)
   const voter = await getVoterWithPower(voterType, voterResult.voterId, tx);
-  const votingPowerAda = voter?.votingPower || null;
-  const votingPower = votingPowerAda ? String(Math.round(votingPowerAda * 1_000_000)) : null;
+  const votingPower = voter?.votingPower ?? null;
 
   // 6. Check if vote exists using findFirst (works with nullable fields)
   const existingVote = await tx.onchainVote.findFirst({
@@ -208,7 +207,6 @@ async function ingestSingleVote(
       data: {
         vote: voteType,
         votingPower,
-        votingPowerAda,
         anchorUrl: koiosVote.meta_url,
         anchorHash: koiosVote.meta_hash,
       },
@@ -223,7 +221,6 @@ async function ingestSingleVote(
         vote: voteType,
         voterType,
         votingPower,
-        votingPowerAda,
         anchorUrl: koiosVote.meta_url,
         anchorHash: koiosVote.meta_hash,
         votedAt: koiosVote.block_time
@@ -239,13 +236,13 @@ async function ingestSingleVote(
 }
 
 /**
- * Gets voter with their voting power
+ * Gets voter with their voting power (stored in lovelace as BigInt)
  */
 async function getVoterWithPower(
   voterType: VoterType,
   voterId: string,
   tx: Prisma.TransactionClient
-): Promise<{ votingPower: number } | null> {
+): Promise<{ votingPower: bigint } | null> {
   if (voterType === VoterType.DREP) {
     return await tx.drep.findUnique({ where: { drepId: voterId }, select: { votingPower: true } });
   } else if (voterType === VoterType.SPO) {

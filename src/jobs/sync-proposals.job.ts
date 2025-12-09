@@ -1,10 +1,12 @@
 /**
  * Proposal Sync Cron Job
  * Periodically syncs all proposals from Koios API to database
+ * Also updates NCL (Net Change Limit) data for treasury withdrawals
  */
 
 import cron from "node-cron";
 import { syncAllProposals } from "../services/ingestion/proposal.service";
+import { updateNCL } from "../services/ingestion/ncl.service";
 
 // Simple in-process guard to prevent overlapping runs in a single Node process
 let isProposalSyncRunning = false;
@@ -69,6 +71,23 @@ function startProposalSyncJobWithSchedule(schedule: string) {
         console.error(
           `[${timestamp}] Errors encountered during sync:`,
           results.errors
+        );
+      }
+
+      // Update NCL (Net Change Limit) after proposal sync
+      try {
+        const nclResult = await updateNCL();
+        console.log(
+          `[${timestamp}] NCL update completed:`,
+          `\n  - Year: ${nclResult.year}`,
+          `\n  - Epoch: ${nclResult.epoch}`,
+          `\n  - Current: ${nclResult.currentValue.toLocaleString()} ADA`,
+          `\n  - Proposals included: ${nclResult.proposalsIncluded}`
+        );
+      } catch (nclError: any) {
+        console.error(
+          `[${timestamp}] NCL update failed:`,
+          nclError.message
         );
       }
     } catch (error: any) {
