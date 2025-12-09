@@ -58,10 +58,11 @@ export interface SyncAllProposalsResult {
  * @param minVotesEpochOverride - Optional minimum epoch to fetch votes from
  * @returns Result with proposal info and vote statistics
  */
-async function ingestProposalData(
+export async function ingestProposalData(
   koiosProposal: KoiosProposal,
   currentEpochOverride?: number,
-  minVotesEpochOverride?: number
+  minVotesEpochOverride?: number,
+  voteOptions?: { useCache?: boolean }
 ): Promise<ProposalIngestionResult> {
   // Wrap entire operation in retry logic
   return withRetry(async () => {
@@ -147,7 +148,8 @@ async function ingestProposalData(
     const voteStats = await ingestVotesForProposal(
       proposal.proposalId,
       prisma,
-      minVotesEpochOverride
+      minVotesEpochOverride,
+      voteOptions
     );
 
     // 8. Fetch and update voting power summary data from Koios
