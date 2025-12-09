@@ -31,7 +31,7 @@ model User {
   // offchainVotes          OffchainVote[]
 }
 
-model Drep {
+model Drep { // get drep list from https://api.koios.rest/api/v1/drep_list
   // get drep info from https://api.koios.rest/api/v1/drep_info
   id              String        @id @default(uuid())
   drepId          String        @unique // drep_id value from drep_info api response (CIP-129 format)
@@ -39,37 +39,37 @@ model Drep {
   name            String?       // meta_json.body.givenName from https://api.koios.rest/api/v1/drep_updates?_drep_id=<drep_id>
   paymentAddress  String?       // meta_json.body.paymentAddress from https://api.koios.rest/api/v1/drep_updates?_drep_id=<drep_id>
   iconUrl        String?       // meta_json.body.image.contentUrl from https://api.koios.rest/api/v1/drep_updates?_drep_id=<drep_id>
-  doNotList      Boolean? // meta_json.body.doNotList from https://api.koios.rest/api/v1/drep_updates?_drep_id=<drep_id>
-  votingPower     Float   // get from https://api.koios.rest/api/v1/drep_voting_power_history?_epoch_no=320&_drep_id=drep17l6sywnwqu9aedd6aumev42w39ln5zfl9nw7j4ak6u8swyrwvz3 from amount value in response
+  doNotList      Boolean?      // meta_json.body.doNotList from https://api.koios.rest/api/v1/drep_updates?_drep_id=<drep_id>
+  votingPower     BigInt   // Stored in lovelace. Get from https://api.koios.rest/api/v1/drep_voting_power_history?_epoch_no=320&_drep_id=drep17l6sywnwqu9aedd6aumev42w39ln5zfl9nw7j4ak6u8swyrwvz3 from amount value in response
   createdAt       DateTime?     @default(now())
   updatedAt       DateTime?     @updatedAt
   user            User?         @relation(fields: [userId], references: [id])
   onchainVotes    OnchainVote[]
 }
 
-model SPO {
+model SPO { // get spo list from https://api.koios.rest/api/v1/pool_list
   // get spo info from https://api.koios.rest/api/v1/pool_info
   id           String        @id @default(uuid())
-  poolId       String        @unique // pool_id_bech32 value from pool_info api response
+  poolId       String        @unique  // pool_id_bech32 value from pool_info api response
   userId       String?       @unique
   poolName     String?   // go to meta_url from pool_info api response and use the name value
   ticker       String?  // ticker value from pool_info api response
   iconUrl      String?  // go to meta_url from pool_info api response and go to the url specified under the extended field and look for url_png_icon_64x64 field
-  votingPower  Float  // get from https://api.koios.rest/api/v1/pool_voting_power_history?_epoch_no=320&_pool_bech32=pool155efqn9xpcf73pphkk88cmlkdwx4ulkg606tne970qswczg3asc
+  votingPower  BigInt  // Stored in lovelace. Get from https://api.koios.rest/api/v1/pool_voting_power_history?_epoch_no=320&_pool_bech32=pool155efqn9xpcf73pphkk88cmlkdwx4ulkg606tne970qswczg3asc
   createdAt    DateTime?     @default(now())
   updatedAt    DateTime?     @updatedAt
   onchainVotes OnchainVote[]
   user         User?         @relation(fields: [userId], references: [id])
 }
 
-model CC {
+model CC { // get cc list from https://api.koios.rest/api/v1/committee_info
   id             String        @id @default(uuid())
   ccId           String        @unique // get members.cc_hot_id value from committee_info api response
   userId         String?       @unique
-  memberName     String? // go to https://api.koios.rest/api/v1/committee_votes?_cc_hot_id=cc_hot1qf5tkz6zwcpplq3kgpt2486d8za943vmymqkdjl249qgw3s2y5r9y and go to meta_url value to get the name value from authors[].name value
-  hotCredential  String? // get members.cc_hot_id value from committee_info api response
-  coldCredential String? // get members.cc_cold_id value from committee_info api response
-  status         String? // get members.expiration_epoch value from committee_info api response and compare with current epoch to get status
+  memberName     String?  // go to https://api.koios.rest/api/v1/committee_votes?_cc_hot_id=cc_hot1qf5tkz6zwcpplq3kgpt2486d8za943vmymqkdjl249qgw3s2y5r9y and go to meta_url value to get the name value from authors[].name value
+  hotCredential  String?  // get members.cc_hot_id value from committee_info api response
+  coldCredential String?  // get members.cc_cold_id value from committee_info api response
+  status         String?  // get members.expiration_epoch value from committee_info api response and compare with current epoch to get status
   // get epoch_no value from https://api.koios.rest/api/v1/tip to get current epoch
   createdAt      DateTime?     @default(now())
   updatedAt      DateTime?     @updatedAt
@@ -90,21 +90,21 @@ enum VoterType {
 }
 
 enum GovernanceType {
-  INFO
-  TREASURY
-  CONSTITUTION
-  HARD_FORK
+  INFO_ACTION
+  TREASURY_WITHDRAWALS
+  NEW_CONSTITUTION
+  HARD_FORK_INITIATION
   PROTOCOL_PARAMETER_CHANGE
   NO_CONFIDENCE
   UPDATE_COMMITTEE
 }
 
 enum ProposalStatus {
-  ACTIVE
-  RATIFIED
-  EXPIRED
-  APPROVED
-  NOT_APPROVED
+  ACTIVE    // Governance action submitted onchain and voting is ongoing
+  RATIFIED  // Passed voting, waiting for enactment
+  ENACTED   // Enacted/applied to the chain
+  EXPIRED   // Voting period ended without ratification/approval
+  CLOSED    // Expired INFO action (only applicable to INFO governance action type - they don't get ratified/enacted)
 }
 
 // Ingestion Types
@@ -115,19 +115,37 @@ model LastIngestedTime {
 
 // Viewer Types
 
-model Proposal {
+model Proposal { // get proposals from https://api.koios.rest/api/v1/proposal_list
   id                   Int             @id @default(autoincrement())
-  proposalId           String          @unique // proposal_id value from proposal_list api response
-  txHash               String // proposal_tx_hash value from proposal_list api response
-  certIndex            String // proposal_index value from proposal_list api response
-  title                String // meta_json.body.title value from proposal_list api response if its not there, go to meta_url from proposal_list api response and use the body.title value
-  description          String? // meta_json.body.abstract value from proposal_list api response if its not there, go to meta_url from proposal_list api response and use the body.abstract value
-  rationale            String? // meta_json.body.rationale value from proposal_list api response if its not there, go to meta_url from proposal_list api response and use the body.rationale value
-  governanceActionType GovernanceType? // proposal_type value from proposal_list api response 
-  status               ProposalStatus  @default(ACTIVE) // look at ratified_epoch, expired_epoch, enacted_epoch and dropped_epoch value from proposal_list api response and compare with current epoch to get status
-  submissionEpoch      Int? // proposed_epoch value from proposal_list api response
-  expiryEpoch          Int? // expired_epoch value from proposal_list api response
-  metadata             String? // meta_json value from proposal_list api response, if not there, go to meta_url from proposal_list api response and use the response body as metadata
+  proposalId           String          @unique  // proposal_id value from proposal_list api response
+  txHash               String  // proposal_tx_hash value from proposal_list api response
+  certIndex            String  // proposal_index value from proposal_list api response
+  title                String  // meta_json.body.title value from proposal_list api response if its not there, go to meta_url from proposal_list api response and use the body.title value
+  description          String?  // meta_json.body.abstract value from proposal_list api response if its not there, go to meta_url from proposal_list api response and use the body.abstract value
+  rationale            String?  // meta_json.body.rationale value from proposal_list api response if its not there, go to meta_url from proposal_list api response and use the body.rationale value
+  governanceActionType GovernanceType?  // proposal_type value from proposal_list api response
+  status               ProposalStatus  @default(ACTIVE) // derived from epoch fields below
+  submissionEpoch      Int?  // proposed_epoch value from proposal_list api response
+  ratifiedEpoch        Int?  // ratified_epoch value from proposal_list api response (can be null)
+  enactedEpoch         Int?  // enacted_epoch value from proposal_list api response (can be null)
+  droppedEpoch         Int?  // dropped_epoch value from proposal_list api response (can be null)
+  expiredEpoch         Int?  // expired_epoch value from proposal_list api response (can be null)
+  expirationEpoch      Int?  // expiration value from proposal_list api response (the epoch when voting ends)
+  // All voting power fields stored in lovelace (1 ADA = 1,000,000 lovelace). Convert to ADA in frontend.
+  drepTotalVotePower        BigInt?  // amount from https://api.koios.rest/#get-/drep_epoch_summary
+  drepActiveYesVotePower     BigInt?  // drep_active_yes_vote_power value from proposal_voting_summary api response
+  drepActiveNoVotePower      BigInt?  // drep_active_no_vote_power value from proposal_voting_summary api response
+  drepActiveAbstainVotePower BigInt?  // drep_active_abstain_vote_power value from proposal_voting_summary api response
+  drepAlwaysAbstainVotePower BigInt?  // drep_always_abstain_vote_power value from proposal_voting_summary api response
+  drepAlwaysNoConfidenceVotePower BigInt?  // drep_always_no_confidence_vote_power value from proposal_voting_summary api response
+  drepInactiveVotePower        BigInt?  // get the full list of dreps using https://api.koios.rest/#get-/drep_list and check whether the drep has either vote on any proposals (from database or koios api?) or update their Drep certificate (from https://api.koios.rest/#get-/drep_updates) in the past 20 epochs from the (proposal expiration/ latest epoch (if it is an active proposal) - 1 epoch), If not, consider them inactive and aggregate their voting power from https://api.koios.rest/#get-/drep_voting_power_history
+  spoTotalVotePower        BigInt?  // Aggregated amount from https://api.koios.rest/#get-/pool_voting_power_history
+  spoActiveYesVotePower     BigInt?  // pool_active_yes_vote_power value from proposal_voting_summary api response
+  spoActiveNoVotePower      BigInt?  // pool_active_no_vote_power value from proposal_voting_summary api response
+  spoActiveAbstainVotePower BigInt?  // pool_active_abstain_vote_power value from proposal_voting_summary api response
+  spoAlwaysAbstainVotePower BigInt?  // pool_passive_always_abstain_vote_power value from proposal_voting_summary api response
+  spoAlwaysNoConfidenceVotePower BigInt?  // pool_passive_always_no_confidence_vote_power value from proposal_voting_summary api response
+  metadata             String?  // meta_json value from proposal_list api response, if not there, go to meta_url from proposal_list api response and use the response body as metadata
   createdAt            DateTime?       @default(now())
   updatedAt            DateTime?       @updatedAt
   onchainVotes         OnchainVote[]
@@ -136,18 +154,15 @@ model Proposal {
   @@unique([txHash, certIndex])
 }
 
-model OnchainVote {
+model OnchainVote { // get votes from https://api.koios.rest/api/v1/vote_list
   id             String    @id @default(uuid())
   txHash         String // vote_tx_hash value from vote_list api response
   proposal       Proposal  @relation(fields: [proposalId], references: [proposalId])
   proposalId     String  // proposal_id value from vote_list api response (Cardano governance action ID)
   vote           VoteType? // vote value from vote_list api response
   voterType      VoterType // proposal_type value from vote_list api response
-  votingPower    String?
-  // get from https://api.koios.rest/api/v1/pool_voting_power_history?_epoch_no=320&_pool_bech32=pool155efqn9xpcf73pphkk88cmlkdwx4ulkg606tne970qswczg3asc
-  // or from https://api.koios.rest/api/v1/drep_voting_power_history?_epoch_no=320&_drep_id=drep17l6sywnwqu9aedd6aumev42w39ln5zfl9nw7j4ak6u8swyrwvz3
-  // based on voterType, get the voting power from the appropriate API
-  votingPowerAda Float?
+  // Stored in lovelace. Get from pool_voting_power_history or drep_voting_power_history API based on voterType
+  votingPower    BigInt?
   anchorUrl      String?  // meta_url value from vote_list api response
   anchorHash     String?  // meta_hash value from vote_list api response
   votedAt        DateTime? @default(now())  // get block_time value from vote_list api response and convert to DateTime
@@ -161,6 +176,21 @@ model OnchainVote {
   ccId           String?  // cc_hot_id from vote_list api response
 
   @@unique([proposalId, voterType, drepId, spoId, ccId])
+}
+
+// Net Change Limit (NCL) tracking for treasury withdrawals
+// The "current" value is the aggregate of all ratified/enacted treasury withdrawal amounts for that year
+// The "limit" value is manually set by the database administrator
+// All values stored in lovelace (1 ADA = 1,000,000 lovelace)
+
+model NCL {
+  id        String    @id @default(uuid())
+  year      Int       @unique // Calendar year (e.g., 2025)
+  epoch     Int       // Epoch when this NCL record was last updated
+  current   BigInt    @default(0) // Current aggregate treasury withdrawals (in lovelace)
+  limit     BigInt    // Net change limit set by administrator (in lovelace)
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
 }
 
 // Crowdfunding Types

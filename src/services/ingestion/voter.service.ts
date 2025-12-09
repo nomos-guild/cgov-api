@@ -5,7 +5,6 @@
 
 import type { Prisma } from "@prisma/client";
 import { koiosGet, koiosPost } from "../koios";
-import { lovelaceToAda } from "./utils";
 import type {
   KoiosDrep,
   KoiosDrepVotingPower,
@@ -72,6 +71,39 @@ function extractBooleanField(value: unknown): boolean | undefined {
 }
 
 /**
+ * Recursively searches an extended metadata object for icon URLs.
+ * Prefers `url_png_icon_64x64`, then falls back to `url_png_logo`.
+ */
+function findIconUrlInExtendedMeta(obj: unknown): string | null {
+  if (!obj || typeof obj !== "object") {
+    return null;
+  }
+
+  const record = obj as Record<string, unknown>;
+
+  const icon64 = record["url_png_icon_64x64"];
+  if (typeof icon64 === "string" && icon64.trim()) {
+    return icon64;
+  }
+
+  const logo = record["url_png_logo"];
+  if (typeof logo === "string" && logo.trim()) {
+    return logo;
+  }
+
+  for (const value of Object.values(record)) {
+    if (value && typeof value === "object") {
+      const found = findIconUrlInExtendedMeta(value);
+      if (found) {
+        return found;
+      }
+    }
+  }
+
+  return null;
+}
+
+/**
  * Result of ensuring a voter exists
  */
 export interface EnsureVoterResult {
@@ -112,9 +144,9 @@ export async function ensureVoterExists(
 
 // Cache for API responses to avoid duplicate calls within a transaction
 const drepInfoCache = new Map<string, KoiosDrep | undefined>();
-const drepVotingPowerCache = new Map<string, number>();
+const drepVotingPowerCache = new Map<string, bigint>();
 const spoInfoCache = new Map<string, KoiosSpo | undefined>();
-const spoVotingPowerCache = new Map<string, number>();
+const spoVotingPowerCache = new Map<string, bigint>();
 
 /**
  * Ensures a DRep exists, creating if needed and updating voting power
@@ -157,7 +189,8 @@ async function ensureDrepExists(
       }
     );
     const votingPowerLovelace = votingPowerHistory?.[0]?.amount;
-    votingPower = lovelaceToAda(votingPowerLovelace) || 0;
+    // Store voting power in lovelace as BigInt (1 ADA = 1,000,000 lovelace)
+    votingPower = votingPowerLovelace ? BigInt(votingPowerLovelace) : BigInt(0);
     drepVotingPowerCache.set(cacheKey, votingPower);
   }
 
@@ -271,7 +304,8 @@ async function ensureSpoExists(
       }
     );
     const votingPowerLovelace = votingPowerHistory?.[0]?.amount;
-    votingPower = lovelaceToAda(votingPowerLovelace) || 0;
+    // Store voting power in lovelace as BigInt (1 ADA = 1,000,000 lovelace)
+    votingPower = votingPowerLovelace ? BigInt(votingPowerLovelace) : BigInt(0);
     spoVotingPowerCache.set(cacheKey, votingPower);
   }
 
@@ -293,45 +327,10 @@ async function ensureSpoExists(
 }
 
 /**
- * Recursively searches an extended metadata object for icon URLs.
- * Prefers `url_png_icon_64x64`, then falls back to `url_png_logo`.
- */
-function findIconUrlInExtendedMeta(obj: unknown): string | null {
-  if (!obj || typeof obj !== "object") {
-    return null;
-  }
-
-  const record = obj as Record<string, unknown>;
-
-  const icon64 = record["url_png_icon_64x64"];
-  if (typeof icon64 === "string" && icon64.trim()) {
-    return icon64;
-  }
-
-  const logo = record["url_png_logo"];
-  if (typeof logo === "string" && logo.trim()) {
-    return logo;
-  }
-
-  for (const value of Object.values(record)) {
-    if (value && typeof value === "object") {
-      const found = findIconUrlInExtendedMeta(value);
-      if (found) {
-        return found;
-      }
-    }
-  }
-
-  return null;
-}
-
-/**
  * Gets pool name, ticker, and icon URL from meta_json or fetches from meta_url
- * For iconUrl: meta_url → fetch extended URL → search for url_png_icon_64x64 / url_png_logo
+ * For iconUrl: meta_url → fetch extended URL → fetch url_png_icon_64x64
  */
-async function getPoolMeta(
-  koiosSpo: KoiosSpo | undefined
-): Promise<{
+async function getPoolMeta(koiosSpo: KoiosSpo | undefined): Promise<{
   poolName: string | null;
   ticker: string | null;
   iconUrl: string | null;
@@ -346,13 +345,13 @@ async function getPoolMeta(
   let iconUrl: string | null = null;
   let extendedUrl: string | null = null;
 
-  // Fetch icon URL from extended metadata
-  if (extendedUrl) {
+  // Fallback to fetching from meta_url
+  if (koiosSpo.meta_url) {
     try {
       // Convert IPFS URLs to use an HTTP gateway
-      let fetchUrl = extendedUrl;
-      if (extendedUrl.startsWith("ipfs://")) {
-        const ipfsHash = extendedUrl.replace("ipfs://", "");
+      let fetchUrl = koiosSpo.meta_url;
+      if (koiosSpo.meta_url.startsWith("ipfs://")) {
+        const ipfsHash = koiosSpo.meta_url.replace("ipfs://", "");
         fetchUrl = `https://ipfs.io/ipfs/${ipfsHash}`;
       }
 
@@ -365,15 +364,18 @@ async function getPoolMeta(
           // for non-browser User-Agents. Use a browser-like UA so that
           // HTTP redirects (e.g. short URLs) are honoured consistently.
           "User-Agent":
-            "Mozilla/5.0 (compatible; cgov-api/1.0; +https://github.com/input-output-hk)",
+            "Mozilla/5.0 (compatible; drep-delegator-feedback/1.0)",
           Accept: "application/json, text/plain, */*",
         },
       });
       const meta = response.data;
 
-      const extendedMeta = await fetchJsonWithBrowserLikeClient(fetchUrl);
-      if (extendedMeta) {
-        iconUrl = findIconUrlInExtendedMeta(extendedMeta);
+      // Only fill missing fields from fetched metadata
+      if (!poolName) {
+        poolName = meta?.name || null;
+      }
+      if (!ticker) {
+        ticker = meta?.ticker || null;
       }
 
       // Get extended URL for icon
@@ -401,12 +403,13 @@ async function getPoolMeta(
         maxRedirects: 5,
         headers: {
           "User-Agent":
-            "Mozilla/5.0 (compatible; cgov-api/1.0; +https://github.com/input-output-hk)",
+            "Mozilla/5.0 (compatible; drep-delegator-feedback/1.0)",
           Accept: "application/json, text/plain, */*",
         },
       });
       const extendedMeta = response.data;
 
+      // Use recursive search to find icon URLs in various metadata structures
       iconUrl = findIconUrlInExtendedMeta(extendedMeta);
     } catch (error) {
       console.warn(
@@ -499,4 +502,173 @@ export async function ingestSpo(
  */
 export async function ingestCc(ccId: string, prisma: Prisma.TransactionClient) {
   return ensureCcExists(ccId, prisma);
+}
+
+/**
+ * Result of syncing voter voting powers
+ */
+export interface SyncVoterPowerResult {
+  dreps: {
+    total: number;
+    updated: number;
+    failed: number;
+    errors: string[];
+  };
+  spos: {
+    total: number;
+    updated: number;
+    failed: number;
+    errors: string[];
+  };
+  epoch: number;
+}
+
+/**
+ * Syncs voting power for all DReps and SPOs in the database
+ * Updates their voting power based on the latest epoch data from Koios
+ */
+export async function syncAllVoterVotingPower(
+  prisma: Prisma.TransactionClient
+): Promise<SyncVoterPowerResult> {
+  const currentEpoch = await getCurrentEpoch();
+
+  console.log(
+    `[Voter Service] Starting voting power sync for epoch ${currentEpoch}...`
+  );
+
+  // Sync DReps
+  const drepResult = await syncDrepVotingPower(prisma, currentEpoch);
+
+  // Sync SPOs
+  const spoResult = await syncSpoVotingPower(prisma, currentEpoch);
+
+  return {
+    dreps: drepResult,
+    spos: spoResult,
+    epoch: currentEpoch,
+  };
+}
+
+/**
+ * Syncs voting power for all DReps in the database
+ * Only fetches voting power for DReps that exist in the database
+ */
+async function syncDrepVotingPower(
+  prisma: Prisma.TransactionClient,
+  epoch: number
+): Promise<{ total: number; updated: number; failed: number; errors: string[] }> {
+  const errors: string[] = [];
+  let updated = 0;
+  let failed = 0;
+
+  // Get all DReps from database
+  const dreps = await prisma.drep.findMany({
+    select: { drepId: true },
+  });
+
+  if (dreps.length === 0) {
+    console.log(`[Voter Service] No DReps in database to sync`);
+    return { total: 0, updated: 0, failed: 0, errors: [] };
+  }
+
+  console.log(
+    `[Voter Service] Syncing voting power for ${dreps.length} DReps...`
+  );
+
+  // Fetch voting power for each DRep individually
+  // This is more efficient when we have fewer DReps in DB than on-chain
+  for (const drep of dreps) {
+    try {
+      const votingPowerHistory = await koiosGet<KoiosDrepVotingPower[]>(
+        "/drep_voting_power_history",
+        {
+          _epoch_no: epoch,
+          _drep_id: drep.drepId,
+        }
+      );
+
+      const votingPowerLovelace = votingPowerHistory?.[0]?.amount;
+
+      if (votingPowerLovelace) {
+        const newVotingPower = BigInt(votingPowerLovelace);
+        await prisma.drep.update({
+          where: { drepId: drep.drepId },
+          data: { votingPower: newVotingPower },
+        });
+        updated++;
+      }
+      // If no voting power found, the DRep might be inactive - skip update
+    } catch (error: any) {
+      failed++;
+      errors.push(`DRep ${drep.drepId}: ${error.message}`);
+    }
+  }
+
+  console.log(
+    `[Voter Service] DRep sync complete: ${updated} updated, ${failed} failed`
+  );
+
+  return { total: dreps.length, updated, failed, errors };
+}
+
+/**
+ * Syncs voting power for all SPOs in the database
+ * Only fetches voting power for SPOs that exist in the database
+ */
+async function syncSpoVotingPower(
+  prisma: Prisma.TransactionClient,
+  epoch: number
+): Promise<{ total: number; updated: number; failed: number; errors: string[] }> {
+  const errors: string[] = [];
+  let updated = 0;
+  let failed = 0;
+
+  // Get all SPOs from database
+  const spos = await prisma.sPO.findMany({
+    select: { poolId: true },
+  });
+
+  if (spos.length === 0) {
+    console.log(`[Voter Service] No SPOs in database to sync`);
+    return { total: 0, updated: 0, failed: 0, errors: [] };
+  }
+
+  console.log(
+    `[Voter Service] Syncing voting power for ${spos.length} SPOs...`
+  );
+
+  // Fetch voting power for each SPO individually
+  // This is more efficient when we have fewer SPOs in DB than on-chain
+  for (const spo of spos) {
+    try {
+      const votingPowerHistory = await koiosGet<KoiosSpoVotingPower[]>(
+        "/pool_voting_power_history",
+        {
+          _epoch_no: epoch,
+          _pool_bech32: spo.poolId,
+        }
+      );
+
+      const votingPowerLovelace = votingPowerHistory?.[0]?.amount;
+
+      if (votingPowerLovelace) {
+        const newVotingPower = BigInt(votingPowerLovelace);
+        await prisma.sPO.update({
+          where: { poolId: spo.poolId },
+          data: { votingPower: newVotingPower },
+        });
+        updated++;
+      }
+      // If no voting power found, the SPO might be inactive - skip update
+    } catch (error: any) {
+      failed++;
+      errors.push(`SPO ${spo.poolId}: ${error.message}`);
+    }
+  }
+
+  console.log(
+    `[Voter Service] SPO sync complete: ${updated} updated, ${failed} failed`
+  );
+
+  return { total: spos.length, updated, failed, errors };
 }
