@@ -329,39 +329,6 @@ async function ensureSpoExists(
 }
 
 /**
- * Recursively searches an extended metadata object for icon URLs.
- * Prefers `url_png_icon_64x64`, then falls back to `url_png_logo`.
- */
-function findIconUrlInExtendedMeta(obj: unknown): string | null {
-  if (!obj || typeof obj !== "object") {
-    return null;
-  }
-
-  const record = obj as Record<string, unknown>;
-
-  const icon64 = record["url_png_icon_64x64"];
-  if (typeof icon64 === "string" && icon64.trim()) {
-    return icon64;
-  }
-
-  const logo = record["url_png_logo"];
-  if (typeof logo === "string" && logo.trim()) {
-    return logo;
-  }
-
-  for (const value of Object.values(record)) {
-    if (value && typeof value === "object") {
-      const found = findIconUrlInExtendedMeta(value);
-      if (found) {
-        return found;
-      }
-    }
-  }
-
-  return null;
-}
-
-/**
  * Ensures a URL has an HTTP/HTTPS scheme. Many metadata URLs are provided
  * without protocol (e.g. "git.io/abc123" or "bit.ly/xyz"), which plain HTTP
  * clients and Puppeteer cannot navigate to directly.
