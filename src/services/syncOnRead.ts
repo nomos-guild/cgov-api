@@ -30,6 +30,20 @@ const PROPOSAL_SELECT_COLUMNS =
     "withdrawal",
   ].join(",");
 
+/**
+ * Simple in-memory throttling for sync-on-read operations.
+ * These guards ensure we don't hit Koios on every single HTTP request while
+ * still allowing occasional refreshes when new data is likely.
+ *
+ * Note: This is per-process and resets on server restart, which is fine for
+ * our purpose of avoiding bursty traffic and UI stalls.
+ */
+const OVERVIEW_SYNC_COOLDOWN_MS = 60_000; // 1 minute
+let lastOverviewSyncAt = 0;
+
+const PROPOSAL_SYNC_COOLDOWN_MS = 30_000; // 30 seconds per proposal identifier
+const lastProposalSyncAt = new Map<string, number>();
+
 type DbProposalForSync = Pick<
   Proposal,
   | "proposalId"
@@ -90,6 +104,12 @@ function blockTimeToEpoch(blockTime: number): number {
  * and ingests just those.
  */
 export async function syncProposalsOverviewOnRead(): Promise<void> {
+  const now = Date.now();
+  if (now - lastOverviewSyncAt < OVERVIEW_SYNC_COOLDOWN_MS) {
+    // Recently synced – skip hitting Koios again for this request.
+    return;
+  }
+
   // Find the highest submissionEpoch we currently have
   const latest = await prisma.proposal.findFirst({
     orderBy: [
@@ -166,6 +186,8 @@ export async function syncProposalsOverviewOnRead(): Promise<void> {
 
     offset += page.length;
   }
+
+  lastOverviewSyncAt = Date.now();
 }
 
 /**
@@ -185,6 +207,14 @@ export async function syncProposalDetailsOnRead(
 ): Promise<void> {
   const trimmed = identifier.trim();
   if (!trimmed) return;
+
+  // Throttle per-identifier syncs so that we don't repeatedly hit Koios when
+  // the same proposal details are requested in quick succession.
+  const now = Date.now();
+  const lastSync = lastProposalSyncAt.get(trimmed) ?? 0;
+  if (now - lastSync < PROPOSAL_SYNC_COOLDOWN_MS) {
+    return;
+  }
 
   // 1. Try to resolve an existing DB proposal and a Koios filter
   let dbProposal: DbProposalForSync | null = null;
@@ -499,7 +529,62 @@ export async function syncProposalDetailsOnRead(
       null);
 
   if (!hasVotingSummaryDiff) {
-    // Nothing changed since we last ingested this proposal.
+    // Nothing changed in the summary since we last ingested this proposal.
+    // However, it's still possible for the local DB to be missing votes
+    // (e.g. manual cleanup or a past ingestion bug). To make sync-on-read
+    // self-healing, we detect the obvious "no local votes but Koios reports
+    // non-zero voting power / CC votes" case and force a re-ingest.
+    const localVoteCount = await prisma.onchainVote.count({
+      where: { proposalId: koiosProposal.proposal_id },
+    });
+
+    const koiosHasVotes =
+      (votingSummary.drep_active_yes_vote_power &&
+        votingSummary.drep_active_yes_vote_power !== "0") ||
+      (votingSummary.drep_active_no_vote_power &&
+        votingSummary.drep_active_no_vote_power !== "0") ||
+      (votingSummary.drep_active_abstain_vote_power &&
+        votingSummary.drep_active_abstain_vote_power !== "0") ||
+      (votingSummary.drep_always_abstain_vote_power &&
+        votingSummary.drep_always_abstain_vote_power !== "0") ||
+      (votingSummary.drep_always_no_confidence_vote_power &&
+        votingSummary.drep_always_no_confidence_vote_power !== "0") ||
+      (votingSummary.pool_active_yes_vote_power &&
+        votingSummary.pool_active_yes_vote_power !== "0") ||
+      (votingSummary.pool_active_no_vote_power &&
+        votingSummary.pool_active_no_vote_power !== "0") ||
+      (votingSummary.pool_active_abstain_vote_power &&
+        votingSummary.pool_active_abstain_vote_power !== "0") ||
+      (votingSummary.pool_passive_always_abstain_vote_power &&
+        votingSummary.pool_passive_always_abstain_vote_power !== "0") ||
+      (votingSummary.pool_passive_always_no_confidence_vote_power &&
+        votingSummary.pool_passive_always_no_confidence_vote_power !==
+          "0") ||
+      (votingSummary.cc_yes_vote ?? 0) > 0 ||
+      (votingSummary.cc_no_vote ?? 0) > 0 ||
+      (votingSummary.cc_abstain_vote ?? 0) > 0;
+
+    if (!koiosHasVotes || localVoteCount > 0) {
+      return;
+    }
+
+    // At this point Koios reports votes but we have none stored locally –
+    // re-ingest to repopulate onchainVote rows and keep the DB consistent
+    // with the voting summary we already have on the proposal.
+    try {
+      await ingestProposalData(
+        koiosProposal,
+        undefined,
+        minEpochForVotes,
+        { useCache: false }
+      );
+    } catch (error) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        "[SyncOnRead] Failed to re-ingest proposal after detecting missing local votes:",
+        (error as Error).message
+      );
+    }
     return;
   }
 
@@ -517,6 +602,8 @@ export async function syncProposalDetailsOnRead(
       (error as Error).message
     );
   }
+
+  lastProposalSyncAt.set(trimmed, Date.now());
 }
 
 
