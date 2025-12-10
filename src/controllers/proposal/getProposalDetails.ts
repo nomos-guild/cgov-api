@@ -7,6 +7,7 @@ import {
   proposalWithVotesSelect,
 } from "../../libs/proposalMapper";
 import { GetProposalInfoResponse } from "../../responses";
+import { syncProposalDetailsOnRead } from "../../services/syncOnRead";
 
 const buildProposalLookup = (
   identifier: string
@@ -59,6 +60,10 @@ export const getProposalDetails = async (req: Request, res: Response) => {
         message: "A proposal_id path parameter is required",
       });
     }
+
+    // Before reading from the database, opportunistically sync this proposal
+    // against Koios so that new proposals or votes are ingested on demand.
+    await syncProposalDetailsOnRead(proposalId);
 
     const lookup = buildProposalLookup(proposalId);
 

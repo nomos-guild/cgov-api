@@ -6,9 +6,13 @@ import {
   ProposalWithVotes,
   proposalWithVotesSelect,
 } from "../../libs/proposalMapper";
+import { syncProposalsOverviewOnRead } from "../../services/syncOnRead";
 
 export const getOverviewProposals = async (_req: Request, res: Response) => {
   try {
+    // Ensure any newly-submitted proposals are ingested before serving the list
+    await syncProposalsOverviewOnRead();
+
     const proposals = await prisma.proposal.findMany({
       select: proposalWithVotesSelect,
       orderBy: [

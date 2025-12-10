@@ -39,12 +39,18 @@ export function clearVoteCache() {
  * @param minEpoch - Optional minimum epoch to fetch votes from (inclusive).
  *                   Used to avoid fetching historical votes that cannot belong
  *                   to the proposals we are currently syncing.
+ * @param options - Optional flags:
+ *                  - useCache: when true (default), we fetch all votes once
+ *                    and keep them in memory for the duration of a bulk sync.
+ *                    When false, we query Koios just for this proposal and do
+ *                    not touch the global cache. This is ideal for sync-on-read.
  * @returns Statistics about votes and voters created/updated
  */
 export async function ingestVotesForProposal(
   proposalId: string,
   tx: Prisma.TransactionClient,
-  minEpoch?: number
+  minEpoch?: number,
+  options?: { useCache?: boolean }
 ): Promise<VoteIngestionStats> {
   const stats: VoteIngestionStats = {
     votesIngested: 0,
@@ -53,33 +59,90 @@ export async function ingestVotesForProposal(
     votersUpdated: { dreps: 0, spos: 0, ccs: 0 },
   };
 
+  const useCache = options?.useCache !== false;
+
   try {
-    // Fetch votes from Koios with pagination (use cache if available)
-    if (!cachedVotes) {
-      let allVotes: KoiosVote[] = [];
+    let koiosVotes: KoiosVote[] = [];
+
+    if (useCache) {
+      // Bulk-sync mode: fetch all relevant votes once, keep in memory, then
+      // filter per proposal. This is used by the cron-style sync that walks
+      // through many proposals in one run.
+      if (!cachedVotes) {
+        let allVotes: KoiosVote[] = [];
+        let offset = 0;
+        const limit = 1000; // Max limit per request
+        let hasMore = true;
+
+        console.log(
+          `[Vote Ingestion] Fetching votes with pagination${
+            typeof minEpoch === "number" ? ` from epoch >= ${minEpoch}` : ""
+          }...`
+        );
+
+        while (hasMore) {
+          // Koios exposes horizontal filtering via query params (PostgREST style).
+          // We rely on an `epoch_no` column being available on /vote_list so that
+          // we can avoid fetching votes from epochs that are strictly before the
+          // earliest proposal epoch we care about in this sync run.
+          const params: any = {
+            limit,
+            offset,
+          };
+
+          if (typeof minEpoch === "number") {
+            // Fetch only votes where epoch_no >= minEpoch
+            // Example: /vote_list?epoch_no=gte.597&limit=1000&offset=0
+            params.epoch_no = `gte.${minEpoch}`;
+          }
+
+          const batch = await koiosGet<KoiosVote[]>("/vote_list", params);
+
+          if (!batch || batch.length === 0) {
+            hasMore = false;
+          } else {
+            allVotes = allVotes.concat(batch);
+            offset += batch.length;
+            console.log(
+              `[Vote Ingestion]   Fetched ${allVotes.length} votes so far...`
+            );
+
+            if (batch.length < limit) {
+              // Last batch was smaller than limit, no more pages
+              hasMore = false;
+            }
+          }
+        }
+
+        cachedVotes = allVotes;
+        console.log(
+          `[Vote Ingestion] ✓ Fetched ${cachedVotes.length} total votes from Koios`
+        );
+      }
+
+      // Filter in memory to find votes for this specific proposal
+      koiosVotes = cachedVotes.filter((vote) => vote.proposal_id === proposalId);
+    } else {
+      // Sync-on-read mode: fetch only votes for this proposal (and optional
+      // epoch window) directly from Koios, without touching the global cache.
       let offset = 0;
-      const limit = 1000; // Max limit per request
+      const limit = 1000;
       let hasMore = true;
 
       console.log(
-        `[Vote Ingestion] Fetching votes with pagination${
+        `[Vote Ingestion] Fetching votes for proposal ${proposalId}${
           typeof minEpoch === "number" ? ` from epoch >= ${minEpoch}` : ""
         }...`
       );
 
       while (hasMore) {
-        // Koios exposes horizontal filtering via query params (PostgREST style).
-        // We rely on an `epoch_no` column being available on /vote_list so that
-        // we can avoid fetching votes from epochs that are strictly before the
-        // earliest proposal epoch we care about in this sync run.
         const params: any = {
           limit,
           offset,
+          proposal_id: `eq.${proposalId}`,
         };
 
         if (typeof minEpoch === "number") {
-          // Fetch only votes where epoch_no >= minEpoch
-          // Example: /vote_list?epoch_no=gte.597&limit=1000&offset=0
           params.epoch_no = `gte.${minEpoch}`;
         }
 
@@ -88,30 +151,29 @@ export async function ingestVotesForProposal(
         if (!batch || batch.length === 0) {
           hasMore = false;
         } else {
-          allVotes = allVotes.concat(batch);
+          koiosVotes = koiosVotes.concat(batch);
           offset += batch.length;
-          console.log(`[Vote Ingestion]   Fetched ${allVotes.length} votes so far...`);
+          console.log(
+            `[Vote Ingestion]   Fetched ${koiosVotes.length} votes so far for proposal ${proposalId}...`
+          );
 
           if (batch.length < limit) {
-            // Last batch was smaller than limit, no more pages
             hasMore = false;
           }
         }
       }
-
-      cachedVotes = allVotes;
-      console.log(`[Vote Ingestion] ✓ Fetched ${cachedVotes.length} total votes from Koios`);
     }
 
-    // Filter in memory to find votes for this specific proposal
-    const koiosVotes = cachedVotes.filter((vote) => vote.proposal_id === proposalId);
-
     if (koiosVotes.length === 0) {
-      console.log(`[Vote Ingestion] No votes found for proposal ${proposalId}`);
+      console.log(
+        `[Vote Ingestion] No votes found for proposal ${proposalId}`
+      );
       return stats;
     }
 
-    console.log(`[Vote Ingestion] Found ${koiosVotes.length} votes for proposal ${proposalId}`);
+    console.log(
+      `[Vote Ingestion] Found ${koiosVotes.length} votes for proposal ${proposalId}`
+    );
 
     // Process each vote
     for (const koiosVote of koiosVotes) {

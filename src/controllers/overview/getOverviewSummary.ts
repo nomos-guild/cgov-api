@@ -2,11 +2,16 @@ import { Request, Response } from "express";
 import { ProposalStatus } from "@prisma/client";
 import { prisma } from "../../services";
 import { GetNCLDataResponse } from "../../responses";
+import { syncProposalsOverviewOnRead } from "../../services/syncOnRead";
 
 type StatusCountMap = Partial<Record<ProposalStatus, number>>;
 
 export const getOverviewSummary = async (_req: Request, res: Response) => {
   try {
+    // Keep proposal counts reasonably fresh by syncing any newly-submitted
+    // proposals before we compute the summary.
+    await syncProposalsOverviewOnRead();
+
     const currentYear = new Date().getUTCFullYear();
 
     const [totalProposals, grouped, nclData] = await Promise.all([
