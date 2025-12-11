@@ -1,1 +1,1 @@
-export * from "./governanceAction.model";
+export * from "./governance_action.model";
