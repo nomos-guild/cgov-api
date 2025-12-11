@@ -7,6 +7,7 @@ import {
   proposalWithVotesSelect,
 } from "../../libs/proposalMapper";
 import { GetProposalInfoResponse } from "../../responses";
+import { syncProposalDetailsOnRead } from "../../services/syncOnRead";
 
 const buildProposalLookup = (
   identifier: string
@@ -19,18 +20,26 @@ const buildProposalLookup = (
   const filters: Prisma.ProposalWhereInput[] = [];
   const numericId = Number(trimmed);
 
+  // Check for numeric id
   if (!Number.isNaN(numericId)) {
     filters.push({ id: numericId });
   }
 
-  if (trimmed.includes(":")) {
+  // Check for proposalId (starts with "gov_action")
+  if (trimmed.startsWith("gov_action")) {
+    filters.push({ proposalId: trimmed });
+  }
+
+  // Check for txHash:certIndex format or plain txHash
+  if (trimmed.includes(":") && !trimmed.startsWith("gov_action")) {
     const [hashCandidate, certCandidate] = trimmed.split(":");
     if (hashCandidate && certCandidate) {
       filters.push({ txHash: hashCandidate, certIndex: certCandidate });
     } else if (hashCandidate) {
       filters.push({ txHash: hashCandidate });
     }
-  } else {
+  } else if (!trimmed.startsWith("gov_action")) {
+    // Plain txHash (64 char hex string)
     filters.push({ txHash: trimmed });
   }
 
@@ -51,6 +60,11 @@ export const getProposalDetails = async (req: Request, res: Response) => {
         message: "A proposal_id path parameter is required",
       });
     }
+
+    // Trigger background sync for this proposal (non-blocking).
+    // The sync runs in the background while we return data from the database.
+    // New data will be available on the next request after sync completes.
+    syncProposalDetailsOnRead(proposalId);
 
     const lookup = buildProposalLookup(proposalId);
 

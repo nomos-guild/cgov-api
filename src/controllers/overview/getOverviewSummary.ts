@@ -2,16 +2,27 @@ import { Request, Response } from "express";
 import { ProposalStatus } from "@prisma/client";
 import { prisma } from "../../services";
 import { GetNCLDataResponse } from "../../responses";
+import { syncProposalsOverviewOnRead } from "../../services/syncOnRead";
 
 type StatusCountMap = Partial<Record<ProposalStatus, number>>;
 
 export const getOverviewSummary = async (_req: Request, res: Response) => {
   try {
-    const [totalProposals, grouped] = await Promise.all([
+    // Trigger background sync for new proposals (non-blocking).
+    // The sync runs in the background while we return data from the database.
+    // New proposals will be available on the next request after sync completes.
+    syncProposalsOverviewOnRead();
+
+    const currentYear = new Date().getUTCFullYear();
+
+    const [totalProposals, grouped, nclData] = await Promise.all([
       prisma.proposal.count(),
       prisma.proposal.groupBy({
         by: ["status"],
         _count: { status: true },
+      }),
+      prisma.nCL.findUnique({
+        where: { year: currentYear },
       }),
     ]);
 
@@ -20,19 +31,25 @@ export const getOverviewSummary = async (_req: Request, res: Response) => {
       return acc;
     }, {});
 
+    const currentlyRatified = counts[ProposalStatus.RATIFIED] ?? 0;
+    const enacted = counts[ProposalStatus.ENACTED] ?? 0;
+
     const summary = {
       totalProposals,
       activeProposals: counts[ProposalStatus.ACTIVE] ?? 0,
-      ratifiedProposals: counts[ProposalStatus.RATIFIED] ?? 0,
+      // Ratified = currently ratified + enacted (since enacted proposals were ratified first)
+      ratifiedProposals: currentlyRatified + enacted,
+      enactedProposals: enacted,
       expiredProposals: counts[ProposalStatus.EXPIRED] ?? 0,
-      approvedProposals: counts[ProposalStatus.APPROVED] ?? 0,
-      notApprovedProposals: counts[ProposalStatus.NOT_APPROVED] ?? 0,
+      closedProposals: counts[ProposalStatus.CLOSED] ?? 0,
     };
 
     const response: GetNCLDataResponse = {
-      year: new Date().getUTCFullYear(),
-      currentValue: summary.activeProposals,
-      targetValue: summary.totalProposals,
+      year: currentYear,
+      // NCL data: currentValue is treasury withdrawals so far, targetValue is the limit
+      // Values are stored in lovelace (BigInt), convert to string for API response
+      currentValue: (nclData?.current ?? BigInt(0)).toString(),
+      targetValue: (nclData?.limit ?? BigInt(0)).toString(),
       ...summary,
     };
 

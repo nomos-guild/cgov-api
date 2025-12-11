@@ -1,47 +1,69 @@
-# Use Node.js 22 Alpine for smaller image size
-FROM node:22-alpine AS builder
+FROM node:20 AS builder
 
-# Working directory
-WORKDIR /usr/src/app
+# Working Dir
+WORKDIR /base
 
-# Copy package files
-COPY package.json package-lock.json* ./
-
-# Install dependencies (including devDependencies for build)
-RUN npm ci
-
-# Copy source files and prisma schema
-COPY . .
-
-# Generate Prisma Client
-RUN npx prisma generate
-
-# Build TypeScript
-RUN npx tsc
-
-# Production stage
-FROM node:22-alpine
-
-WORKDIR /usr/src/app
-
-# Copy package files
-COPY package.json package-lock.json* ./
-
-# Install production dependencies only
-RUN npm ci --omit=dev
-
-# Copy built files from builder
-COPY --from=builder /usr/src/app/.build ./.build
-COPY --from=builder /usr/src/app/node_modules/.prisma ./node_modules/.prisma
-
-# Copy prisma schema for migrations
+# Copy Prisma schema first (needed for install hooks)
 COPY prisma ./prisma
 
-# Cloud Run sets PORT environment variable
-ENV NODE_ENV=production
+# Copy package files
+COPY package.json yarn.lock* ./
 
-# Expose port (Cloud Run will override this)
-EXPOSE 8080
+# Install ALL dependencies (including devDependencies for build)
+RUN yarn install --frozen-lockfile
 
-# Start the application
+# Copy source files
+COPY . .
+
+# Generate Prisma client
+RUN npx prisma generate
+
+# Build TypeScript (builds both index.ts and cron.ts)
+RUN yarn build
+
+# Production stage
+FROM node:20 AS runner
+
+WORKDIR /usr/src/app
+
+# Install system dependencies required by Puppeteer's bundled Chromium
+RUN apt-get update && apt-get install -y \
+    libnss3 \
+    libatk-bridge2.0-0 \
+    libatk1.0-0 \
+    libcups2 \
+    libdrm2 \
+    libxkbcommon0 \
+    libxcomposite1 \
+    libxdamage1 \
+    libxrandr2 \
+    libxfixes3 \
+    libasound2 \
+    libpangocairo-1.0-0 \
+    libpango-1.0-0 \
+    libgtk-3-0 \
+    libx11-xcb1 \
+    libxshmfence1 \
+    libgbm1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy built files from builder
+COPY --from=builder /base/.build ./.build
+COPY --from=builder /base/package.json ./
+COPY --from=builder /base/yarn.lock* ./
+COPY --from=builder /base/prisma ./prisma
+
+# Copy swagger docs if they exist
+COPY --from=builder /base/docs ./docs
+
+# Install only production dependencies
+RUN yarn install --frozen-lockfile --production
+
+# Generate Prisma client in production stage
+RUN npx prisma generate
+
+# Expose port (only used by API service)
+EXPOSE 3000
+
+# Default command (can be overridden in docker-compose)
 CMD ["node", ".build/index.js"]

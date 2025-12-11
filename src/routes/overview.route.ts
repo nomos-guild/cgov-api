@@ -51,4 +51,65 @@ router.get("/", overviewController.getOverviewSummary);
  */
 router.get("/proposals", overviewController.getOverviewProposals);
 
+/**
+ * @openapi
+ * /overview/ncl:
+ *   get:
+ *     summary: Get NCL data for all years
+ *     description: Retrieves Net Change Limit data for all available years
+ *     tags:
+ *       - Overview
+ *     responses:
+ *       200:
+ *         description: Successfully retrieved NCL data
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: array
+ *               items:
+ *                 $ref: '#/components/schemas/NCLYearData'
+ *       500:
+ *         description: Server error
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ */
+router.get("/ncl", overviewController.getNCLData);
+
+/**
+ * @openapi
+ * /overview/ncl/{year}:
+ *   get:
+ *     summary: Get NCL data for a specific year
+ *     description: Retrieves Net Change Limit data for the specified year
+ *     tags:
+ *       - Overview
+ *     parameters:
+ *       - in: path
+ *         name: year
+ *         required: true
+ *         schema:
+ *           type: integer
+ *         description: The calendar year (e.g., 2025)
+ *     responses:
+ *       200:
+ *         description: Successfully retrieved NCL data
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/NCLYearData'
+ *       400:
+ *         description: Invalid year parameter
+ *       404:
+ *         description: NCL data not found for the specified year
+ *       500:
+ *         description: Server error
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ */
+router.get("/ncl/:year", overviewController.getNCLDataByYear);
+
 export default router;

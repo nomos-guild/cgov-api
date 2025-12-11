@@ -2,34 +2,30 @@
   "name": "express-csl",
   "version": "1.0.0",
   "main": "src/index.ts",
-  "license": "Apache-2.0",
+  "license": "MIT",
   "scripts": {
     "dev": "nodemon src/index.ts",
     "build": "tsc",
     "start": "node .build/index.js",
-    "start:prod": "npm run build && npm start",
     "test:endpoints": "PORT=3001 jest --runInBand --testMatch='**/controller.test.ts' --forceExit",
     "test:validation": "PORT=3002 jest --runInBand --testMatch='**/validation.test.ts' --forceExit",
     "test:businessLogic": "PORT=3003 jest --runInBand --testMatch='**/routes.test.ts' --forceExit",
-    "test": "concurrently \"npm run test:endpoints\" \"npm run test:validation\" \"npm run test:businessLogic\"",
+    "test": "concurrently \"yarn test:endpoints\" \"yarn test:validation\" \"yarn test:businessLogic\"",
     "swagger:generate": "node swagger-generator.js",
-    "db:seed": "ts-node prisma/seed.ts",
-    "db:migrate": "npx prisma migrate deploy",
-    "db:generate": "npx prisma generate",
-    "deploy": "./scripts/deploy-gcp-cloud-run.sh"
-  },
-  "prisma": {
-    "seed": "ts-node prisma/seed.ts"
+    "test:sync": "ts-node test-sync.ts"
   },
   "dependencies": {
     "@meshsdk/core": "^1.9.0-beta.86",
     "@prisma/client": "^6.19.0",
+    "@types/node-cron": "^3.0.11",
     "axios": "^1.12.2",
+    "puppeteer": "^22.0.0",
     "class-validator": "^0.14.2",
     "cors": "^2.8.5",
     "dotenv": "^17.2.3",
     "express": "^5.1.0",
     "json-schema-to-ts": "^3.1.1",
+    "node-cron": "^4.2.1",
     "swagger-jsdoc": "^6.2.8",
     "swagger-ui-express": "^5.0.1"
   },
