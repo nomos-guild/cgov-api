@@ -10,16 +10,12 @@ API documentation is available at:
 
 ## Devs
 
-1. Install dependencies:
+1. Run Docker:
+
+2. Run 
 
    ```shell
-   npm install
-   ```
-
-2. Create a `.env` file with your Blockfrost API key:
-
-   ```shell
-   MAINNET_BLOCKFROST_API_KEY=your_api_key_here
+   npx prisma studio
    ```
 
 3. Start the development server:
@@ -31,3 +27,8 @@ API documentation is available at:
 The server will start on <http://localhost:3000> by default.
 
 ![Alt](https://repobeats.axiom.co/api/embed/87617f140cbc231931a3c7413c1c3dc7fdb30198.svg "Repobeats analytics image")
+
+## TODO
+
+- Pagination of get request
+- Get total treasury balance

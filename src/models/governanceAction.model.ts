@@ -27,9 +27,6 @@ export interface GovernanceAction {
   drep: GovernanceActionVoteInfo;
   spo?: GovernanceActionVoteInfo;
   cc?: CCGovernanceActionVoteInfo;
-  totalYes: number;
-  totalNo: number;
-  totalAbstain: number;
   submissionEpoch: number;
   expiryEpoch: number;
   // Voting threshold and status fields
@@ -61,7 +58,7 @@ export interface VoteRecord {
   voterId: string;
   voterName?: string;
   vote: "Yes" | "No" | "Abstain";
-  votingPower?: string; // Voting power in lovelace (string for BigInt serialization)
+  votingPower?: string;
   anchorUrl?: string;
   anchorHash?: string;
   votedAt: string;

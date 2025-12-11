@@ -32,22 +32,69 @@
  *           example: addr1qxy3w6z5...
  *     SignInResponse:
  *       type: object
- *       properties: {}
+ *       properties:
+ *         success:
+ *           type: boolean
+ *           description: Whether sign-in was successful
+ *           example: true
+ *         message:
+ *           type: string
+ *           description: Response message
+ *           example: "Successfully signed in"
+ *         token:
+ *           type: string
+ *           description: JWT authentication token
+ *           example: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+ *         user:
+ *           type: object
+ *           properties:
+ *             id:
+ *               type: string
+ *               description: User ID
+ *               example: "550e8400-e29b-41d4-a716-446655440000"
+ *             walletAddress:
+ *               type: string
+ *               description: User's wallet address
+ *               example: "addr1qxy3w6z5abc123def456ghi789jkl012mno345pqr678stu901vwx234yz"
  *     GetNCLDataResponse:
  *       type: object
  *       properties:
  *         year:
- *           type: string
+ *           type: number
  *           description: Year of the NCL data
- *           example: "2024"
+ *           example: 2024
  *         currentValue:
- *           type: string
+ *           type: number
  *           description: Current NCL value
- *           example: "1234.56"
+ *           example: 1234.56
  *         targetValue:
- *           type: string
+ *           type: number
  *           description: Target NCL value
- *           example: "5000.00"
+ *           example: 5000.00
+ *         totalProposals:
+ *           type: number
+ *           description: Total number of proposals
+ *           example: 150
+ *         activeProposals:
+ *           type: number
+ *           description: Number of active proposals
+ *           example: 25
+ *         ratifiedProposals:
+ *           type: number
+ *           description: Number of ratified proposals
+ *           example: 80
+ *         expiredProposals:
+ *           type: number
+ *           description: Number of expired proposals
+ *           example: 30
+ *         approvedProposals:
+ *           type: number
+ *           description: Number of approved proposals
+ *           example: 10
+ *         notApprovedProposals:
+ *           type: number
+ *           description: Number of not approved proposals
+ *           example: 5
  *     GetProposalListReponse:
  *       type: array
  *       items:
@@ -78,18 +125,90 @@
  *             type: string
  *             description: Constitutionality status
  *             example: "Constitutional"
- *           totalYes:
- *             type: number
- *             description: Total yes votes
- *             example: 1500
- *           totalNo:
- *             type: number
- *             description: Total no votes
- *             example: 300
- *           totalAbstain:
- *             type: number
- *             description: Total abstain votes
- *             example: 200
+ *           drep:
+ *             type: object
+ *             description: DRep voting information
+ *             properties:
+ *               yesPercent:
+ *                 type: number
+ *                 description: Percentage of yes votes
+ *                 example: 65.5
+ *               noPercent:
+ *                 type: number
+ *                 description: Percentage of no votes
+ *                 example: 20.3
+ *               abstainPercent:
+ *                 type: number
+ *                 description: Percentage of abstain votes
+ *                 example: 14.2
+ *               yesAda:
+ *                 type: string
+ *                 description: Total ADA voted yes
+ *                 example: "5000000"
+ *               noAda:
+ *                 type: string
+ *                 description: Total ADA voted no
+ *                 example: "1500000"
+ *               abstainAda:
+ *                 type: string
+ *                 description: Total ADA voted abstain
+ *                 example: "1000000"
+ *           spo:
+ *             type: object
+ *             description: SPO voting information (optional)
+ *             properties:
+ *               yesPercent:
+ *                 type: number
+ *                 description: Percentage of yes votes
+ *                 example: 70.0
+ *               noPercent:
+ *                 type: number
+ *                 description: Percentage of no votes
+ *                 example: 15.0
+ *               abstainPercent:
+ *                 type: number
+ *                 description: Percentage of abstain votes
+ *                 example: 15.0
+ *               yesAda:
+ *                 type: string
+ *                 description: Total ADA voted yes
+ *                 example: "10000000"
+ *               noAda:
+ *                 type: string
+ *                 description: Total ADA voted no
+ *                 example: "2000000"
+ *               abstainAda:
+ *                 type: string
+ *                 description: Total ADA voted abstain
+ *                 example: "2000000"
+ *           cc:
+ *             type: object
+ *             description: Constitutional Committee voting information (optional)
+ *             properties:
+ *               yesPercent:
+ *                 type: number
+ *                 description: Percentage of yes votes
+ *                 example: 80.0
+ *               noPercent:
+ *                 type: number
+ *                 description: Percentage of no votes
+ *                 example: 10.0
+ *               abstainPercent:
+ *                 type: number
+ *                 description: Percentage of abstain votes
+ *                 example: 10.0
+ *               yesCount:
+ *                 type: number
+ *                 description: Number of yes votes
+ *                 example: 8
+ *               noCount:
+ *                 type: number
+ *                 description: Number of no votes
+ *                 example: 1
+ *               abstainCount:
+ *                 type: number
+ *                 description: Number of abstain votes
+ *                 example: 1
  *           submissionEpoch:
  *             type: number
  *             description: Epoch when submitted
@@ -134,18 +253,90 @@
  *           type: string
  *           description: Rationale behind the proposal
  *           example: "Current infrastructure requires upgrades to handle increased load..."
- *         totalYes:
- *           type: number
- *           description: Total yes votes
- *           example: 1500
- *         totalNo:
- *           type: number
- *           description: Total no votes
- *           example: 300
- *         totalAbstain:
- *           type: number
- *           description: Total abstain votes
- *           example: 200
+ *         drep:
+ *           type: object
+ *           description: DRep voting information
+ *           properties:
+ *             yesPercent:
+ *               type: number
+ *               description: Percentage of yes votes
+ *               example: 65.5
+ *             noPercent:
+ *               type: number
+ *               description: Percentage of no votes
+ *               example: 20.3
+ *             abstainPercent:
+ *               type: number
+ *               description: Percentage of abstain votes
+ *               example: 14.2
+ *             yesAda:
+ *               type: string
+ *               description: Total ADA voted yes
+ *               example: "5000000"
+ *             noAda:
+ *               type: string
+ *               description: Total ADA voted no
+ *               example: "1500000"
+ *             abstainAda:
+ *               type: string
+ *               description: Total ADA voted abstain
+ *               example: "1000000"
+ *         spo:
+ *           type: object
+ *           description: SPO voting information (optional)
+ *           properties:
+ *             yesPercent:
+ *               type: number
+ *               description: Percentage of yes votes
+ *               example: 70.0
+ *             noPercent:
+ *               type: number
+ *               description: Percentage of no votes
+ *               example: 15.0
+ *             abstainPercent:
+ *               type: number
+ *               description: Percentage of abstain votes
+ *               example: 15.0
+ *             yesAda:
+ *               type: string
+ *               description: Total ADA voted yes
+ *               example: "10000000"
+ *             noAda:
+ *               type: string
+ *               description: Total ADA voted no
+ *               example: "2000000"
+ *             abstainAda:
+ *               type: string
+ *               description: Total ADA voted abstain
+ *               example: "2000000"
+ *         cc:
+ *           type: object
+ *           description: Constitutional Committee voting information (optional)
+ *           properties:
+ *             yesPercent:
+ *               type: number
+ *               description: Percentage of yes votes
+ *               example: 80.0
+ *             noPercent:
+ *               type: number
+ *               description: Percentage of no votes
+ *               example: 10.0
+ *             abstainPercent:
+ *               type: number
+ *               description: Percentage of abstain votes
+ *               example: 10.0
+ *             yesCount:
+ *               type: number
+ *               description: Number of yes votes
+ *               example: 8
+ *             noCount:
+ *               type: number
+ *               description: Number of no votes
+ *               example: 1
+ *             abstainCount:
+ *               type: number
+ *               description: Number of abstain votes
+ *               example: 1
  *         submissionEpoch:
  *           type: number
  *           description: Epoch when submitted
@@ -156,7 +347,7 @@
  *           example: 500
  *         votes:
  *           type: array
- *           description: List of individual votes
+ *           description: List of individual votes (DRep and SPO only)
  *           items:
  *             type: object
  *             properties:
@@ -171,7 +362,7 @@
  *                 example: "drep_123"
  *               voterName:
  *                 type: string
- *                 description: Voter name
+ *                 description: Voter name (optional)
  *                 example: "John Doe"
  *               vote:
  *                 type: string
@@ -180,27 +371,23 @@
  *                 example: "Yes"
  *               votingPower:
  *                 type: string
- *                 description: Voting power
- *                 example: "1000000"
- *               votingPowerAda:
- *                 type: number
- *                 description: Voting power in ADA
- *                 example: 1000000
+ *                 description: Voting power in lovelace (optional)
+ *                 example: "1500000000000"
  *               anchorUrl:
  *                 type: string
- *                 description: Anchor URL for vote metadata
+ *                 description: Anchor URL for vote metadata (optional)
  *                 example: "https://example.com/vote-metadata"
  *               anchorHash:
  *                 type: string
- *                 description: Hash of the anchor
+ *                 description: Hash of the anchor (optional)
  *                 example: "abc123def456"
  *               votedAt:
  *                 type: string
- *                 description: Timestamp when vote was cast
+ *                 description: Timestamp when vote was cast (ISO 8601 format)
  *                 example: "2024-01-15T10:30:00Z"
  *         ccVotes:
  *           type: array
- *           description: Constitutional Committee votes
+ *           description: Constitutional Committee votes (optional)
  *           items:
  *             type: object
  *             properties:
@@ -215,7 +402,7 @@
  *                 example: "cc_123"
  *               voterName:
  *                 type: string
- *                 description: Voter name
+ *                 description: Voter name (optional)
  *                 example: "Jane Smith"
  *               vote:
  *                 type: string
@@ -224,23 +411,19 @@
  *                 example: "Yes"
  *               votingPower:
  *                 type: string
- *                 description: Voting power
+ *                 description: Voting power in lovelace (optional)
  *                 example: "1"
- *               votingPowerAda:
- *                 type: number
- *                 description: Voting power in ADA
- *                 example: 1
  *               anchorUrl:
  *                 type: string
- *                 description: Anchor URL for vote metadata
+ *                 description: Anchor URL for vote metadata (optional)
  *                 example: "https://example.com/cc-vote-metadata"
  *               anchorHash:
  *                 type: string
- *                 description: Hash of the anchor
+ *                 description: Hash of the anchor (optional)
  *                 example: "xyz789ghi012"
  *               votedAt:
  *                 type: string
- *                 description: Timestamp when vote was cast
+ *                 description: Timestamp when vote was cast (ISO 8601 format)
  *                 example: "2024-01-15T11:00:00Z"
  *     ErrorResponse:
  *       type: object
