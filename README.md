@@ -10,16 +10,12 @@ API documentation is available at:
 
 ## Devs
 
-1. Install dependencies:
+1. Run Docker:
+
+2. Run 
 
    ```shell
-   npm install
-   ```
-
-2. Create a `.env` file with your Blockfrost API key:
-
-   ```shell
-   MAINNET_BLOCKFROST_API_KEY=your_api_key_here
+   npx prisma studio
    ```
 
 3. Start the development server:
