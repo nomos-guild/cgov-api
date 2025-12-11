@@ -251,9 +251,12 @@ async function ingestSingleVote(
   const voter = await getVoterWithPower(voterType, voterResult.voterId, tx);
   const votingPower = voter?.votingPower ?? null;
 
-  // 6. Check if vote exists using findFirst (works with nullable fields)
+  // 6. Check if this specific vote transaction already exists
+  // Each vote is a separate on-chain transaction, so we check by txHash
+  // (A DRep can change their vote, creating multiple vote transactions for the same proposal)
   const existingVote = await tx.onchainVote.findFirst({
     where: {
+      txHash: koiosVote.vote_tx_hash,
       proposalId,
       voterType,
       drepId,
@@ -263,7 +266,7 @@ async function ingestSingleVote(
   });
 
   if (existingVote) {
-    // Update existing vote
+    // Update existing vote record (same transaction, just updating metadata)
     await tx.onchainVote.update({
       where: { id: existingVote.id },
       data: {
@@ -271,11 +274,14 @@ async function ingestSingleVote(
         votingPower,
         anchorUrl: koiosVote.meta_url,
         anchorHash: koiosVote.meta_hash,
+        votedAt: koiosVote.block_time
+          ? new Date(koiosVote.block_time * 1000)
+          : undefined,
       },
     });
     stats.votesUpdated++;
   } else {
-    // Create new vote
+    // Create new vote record (new transaction - could be initial vote or vote change)
     await tx.onchainVote.create({
       data: {
         txHash: koiosVote.vote_tx_hash,

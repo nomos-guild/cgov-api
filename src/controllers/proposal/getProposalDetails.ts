@@ -61,9 +61,10 @@ export const getProposalDetails = async (req: Request, res: Response) => {
       });
     }
 
-    // Before reading from the database, opportunistically sync this proposal
-    // against Koios so that new proposals or votes are ingested on demand.
-    await syncProposalDetailsOnRead(proposalId);
+    // Trigger background sync for this proposal (non-blocking).
+    // The sync runs in the background while we return data from the database.
+    // New data will be available on the next request after sync completes.
+    syncProposalDetailsOnRead(proposalId);
 
     const lookup = buildProposalLookup(proposalId);
 

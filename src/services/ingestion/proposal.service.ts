@@ -45,7 +45,23 @@ export interface SyncAllProposalsResult {
 }
 
 /**
- * Internal function to ingest proposal data
+ * Options for ingestProposalData
+ */
+export interface IngestProposalOptions {
+  /** Optional current epoch to reuse across calls */
+  currentEpoch?: number;
+  /** Optional minimum epoch to fetch votes from */
+  minVotesEpoch?: number;
+  /**
+   * When true (default), vote fetching uses a global in-memory cache.
+   * When false, fetches only this proposal's votes directly from Koios
+   * (ideal for sync-on-read).
+   */
+  useCache?: boolean;
+}
+
+/**
+ * Ingests proposal data from Koios.
  * Wrapped with retry logic for transient failures.
  *
  * Note: We intentionally avoid a long-running interactive transaction here.
@@ -54,16 +70,14 @@ export interface SyncAllProposalsResult {
  * retries can safely resume without starting from scratch.
  *
  * @param koiosProposal - Proposal data from Koios API
- * @param currentEpochOverride - Optional current epoch to reuse across calls
- * @param minVotesEpochOverride - Optional minimum epoch to fetch votes from
+ * @param options - Optional configuration for ingestion
  * @returns Result with proposal info and vote statistics
  */
 export async function ingestProposalData(
   koiosProposal: KoiosProposal,
-  currentEpochOverride?: number,
-  minVotesEpochOverride?: number,
-  voteOptions?: { useCache?: boolean }
+  options?: IngestProposalOptions
 ): Promise<ProposalIngestionResult> {
+  const { currentEpoch: currentEpochOverride, minVotesEpoch: minVotesEpochOverride, useCache } = options ?? {};
   // Wrap entire operation in retry logic
   return withRetry(async () => {
     // 1. Get current epoch for status calculation
@@ -149,7 +163,7 @@ export async function ingestProposalData(
       proposal.proposalId,
       prisma,
       minVotesEpochOverride,
-      voteOptions
+      { useCache: useCache !== false }
     );
 
     // 8. Fetch and update voting power summary data from Koios
@@ -239,11 +253,9 @@ export async function ingestProposal(
 
   // 3. Ingest the proposal data (let it fetch current epoch itself) and
   //    only fetch votes from this proposal's submission epoch onward.
-  return ingestProposalData(
-    koiosProposal,
-    undefined,
-    koiosProposal.proposed_epoch
-  );
+  return ingestProposalData(koiosProposal, {
+    minVotesEpoch: koiosProposal.proposed_epoch,
+  });
 }
 
 /**
@@ -352,7 +364,11 @@ export async function syncAllProposals(): Promise<SyncAllProposalsResult> {
   // 6. Process each proposal sequentially
   for (const koiosProposal of sortedProposals) {
     try {
-      await ingestProposalData(koiosProposal, currentEpoch, minVotesEpoch);
+      await ingestProposalData(koiosProposal, {
+        currentEpoch,
+        minVotesEpoch,
+        useCache: true, // Use cache for bulk sync
+      });
       results.success++;
       console.log(
         `[Proposal Sync] ✓ Synced ${koiosProposal.proposal_tx_hash} (${results.success}/${results.total})`
@@ -404,7 +420,7 @@ function mapGovernanceType(
 /**
  * Gets current epoch from Koios API
  */
-async function getCurrentEpoch(): Promise<number> {
+export async function getCurrentEpoch(): Promise<number> {
   const tip = await koiosGet<Array<{ epoch_no: number }>>("/tip");
   return tip?.[0]?.epoch_no || 0;
 }

@@ -1,609 +1,469 @@
-import type { Proposal } from "@prisma/client";
-import { prisma } from "./prisma";
+/**
+ * Sync-on-Read Service
+ *
+ * Provides on-demand syncing of proposals and votes from Koios API.
+ * This enables near-real-time updates when users access proposal data,
+ * so that new votes are reflected within seconds of being submitted on-chain.
+ *
+ * IMPORTANT: All sync functions run in the BACKGROUND (non-blocking) to ensure
+ * fast API response times. The page loads instantly with existing data, and
+ * new data will be available on the next request after the background sync completes.
+ *
+ * Throttling/cooldowns are implemented to avoid overwhelming Koios API:
+ * - Overview sync: 60 second cooldown
+ * - Per-proposal sync: 30 second cooldown per proposal
+ */
+
+import { PrismaClient, ProposalStatus } from "@prisma/client";
 import { koiosGet } from "./koios";
-import { ingestProposalData } from "./ingestion/proposal.service";
+import {
+  ingestProposalData,
+  getCurrentEpoch,
+} from "./ingestion/proposal.service";
 import type {
   KoiosProposal,
   KoiosProposalVotingSummary,
 } from "../types/koios.types";
 
-/**
- * Columns to fetch from Koios /proposal_list for minimal comparison/ingestion.
- * Using vertical filtering keeps responses small.
- */
-const PROPOSAL_SELECT_COLUMNS =
-  [
-    "proposal_id",
-    "proposal_tx_hash",
-    "proposal_index",
-    "proposal_type",
-    "proposed_epoch",
-    "ratified_epoch",
-    "enacted_epoch",
-    "dropped_epoch",
-    "expired_epoch",
-    "expiration",
-    "meta_url",
-    "meta_hash",
-    "meta_json",
-    "block_time",
-    "withdrawal",
-  ].join(",");
+const prisma = new PrismaClient();
+
+// Cooldown periods (in milliseconds)
+const OVERVIEW_SYNC_COOLDOWN_MS = 1_000; // 1 second
+const PROPOSAL_SYNC_COOLDOWN_MS = 1_000; // 1 second per proposal
+
+// Last sync timestamps
+let lastOverviewSyncTime = 0;
+const proposalSyncTimes = new Map<string, number>();
+
+// Track proposals currently being synced to prevent concurrent syncs
+let isOverviewSyncInProgress = false;
+const proposalSyncsInProgress = new Set<string>();
 
 /**
- * Simple in-memory throttling for sync-on-read operations.
- * These guards ensure we don't hit Koios on every single HTTP request while
- * still allowing occasional refreshes when new data is likely.
+ * Syncs the proposals overview on read (BACKGROUND/NON-BLOCKING).
+ * Called before returning the proposals list to trigger a background sync.
  *
- * Note: This is per-process and resets on server restart, which is fine for
- * our purpose of avoiding bursty traffic and UI stalls.
- */
-const OVERVIEW_SYNC_COOLDOWN_MS = 60_000; // 1 minute
-let lastOverviewSyncAt = 0;
-
-const PROPOSAL_SYNC_COOLDOWN_MS = 30_000; // 30 seconds per proposal identifier
-const lastProposalSyncAt = new Map<string, number>();
-
-type DbProposalForSync = Pick<
-  Proposal,
-  | "proposalId"
-  | "txHash"
-  | "certIndex"
-  | "submissionEpoch"
-  | "ratifiedEpoch"
-  | "enactedEpoch"
-  | "droppedEpoch"
-  | "expiredEpoch"
-  | "expirationEpoch"
-  | "status"
-  | "drepActiveYesVotePower"
-  | "drepActiveNoVotePower"
-  | "drepActiveAbstainVotePower"
-  | "drepAlwaysAbstainVotePower"
-  | "drepAlwaysNoConfidenceVotePower"
-  | "spoActiveYesVotePower"
-  | "spoActiveNoVotePower"
-  | "spoActiveAbstainVotePower"
-  | "spoAlwaysAbstainVotePower"
-  | "spoAlwaysNoConfidenceVotePower"
->;
-
-/**
- * Small helper to normalise BigInt DB values to string for comparison
- * with Koios voting summary (which returns lovelace as string).
- */
-function bigIntToString(value: bigint | null): string | null {
-  if (value == null) return null;
-  return value.toString();
-}
-
-/**
- * Converts block_time (Unix seconds) to epoch number.
- * Same logic as in the proposal ingestion service – duplicated here to keep
- * sync-on-read self-contained.
+ * This function returns immediately and runs the sync in the background,
+ * so the API response is not delayed.
  *
- * Cardano mainnet: Epoch 0 started at 1596491091 (Shelley era start)
- * Each epoch is 432000 seconds (5 days)
+ * This function:
+ * 1. Checks if cooldown has elapsed since last sync
+ * 2. If not in cooldown, triggers background sync
+ * 3. Background sync compares Koios proposal count with DB count
+ * 4. If there are new proposals, ingests them in the background
  */
-function blockTimeToEpoch(blockTime: number): number {
-  const shelleyStart = 1596491091; // Unix timestamp for epoch 208 start (Shelley era)
-  const epochLength = 432000; // 5 days in seconds
-  const shelleyStartEpoch = 208;
-
-  if (blockTime < shelleyStart) {
-    return 0; // Before Shelley era
-  }
-
-  return shelleyStartEpoch + Math.floor((blockTime - shelleyStart) / epochLength);
-}
-
-/**
- * Ensure that new proposals are synced into the database before
- * we serve overview data. This only looks for proposals whose
- * proposed_epoch is greater than the newest one we already have
- * and ingests just those.
- */
-export async function syncProposalsOverviewOnRead(): Promise<void> {
+export function syncProposalsOverviewOnRead(): void {
   const now = Date.now();
-  if (now - lastOverviewSyncAt < OVERVIEW_SYNC_COOLDOWN_MS) {
-    // Recently synced – skip hitting Koios again for this request.
+
+  // Check if sync is already in progress
+  if (isOverviewSyncInProgress) {
     return;
   }
 
-  // Find the highest submissionEpoch we currently have
-  const latest = await prisma.proposal.findFirst({
-    orderBy: [
-      { submissionEpoch: "desc" },
-      { createdAt: "desc" },
-    ],
-    select: { submissionEpoch: true },
-  });
-
-  const maxEpoch = latest?.submissionEpoch ?? null;
-
-  // If we don't have any proposals yet, fall back to full sync logic
-  // but still using vertical filtering & pagination.
-  const paramsBase: Record<string, any> = {
-    select: PROPOSAL_SELECT_COLUMNS,
-    order: "proposed_epoch.asc",
-    limit: 100,
-  };
-
-  if (maxEpoch != null) {
-    // Only fetch proposals that were submitted after the last one we know about
-    paramsBase.proposed_epoch = `gt.${maxEpoch}`;
+  // Check cooldown
+  if (now - lastOverviewSyncTime < OVERVIEW_SYNC_COOLDOWN_MS) {
+    // Skip silently during cooldown to reduce log noise
+    return;
   }
 
-  let offset = 0;
-  let firstPage = true;
-  let minVotesEpoch: number | undefined = undefined;
+  lastOverviewSyncTime = now;
+  isOverviewSyncInProgress = true;
 
-  // Paginate through new proposals (if any)
-  // We stop as soon as Koios returns an empty page.
-  // This keeps network usage minimal when there are no new proposals.
-  // eslint-disable-next-line no-constant-condition
-  while (true) {
-    const params = { ...paramsBase, offset };
-    const page = await koiosGet<KoiosProposal[]>("/proposal_list", params);
+  // Run sync in background (non-blocking) - don't await
+  doOverviewSync()
+    .catch((error) => {
+      console.error(
+        "[Sync-on-Read] Background overview sync failed:",
+        error.message
+      );
+    })
+    .finally(() => {
+      isOverviewSyncInProgress = false;
+    });
+}
 
-    if (!page || page.length === 0) {
-      break;
-    }
+/**
+ * Internal function that performs the actual overview sync
+ */
+async function doOverviewSync(): Promise<void> {
+  console.log("[Sync-on-Read] Starting background overview sync...");
 
-    if (firstPage) {
-      firstPage = false;
-      // Because we order by proposed_epoch.asc, the very first element we see
-      // is the earliest proposal we will ingest in this run. We use its epoch
-      // to limit vote ingestion (ingestVotesForProposal uses this to restrict
-      // /vote_list to a smaller epoch range).
-      const firstEpoch = page[0]?.proposed_epoch;
-      if (typeof firstEpoch === "number") {
-        minVotesEpoch = firstEpoch;
-      }
-    }
+  // Get counts from DB and Koios in parallel
+  const [dbCount, koiosProposals] = await Promise.all([
+    prisma.proposal.count(),
+    koiosGet<KoiosProposal[]>("/proposal_list"),
+  ]);
 
-    for (const koiosProposal of page) {
+  if (!koiosProposals || koiosProposals.length === 0) {
+    console.log("[Sync-on-Read] No proposals from Koios");
+    return;
+  }
+
+  const koiosCount = koiosProposals.length;
+  console.log(
+    `[Sync-on-Read] DB has ${dbCount} proposals, Koios has ${koiosCount}`
+  );
+
+  // If Koios has more proposals, find and ingest the new ones
+  if (koiosCount > dbCount) {
+    // Get existing proposal IDs from DB
+    const existingProposals = await prisma.proposal.findMany({
+      select: { proposalId: true },
+    });
+    const existingIds = new Set(existingProposals.map((p) => p.proposalId));
+
+    // Find new proposals from Koios
+    const newProposals = koiosProposals.filter(
+      (p) => !existingIds.has(p.proposal_id)
+    );
+
+    console.log(
+      `[Sync-on-Read] Found ${newProposals.length} new proposals to ingest`
+    );
+
+    // Get current epoch once for all new proposals
+    const currentEpoch = await getCurrentEpoch();
+
+    // Ingest new proposals (without using global vote cache)
+    for (const proposal of newProposals) {
       try {
-        await ingestProposalData(koiosProposal, undefined, minVotesEpoch, {
-          useCache: false,
+        await ingestProposalData(proposal, {
+          currentEpoch,
+          minVotesEpoch: proposal.proposed_epoch,
+          useCache: false, // Don't use global cache for on-demand sync
         });
-      } catch (error) {
-        // We deliberately swallow individual errors here – a failure to ingest
-        // one proposal shouldn't prevent the overview from working.
-        // Detailed errors will be logged from within ingestProposalData.
-        // eslint-disable-next-line no-console
-        console.warn(
-          "[SyncOnRead] Failed to ingest proposal from overview sync:",
-          (error as Error).message
+        console.log(
+          `[Sync-on-Read] ✓ Ingested new proposal ${proposal.proposal_tx_hash}`
+        );
+      } catch (error: any) {
+        console.error(
+          `[Sync-on-Read] ✗ Failed to ingest proposal ${proposal.proposal_tx_hash}:`,
+          error.message
         );
       }
     }
-
-    if (page.length < paramsBase.limit) {
-      // Last page
-      break;
-    }
-
-    offset += page.length;
+  } else {
+    console.log("[Sync-on-Read] No new proposals to sync");
   }
-
-  lastOverviewSyncAt = Date.now();
 }
 
 /**
- * Synchronise a single proposal (and its votes) on-demand when the
- * frontend requests proposal details.
+ * Syncs a specific proposal's details on read (BACKGROUND/NON-BLOCKING).
+ * Called before returning proposal details to trigger a background sync.
  *
- * The flow is:
- * 1. Resolve the identifier to an existing DB proposal (if present)
- *    and/or to a Koios filter (proposal_id / proposal_tx_hash / index).
- * 2. Fetch a minimal Koios proposal row using vertical/horizontal filters.
- * 3. If DB is missing but Koios has it → ingest it.
- * 4. If both exist → compare key epoch / voting summary fields and only
- *    re-ingest when there is a difference.
+ * This function returns immediately and runs the sync in the background,
+ * so the API response is not delayed.
+ *
+ * This function:
+ * 1. Checks if cooldown has elapsed for this proposal
+ * 2. If not in cooldown, triggers background sync
+ * 3. Background sync fetches latest voting summary from Koios
+ * 4. Compares vote counts - if different, re-ingests the proposal
+ *
+ * @param identifier - Proposal identifier (proposalId, txHash, txHash:certIndex, or numeric id)
  */
-export async function syncProposalDetailsOnRead(
-  identifier: string
-): Promise<void> {
-  const trimmed = identifier.trim();
-  if (!trimmed) return;
-
-  // Throttle per-identifier syncs so that we don't repeatedly hit Koios when
-  // the same proposal details are requested in quick succession.
+export function syncProposalDetailsOnRead(identifier: string): void {
   const now = Date.now();
-  const lastSync = lastProposalSyncAt.get(trimmed) ?? 0;
-  if (now - lastSync < PROPOSAL_SYNC_COOLDOWN_MS) {
+
+  // Check if sync is already in progress for this proposal
+  if (proposalSyncsInProgress.has(identifier)) {
     return;
   }
 
-  // 1. Try to resolve an existing DB proposal and a Koios filter
-  let dbProposal: DbProposalForSync | null = null;
+  // Check cooldown for this specific proposal
+  const lastSyncTime = proposalSyncTimes.get(identifier) || 0;
+  if (now - lastSyncTime < PROPOSAL_SYNC_COOLDOWN_MS) {
+    // Skip silently during cooldown to reduce log noise
+    return;
+  }
 
-  // Prefer resolving numeric DB id first, if this looks like a number
-  const numericId = Number(trimmed);
-  if (!Number.isNaN(numericId)) {
-    dbProposal = await prisma.proposal.findUnique({
-      where: { id: numericId },
+  proposalSyncTimes.set(identifier, now);
+  proposalSyncsInProgress.add(identifier);
+
+  // Run sync in background (non-blocking) - don't await
+  doProposalSync(identifier)
+    .catch((error) => {
+      console.error(
+        `[Sync-on-Read] Background sync failed for ${identifier}:`,
+        error.message
+      );
+    })
+    .finally(() => {
+      proposalSyncsInProgress.delete(identifier);
+    });
+}
+
+/**
+ * Internal function that performs the actual proposal sync
+ */
+async function doProposalSync(identifier: string): Promise<void> {
+  console.log(
+    `[Sync-on-Read] Starting background sync for proposal ${identifier}...`
+  );
+
+  // First, look up the proposal in our DB to get its proposalId
+  const dbProposal = await findProposalByIdentifier(identifier);
+
+  if (!dbProposal) {
+    // Proposal doesn't exist in DB - might be a new proposal
+    // Try to fetch from Koios and ingest if found
+    console.log(
+      `[Sync-on-Read] Proposal ${identifier} not in DB, checking Koios...`
+    );
+    await tryIngestNewProposal(identifier);
+    return;
+  }
+
+  // Only sync if proposal is still ACTIVE (voting ongoing)
+  if (dbProposal.status !== ProposalStatus.ACTIVE) {
+    console.log(
+      `[Sync-on-Read] Proposal ${identifier} is ${dbProposal.status}, skipping sync`
+    );
+    return;
+  }
+
+  // Fetch votes from Koios for this proposal to compare count
+  // This catches cases where a voter changes their vote back to the same choice
+  // (e.g., Yes -> Abstain -> Yes), which wouldn't change voting power totals
+  const koiosVotes = await fetchVotesForProposal(dbProposal.proposalId);
+  const koiosVoteCount = koiosVotes.length;
+
+  // Get vote count from DB
+  const dbVoteCount = await prisma.onchainVote.count({
+    where: { proposalId: dbProposal.proposalId },
+  });
+
+  console.log(
+    `[Sync-on-Read] Vote count - DB: ${dbVoteCount}, Koios: ${koiosVoteCount}`
+  );
+
+  // If vote counts differ, we have new vote transactions to sync
+  const hasVoteCountChange = koiosVoteCount !== dbVoteCount;
+
+  // Also check voting power totals for additional safety
+  const koiosSummary = await koiosGet<KoiosProposalVotingSummary[]>(
+    `/proposal_voting_summary?_proposal_id=${dbProposal.proposalId}`
+  );
+
+  let hasVotingPowerChange = false;
+  if (koiosSummary && koiosSummary.length > 0) {
+    const summary = koiosSummary[0];
+
+    const koiosDrepYes = BigInt(summary.drep_active_yes_vote_power || "0");
+    const koiosDrepNo = BigInt(summary.drep_active_no_vote_power || "0");
+    const koiosDrepAbstain = BigInt(
+      summary.drep_active_abstain_vote_power || "0"
+    );
+    const koiosSpoYes = BigInt(summary.pool_active_yes_vote_power || "0");
+    const koiosSpoNo = BigInt(summary.pool_active_no_vote_power || "0");
+    const koiosSpoAbstain = BigInt(
+      summary.pool_active_abstain_vote_power || "0"
+    );
+
+    const dbDrepYes = dbProposal.drepActiveYesVotePower || BigInt(0);
+    const dbDrepNo = dbProposal.drepActiveNoVotePower || BigInt(0);
+    const dbDrepAbstain = dbProposal.drepActiveAbstainVotePower || BigInt(0);
+    const dbSpoYes = dbProposal.spoActiveYesVotePower || BigInt(0);
+    const dbSpoNo = dbProposal.spoActiveNoVotePower || BigInt(0);
+    const dbSpoAbstain = dbProposal.spoActiveAbstainVotePower || BigInt(0);
+
+    const hasDrepChanges =
+      koiosDrepYes !== dbDrepYes ||
+      koiosDrepNo !== dbDrepNo ||
+      koiosDrepAbstain !== dbDrepAbstain;
+    const hasSpoChanges =
+      koiosSpoYes !== dbSpoYes ||
+      koiosSpoNo !== dbSpoNo ||
+      koiosSpoAbstain !== dbSpoAbstain;
+
+    hasVotingPowerChange = hasDrepChanges || hasSpoChanges;
+
+    if (hasVotingPowerChange) {
+      console.log(
+        `[Sync-on-Read] Voting power differences detected for ${dbProposal.proposalId}`
+      );
+    }
+  }
+
+  // Sync if either vote count or voting power differs
+  if (hasVoteCountChange || hasVotingPowerChange) {
+    console.log(
+      `[Sync-on-Read] Changes detected for ${dbProposal.proposalId}:` +
+        ` voteCount=${hasVoteCountChange}, votingPower=${hasVotingPowerChange}`
+    );
+
+    // Re-ingest the proposal to get updated votes
+    const koiosProposals = await koiosGet<KoiosProposal[]>("/proposal_list");
+    const koiosProposal = koiosProposals?.find(
+      (p) => p.proposal_id === dbProposal.proposalId
+    );
+
+    if (koiosProposal) {
+      await ingestProposalData(koiosProposal, {
+        minVotesEpoch: koiosProposal.proposed_epoch,
+        useCache: false, // Don't use global cache for on-demand sync
+      });
+      console.log(
+        `[Sync-on-Read] ✓ Re-synced proposal ${dbProposal.proposalId}`
+      );
+    }
+  } else {
+    console.log(`[Sync-on-Read] No changes for ${dbProposal.proposalId}`);
+  }
+}
+
+/**
+ * Fetches all votes for a specific proposal from Koios
+ * Used for vote count comparison
+ */
+async function fetchVotesForProposal(
+  proposalId: string
+): Promise<Array<{ vote_tx_hash: string }>> {
+  const votes: Array<{ vote_tx_hash: string }> = [];
+  let offset = 0;
+  const limit = 1000;
+  let hasMore = true;
+
+  while (hasMore) {
+    const batch = await koiosGet<Array<{ vote_tx_hash: string }>>(
+      `/vote_list?proposal_id=eq.${proposalId}&limit=${limit}&offset=${offset}`
+    );
+
+    if (!batch || batch.length === 0) {
+      hasMore = false;
+    } else {
+      votes.push(...batch);
+      offset += batch.length;
+      if (batch.length < limit) {
+        hasMore = false;
+      }
+    }
+  }
+
+  return votes;
+}
+
+/**
+ * Helper to find a proposal by various identifier formats
+ */
+async function findProposalByIdentifier(identifier: string) {
+  const trimmed = identifier.trim();
+
+  // Try proposalId (starts with "gov_action")
+  if (trimmed.startsWith("gov_action")) {
+    return prisma.proposal.findUnique({
+      where: { proposalId: trimmed },
       select: {
         proposalId: true,
-        txHash: true,
-        certIndex: true,
-        submissionEpoch: true,
-        ratifiedEpoch: true,
-        enactedEpoch: true,
-        droppedEpoch: true,
-        expiredEpoch: true,
-        expirationEpoch: true,
         status: true,
         drepActiveYesVotePower: true,
         drepActiveNoVotePower: true,
         drepActiveAbstainVotePower: true,
-        drepAlwaysAbstainVotePower: true,
-        drepAlwaysNoConfidenceVotePower: true,
         spoActiveYesVotePower: true,
         spoActiveNoVotePower: true,
         spoActiveAbstainVotePower: true,
-        spoAlwaysAbstainVotePower: true,
-        spoAlwaysNoConfidenceVotePower: true,
       },
     });
   }
 
-  let koiosFilter: {
-    proposal_id?: string;
-    proposal_tx_hash?: string;
-    proposal_index?: number;
-  } = {};
-
-  if (trimmed.startsWith("gov_action")) {
-    // Cardano governance action ID
-    if (!dbProposal) {
-      dbProposal = await prisma.proposal.findUnique({
-        where: { proposalId: trimmed },
-        select: {
-          proposalId: true,
-          txHash: true,
-          certIndex: true,
-          submissionEpoch: true,
-          ratifiedEpoch: true,
-          enactedEpoch: true,
-          droppedEpoch: true,
-          expiredEpoch: true,
-          expirationEpoch: true,
-          status: true,
-          drepActiveYesVotePower: true,
-          drepActiveNoVotePower: true,
-          drepActiveAbstainVotePower: true,
-          drepAlwaysAbstainVotePower: true,
-          drepAlwaysNoConfidenceVotePower: true,
-          spoActiveYesVotePower: true,
-          spoActiveNoVotePower: true,
-          spoActiveAbstainVotePower: true,
-          spoAlwaysAbstainVotePower: true,
-          spoAlwaysNoConfidenceVotePower: true,
-        },
-      });
-    }
-    koiosFilter.proposal_id = trimmed;
-  } else if (trimmed.includes(":") && !trimmed.startsWith("gov_action")) {
-    // txHash:certIndex format
-    const [hashCandidate, certCandidate] = trimmed.split(":");
-    if (hashCandidate && certCandidate) {
-      if (!dbProposal) {
-        dbProposal = await prisma.proposal.findFirst({
-          where: { txHash: hashCandidate, certIndex: certCandidate },
-          select: {
-            proposalId: true,
-            txHash: true,
-            certIndex: true,
-            submissionEpoch: true,
-            ratifiedEpoch: true,
-            enactedEpoch: true,
-            droppedEpoch: true,
-            expiredEpoch: true,
-            expirationEpoch: true,
-            status: true,
-            drepActiveYesVotePower: true,
-            drepActiveNoVotePower: true,
-            drepActiveAbstainVotePower: true,
-            drepAlwaysAbstainVotePower: true,
-            drepAlwaysNoConfidenceVotePower: true,
-            spoActiveYesVotePower: true,
-            spoActiveNoVotePower: true,
-            spoActiveAbstainVotePower: true,
-            spoAlwaysAbstainVotePower: true,
-            spoAlwaysNoConfidenceVotePower: true,
-          },
-        });
-      }
-      koiosFilter.proposal_tx_hash = hashCandidate;
-      const idx = Number(certCandidate);
-      if (!Number.isNaN(idx)) {
-        koiosFilter.proposal_index = idx;
-      }
-    }
-  } else if (!trimmed.startsWith("gov_action")) {
-    // Plain txHash (or some other string identifier)
-    if (!dbProposal) {
-      dbProposal = await prisma.proposal.findFirst({
-        where: { txHash: trimmed },
-        select: {
-          proposalId: true,
-          txHash: true,
-          certIndex: true,
-          submissionEpoch: true,
-          ratifiedEpoch: true,
-          enactedEpoch: true,
-          droppedEpoch: true,
-          expiredEpoch: true,
-          expirationEpoch: true,
-          status: true,
-          drepActiveYesVotePower: true,
-          drepActiveNoVotePower: true,
-          drepActiveAbstainVotePower: true,
-          drepAlwaysAbstainVotePower: true,
-          drepAlwaysNoConfidenceVotePower: true,
-          spoActiveYesVotePower: true,
-          spoActiveNoVotePower: true,
-          spoActiveAbstainVotePower: true,
-          spoAlwaysAbstainVotePower: true,
-          spoAlwaysNoConfidenceVotePower: true,
-        },
-      });
-    }
-    koiosFilter.proposal_tx_hash = trimmed;
-  }
-
-  // If we have a DB proposal but no explicit Koios filter yet, derive it
-  if (!koiosFilter.proposal_id && !koiosFilter.proposal_tx_hash && dbProposal) {
-    koiosFilter.proposal_id = dbProposal.proposalId;
-  }
-
-  // If we still don't have any way to query Koios, give up silently.
-  if (!koiosFilter.proposal_id && !koiosFilter.proposal_tx_hash) {
-    return;
-  }
-
-  // 2. Fetch minimal Koios proposal row for comparison / ingestion
-  const params: Record<string, any> = {
-    select: PROPOSAL_SELECT_COLUMNS,
-    limit: 1,
-  };
-
-  if (koiosFilter.proposal_id) {
-    params.proposal_id = `eq.${koiosFilter.proposal_id}`;
-  }
-  if (koiosFilter.proposal_tx_hash) {
-    params.proposal_tx_hash = `eq.${koiosFilter.proposal_tx_hash}`;
-  }
-  if (typeof koiosFilter.proposal_index === "number") {
-    params.proposal_index = `eq.${koiosFilter.proposal_index}`;
-  }
-
-  const koiosRows = await koiosGet<KoiosProposal[]>("/proposal_list", params);
-  const koiosProposal = koiosRows?.[0];
-
-  if (!koiosProposal) {
-    // Nothing on Koios side – nothing to sync
-    return;
-  }
-
-  // Determine the minimum epoch to fetch votes from.
-  // If we already have votes in the database, we:
-  //   1) Find the latest vote's votedAt timestamp,
-  //   2) Convert it to an epoch number,
-  //   3) Fetch from the PREVIOUS epoch onward (epoch - 1) to avoid missing
-  //      any votes around the boundary while still limiting Koios traffic.
-  // If there are no votes yet, fall back to the proposal's submission epoch.
-  let minEpochForVotes: number | undefined =
-    typeof koiosProposal.proposed_epoch === "number"
-      ? koiosProposal.proposed_epoch
-      : undefined;
-
-  try {
-    const lastVote = await prisma.onchainVote.findFirst({
-      where: { proposalId: koiosProposal.proposal_id },
-      orderBy: { votedAt: "desc" },
-      select: { votedAt: true },
+  // Try numeric id
+  const numericId = Number(trimmed);
+  if (!Number.isNaN(numericId)) {
+    const proposal = await prisma.proposal.findUnique({
+      where: { id: numericId },
+      select: {
+        proposalId: true,
+        status: true,
+        drepActiveYesVotePower: true,
+        drepActiveNoVotePower: true,
+        drepActiveAbstainVotePower: true,
+        spoActiveYesVotePower: true,
+        spoActiveNoVotePower: true,
+        spoActiveAbstainVotePower: true,
+      },
     });
-
-    if (lastVote?.votedAt) {
-      const lastBlockTime = Math.floor(lastVote.votedAt.getTime() / 1000);
-      const lastEpoch = blockTimeToEpoch(lastBlockTime);
-      const fromEpoch = Math.max(lastEpoch - 1, 0);
-
-      if (
-        typeof minEpochForVotes !== "number" ||
-        fromEpoch < minEpochForVotes
-      ) {
-        minEpochForVotes = fromEpoch;
-      }
-    }
-  } catch (error) {
-    // If we can't determine last vote epoch, we simply fall back to
-    // proposed_epoch-based lower bound.
-    // eslint-disable-next-line no-console
-    console.warn(
-      "[SyncOnRead] Failed to determine last vote epoch for proposal:",
-      (error as Error).message
-    );
+    if (proposal) return proposal;
   }
 
-  // 3. If DB is missing but Koios has the proposal, ingest it now
-  if (!dbProposal) {
-    try {
-      await ingestProposalData(
-        koiosProposal,
-        undefined,
-        minEpochForVotes,
-        { useCache: false }
-      );
-    } catch (error) {
-      // eslint-disable-next-line no-console
-      console.warn(
-        "[SyncOnRead] Failed to ingest missing proposal on details read:",
-        (error as Error).message
-      );
-    }
-    return;
-  }
-
-  // 4. Compare epoch fields first – if any differ, we re-ingest completely.
-  const epochChanged =
-    (dbProposal.submissionEpoch ?? null) !==
-      (koiosProposal.proposed_epoch ?? null) ||
-    (dbProposal.ratifiedEpoch ?? null) !==
-      (koiosProposal.ratified_epoch ?? null) ||
-    (dbProposal.enactedEpoch ?? null) !==
-      (koiosProposal.enacted_epoch ?? null) ||
-    (dbProposal.droppedEpoch ?? null) !==
-      (koiosProposal.dropped_epoch ?? null) ||
-    (dbProposal.expiredEpoch ?? null) !==
-      (koiosProposal.expired_epoch ?? null) ||
-    (dbProposal.expirationEpoch ?? null) !==
-      (koiosProposal.expiration ?? null);
-
-  if (epochChanged) {
-    try {
-      await ingestProposalData(
-        koiosProposal,
-        undefined,
-        minEpochForVotes,
-        { useCache: false }
-      );
-    } catch (error) {
-      // eslint-disable-next-line no-console
-      console.warn(
-        "[SyncOnRead] Failed to re-ingest proposal after epoch change:",
-        (error as Error).message
-      );
-    }
-    return;
-  }
-
-  // 5. Epochs match – there might still be new votes. We do a very small
-  //    comparison by fetching the proposal voting summary from Koios and
-  //    comparing it to the summary fields we store on the proposal row.
-  let votingSummary: KoiosProposalVotingSummary | null = null;
-  try {
-    const summaries = await koiosGet<KoiosProposalVotingSummary[]>(
-      "/proposal_voting_summary",
-      { _proposal_id: koiosProposal.proposal_id }
-    );
-    votingSummary = summaries?.[0] ?? null;
-  } catch (error) {
-    // eslint-disable-next-line no-console
-    console.warn(
-      "[SyncOnRead] Failed to fetch proposal voting summary:",
-      (error as Error).message
-    );
-  }
-
-  if (!votingSummary) {
-    return;
-  }
-
-  const hasVotingSummaryDiff =
-    bigIntToString(dbProposal.drepActiveYesVotePower ?? null) !==
-      (votingSummary.drep_active_yes_vote_power ?? null) ||
-    bigIntToString(dbProposal.drepActiveNoVotePower ?? null) !==
-      (votingSummary.drep_active_no_vote_power ?? null) ||
-    bigIntToString(dbProposal.drepActiveAbstainVotePower ?? null) !==
-      (votingSummary.drep_active_abstain_vote_power ?? null) ||
-    bigIntToString(dbProposal.drepAlwaysAbstainVotePower ?? null) !==
-      (votingSummary.drep_always_abstain_vote_power ?? null) ||
-    bigIntToString(
-      dbProposal.drepAlwaysNoConfidenceVotePower ?? null
-    ) !== (votingSummary.drep_always_no_confidence_vote_power ?? null) ||
-    bigIntToString(dbProposal.spoActiveYesVotePower ?? null) !==
-      (votingSummary.pool_active_yes_vote_power ?? null) ||
-    bigIntToString(dbProposal.spoActiveNoVotePower ?? null) !==
-      (votingSummary.pool_active_no_vote_power ?? null) ||
-    bigIntToString(dbProposal.spoActiveAbstainVotePower ?? null) !==
-      (votingSummary.pool_active_abstain_vote_power ?? null) ||
-    bigIntToString(dbProposal.spoAlwaysAbstainVotePower ?? null) !==
-      (votingSummary.pool_passive_always_abstain_vote_power ?? null) ||
-    bigIntToString(
-      dbProposal.spoAlwaysNoConfidenceVotePower ?? null
-    ) !== (votingSummary.pool_passive_always_no_confidence_vote_power ??
-      null);
-
-  if (!hasVotingSummaryDiff) {
-    // Nothing changed in the summary since we last ingested this proposal.
-    // However, it's still possible for the local DB to be missing votes
-    // (e.g. manual cleanup or a past ingestion bug). To make sync-on-read
-    // self-healing, we detect the obvious "no local votes but Koios reports
-    // non-zero voting power / CC votes" case and force a re-ingest.
-    const localVoteCount = await prisma.onchainVote.count({
-      where: { proposalId: koiosProposal.proposal_id },
+  // Try txHash:certIndex or plain txHash
+  if (trimmed.includes(":")) {
+    const [txHash, certIndex] = trimmed.split(":");
+    return prisma.proposal.findFirst({
+      where: { txHash, certIndex },
+      select: {
+        proposalId: true,
+        status: true,
+        drepActiveYesVotePower: true,
+        drepActiveNoVotePower: true,
+        drepActiveAbstainVotePower: true,
+        spoActiveYesVotePower: true,
+        spoActiveNoVotePower: true,
+        spoActiveAbstainVotePower: true,
+      },
     });
-
-    const koiosHasVotes =
-      (votingSummary.drep_active_yes_vote_power &&
-        votingSummary.drep_active_yes_vote_power !== "0") ||
-      (votingSummary.drep_active_no_vote_power &&
-        votingSummary.drep_active_no_vote_power !== "0") ||
-      (votingSummary.drep_active_abstain_vote_power &&
-        votingSummary.drep_active_abstain_vote_power !== "0") ||
-      (votingSummary.drep_always_abstain_vote_power &&
-        votingSummary.drep_always_abstain_vote_power !== "0") ||
-      (votingSummary.drep_always_no_confidence_vote_power &&
-        votingSummary.drep_always_no_confidence_vote_power !== "0") ||
-      (votingSummary.pool_active_yes_vote_power &&
-        votingSummary.pool_active_yes_vote_power !== "0") ||
-      (votingSummary.pool_active_no_vote_power &&
-        votingSummary.pool_active_no_vote_power !== "0") ||
-      (votingSummary.pool_active_abstain_vote_power &&
-        votingSummary.pool_active_abstain_vote_power !== "0") ||
-      (votingSummary.pool_passive_always_abstain_vote_power &&
-        votingSummary.pool_passive_always_abstain_vote_power !== "0") ||
-      (votingSummary.pool_passive_always_no_confidence_vote_power &&
-        votingSummary.pool_passive_always_no_confidence_vote_power !==
-          "0") ||
-      (votingSummary.cc_yes_vote ?? 0) > 0 ||
-      (votingSummary.cc_no_vote ?? 0) > 0 ||
-      (votingSummary.cc_abstain_vote ?? 0) > 0;
-
-    if (!koiosHasVotes || localVoteCount > 0) {
-      return;
-    }
-
-    // At this point Koios reports votes but we have none stored locally –
-    // re-ingest to repopulate onchainVote rows and keep the DB consistent
-    // with the voting summary we already have on the proposal.
-    try {
-      await ingestProposalData(
-        koiosProposal,
-        undefined,
-        minEpochForVotes,
-        { useCache: false }
-      );
-    } catch (error) {
-      // eslint-disable-next-line no-console
-      console.warn(
-        "[SyncOnRead] Failed to re-ingest proposal after detecting missing local votes:",
-        (error as Error).message
-      );
-    }
-    return;
   }
 
-  try {
-    await ingestProposalData(
-      koiosProposal,
-      undefined,
-      minEpochForVotes,
-      { useCache: false }
-    );
-  } catch (error) {
-    // eslint-disable-next-line no-console
-    console.warn(
-      "[SyncOnRead] Failed to re-ingest proposal after voting summary change:",
-      (error as Error).message
-    );
-  }
-
-  lastProposalSyncAt.set(trimmed, Date.now());
+  // Plain txHash
+  return prisma.proposal.findFirst({
+    where: { txHash: trimmed },
+    select: {
+      proposalId: true,
+      status: true,
+      drepActiveYesVotePower: true,
+      drepActiveNoVotePower: true,
+      drepActiveAbstainVotePower: true,
+      spoActiveYesVotePower: true,
+      spoActiveNoVotePower: true,
+      spoActiveAbstainVotePower: true,
+    },
+  });
 }
 
+/**
+ * Helper to try ingesting a new proposal by txHash
+ */
+async function tryIngestNewProposal(identifier: string): Promise<void> {
+  try {
+    // Fetch all proposals from Koios and look for a match
+    const koiosProposals = await koiosGet<KoiosProposal[]>("/proposal_list");
+    if (!koiosProposals) return;
 
+    const trimmed = identifier.trim();
+    let koiosProposal: KoiosProposal | undefined;
+
+    // Try to find by proposalId
+    if (trimmed.startsWith("gov_action")) {
+      koiosProposal = koiosProposals.find((p) => p.proposal_id === trimmed);
+    } else if (trimmed.includes(":")) {
+      // txHash:certIndex format
+      const [txHash, certIndex] = trimmed.split(":");
+      koiosProposal = koiosProposals.find(
+        (p) =>
+          p.proposal_tx_hash === txHash &&
+          String(p.proposal_index) === certIndex
+      );
+    } else {
+      // Plain txHash
+      koiosProposal = koiosProposals.find(
+        (p) => p.proposal_tx_hash === trimmed
+      );
+    }
+
+    if (koiosProposal) {
+      await ingestProposalData(koiosProposal, {
+        minVotesEpoch: koiosProposal.proposed_epoch,
+        useCache: false,
+      });
+      console.log(
+        `[Sync-on-Read] ✓ Ingested new proposal ${koiosProposal.proposal_tx_hash}`
+      );
+    } else {
+      console.log(`[Sync-on-Read] Proposal ${identifier} not found in Koios`);
+    }
+  } catch (error: any) {
+    console.error(
+      `[Sync-on-Read] Failed to ingest new proposal ${identifier}:`,
+      error.message
+    );
+  }
+}
