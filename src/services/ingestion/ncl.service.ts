@@ -133,6 +133,7 @@ export async function updateNCL(): Promise<NCLUpdateResult> {
     await prisma.nCL.update({
       where: { year: currentYear },
       data: {
+        updatedAt: new Date(),
         epoch: currentEpoch,
         current: totalLovelace,
       },
@@ -151,10 +152,12 @@ export async function updateNCL(): Promise<NCLUpdateResult> {
     // Create new record with limit = 0 (admin needs to set the limit)
     await prisma.nCL.create({
       data: {
+        id: `ncl-${currentYear}`,
         year: currentYear,
         epoch: currentEpoch,
         current: totalLovelace,
         limit: BigInt(0), // Admin must set this manually
+        updatedAt: new Date(),
       },
     });
 

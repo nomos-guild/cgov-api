@@ -21,13 +21,13 @@ import {
 } from "../models";
 
 type VoteWithRelations = OnchainVote & {
-  drep: Drep | null;
-  spo: SPO | null;
-  cc: CC | null;
+  Drep: Drep | null;
+  SPO: SPO | null;
+  CC: CC | null;
 };
 
 export type ProposalWithVotes = PrismaProposal & {
-  onchainVotes: VoteWithRelations[];
+  OnchainVote: VoteWithRelations[];
 };
 
 export const proposalWithVotesSelect = {
@@ -64,11 +64,11 @@ export const proposalWithVotesSelect = {
   metadata: true,
   createdAt: true,
   updatedAt: true,
-  onchainVotes: {
+  OnchainVote: {
     include: {
-      drep: true,
-      spo: true,
-      cc: true,
+      Drep: true,
+      SPO: true,
+      CC: true,
     },
   },
 } satisfies Prisma.ProposalSelect;
@@ -421,27 +421,27 @@ const formatVoteDate = (value?: Date | null) =>
 
 const resolveVoterId = (vote: VoteWithRelations): string => {
   if (vote.voterType === VoterType.DREP) {
-    return vote.drep?.drepId ?? vote.drepId ?? vote.id;
+    return vote.Drep?.drepId ?? vote.drepId ?? vote.id;
   }
 
   if (vote.voterType === VoterType.SPO) {
-    return vote.spo?.poolId ?? vote.spoId ?? vote.id;
+    return vote.SPO?.poolId ?? vote.spoId ?? vote.id;
   }
 
-  return vote.cc?.ccId ?? vote.ccId ?? vote.id;
+  return vote.CC?.ccId ?? vote.ccId ?? vote.id;
 };
 
 const resolveVoterName = (vote: VoteWithRelations): string | undefined => {
   if (vote.voterType === VoterType.DREP) {
     // Prefer the DRep's display name, falling back to their payment address if available
-    return vote.drep?.name ?? vote.drep?.paymentAddress ?? undefined;
+    return vote.Drep?.name ?? vote.Drep?.paymentAddress ?? undefined;
   }
 
   if (vote.voterType === VoterType.SPO) {
-    return vote.spo?.poolName ?? vote.spo?.ticker ?? undefined;
+    return vote.SPO?.poolName ?? vote.SPO?.ticker ?? undefined;
   }
 
-  return vote.cc?.memberName ?? undefined;
+  return vote.CC?.memberName ?? undefined;
 };
 
 const mapVoteRecord = (vote: VoteWithRelations): VoteRecord => {
@@ -702,7 +702,7 @@ const buildProposalIdentifier = (proposal: ProposalWithVotes) => {
 export const mapProposalToGovernanceAction = (
   proposal: ProposalWithVotes
 ): GovernanceAction => {
-  const voteAggregation = aggregateVotes(proposal.onchainVotes ?? []);
+  const voteAggregation = aggregateVotes(proposal.OnchainVote ?? []);
 
   // Use new voting power-based calculations if data is available, otherwise fall back to vote tally
   const hasDrepVotingPowerData =
@@ -767,7 +767,7 @@ export const mapProposalToGovernanceActionDetail = (
   proposal: ProposalWithVotes
 ): GovernanceActionDetail => {
   const base = mapProposalToGovernanceAction(proposal);
-  const votes = proposal.onchainVotes ?? [];
+  const votes = proposal.OnchainVote ?? [];
   const standardVotes = votes.filter((vote) => vote.voterType !== VoterType.CC);
   const ccVotes = votes.filter((vote) => vote.voterType === VoterType.CC);
 

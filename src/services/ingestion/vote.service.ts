@@ -284,6 +284,7 @@ async function ingestSingleVote(
     // Create new vote record (new transaction - could be initial vote or vote change)
     await tx.onchainVote.create({
       data: {
+        id: koiosVote.vote_tx_hash,
         txHash: koiosVote.vote_tx_hash,
         proposalId,
         vote: voteType,
