@@ -282,9 +282,15 @@ async function ingestSingleVote(
     stats.votesUpdated++;
   } else {
     // Create new vote record (new transaction - could be initial vote or vote change)
+    // Build a stable, unique ID from tx hash + proposal + voter identity.
+    // This mirrors the unique DB index on (txHash, proposalId, voterType, drepId, spoId, ccId)
+    // while staying human-readable and avoiding very long hashes.
+    const voterKey = drepId ?? spoId ?? ccId ?? "unknown";
+    const onchainVoteId = `${koiosVote.vote_tx_hash}:${proposalId}:${voterType}:${voterKey}`;
+
     await tx.onchainVote.create({
       data: {
-        id: koiosVote.vote_tx_hash,
+        id: onchainVoteId,
         txHash: koiosVote.vote_tx_hash,
         proposalId,
         vote: voteType,
