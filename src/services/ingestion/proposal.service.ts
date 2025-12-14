@@ -840,7 +840,7 @@ async function fetchInactiveDrepVotingPowerForCompletedProposal(
       where: {
         voterType: "DREP",
         drepId: { not: null },
-        proposal: {
+      Proposal: {
           OR: [
             // Proposal was submitted within the activity window
             {

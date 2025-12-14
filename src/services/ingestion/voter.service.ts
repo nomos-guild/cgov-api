@@ -253,6 +253,7 @@ async function ensureDrepExists(
   // Create new DRep
   const newDrep = await tx.drep.create({
     data: {
+      id: drepId,
       drepId,
       votingPower,
       ...(name && { name }), // Only include if exists
@@ -317,6 +318,7 @@ async function ensureSpoExists(
   // Create new SPO
   const newSpo = await tx.sPO.create({
     data: {
+      id: poolId,
       poolId,
       poolName,
       ticker,
@@ -667,6 +669,7 @@ async function ensureCcExists(
   // Create new CC member
   const newCc = await tx.cC.create({
     data: {
+      id: ccId,
       ccId,
       hotCredential: ccMember?.cc_hot_id || ccId,
       coldCredential: ccMember?.cc_cold_id,
