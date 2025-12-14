@@ -8,8 +8,7 @@ datasource db {
 }
 
 model CC {
-  id             String        @id
-  ccId           String        @unique
+  ccId           String        @id
   userId         String?       @unique
   memberName     String?
   hotCredential  String?
@@ -30,8 +29,7 @@ model CrowdfundingCampaign {
 }
 
 model Drep {
-  id             String        @id
-  drepId         String        @unique
+  drepId         String        @id
   userId         String?       @unique
   name           String?
   paymentAddress String?
@@ -135,8 +133,7 @@ model ProposalDraft {
 }
 
 model SPO {
-  id          String        @id
-  poolId      String        @unique
+  poolId      String        @id
   userId      String?       @unique
   poolName    String?
   ticker      String?
