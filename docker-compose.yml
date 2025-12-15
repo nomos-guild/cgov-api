@@ -14,7 +14,8 @@ services:
       - "${PORT:-3000}:3000"
     environment:
       # Override DATABASE_URL to connect to host machine's database
-      DATABASE_URL: postgresql://postgres@host.docker.internal:5432/cgov
+      # Uses DB_NAME env var or defaults to 'cgov'
+      DATABASE_URL: postgresql://postgres@host.docker.internal:5432/${DB_NAME:-cgov}
 
       # Disable cron jobs in API (they run in separate service)
       DISABLE_CRON_IN_API: "true"
@@ -37,7 +38,8 @@ services:
       - "host.docker.internal:host-gateway"
     environment:
       # Override DATABASE_URL to connect to host machine's database
-      DATABASE_URL: postgresql://postgres@host.docker.internal:5432/cgov
+      # Uses DB_NAME env var or defaults to 'cgov'
+      DATABASE_URL: postgresql://postgres@host.docker.internal:5432/${DB_NAME:-cgov}
 
       # Override cron schedule for testing (every 1 minute)
       # Comment this out to use the schedule from .env (every 5 minutes)

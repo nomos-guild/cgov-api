@@ -32,6 +32,18 @@ Dockerfile
 docker-compose.yml
 .dockerignore
 
+# Documentation
+README.md
+*.md
+!docs/*.md
+
+# Husky (git hooks)
+.husky
+
+# AI
+.claude
+
 # Misc
 .DS_Store
 *.log
+*.tgz
