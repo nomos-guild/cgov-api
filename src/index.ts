@@ -2,6 +2,8 @@ import dotenv from "dotenv";
 import express, { Request, Response, NextFunction } from "express";
 import bodyParser from "body-parser";
 import cors from "cors";
+import helmet from "helmet";
+import rateLimit from "express-rate-limit";
 import swaggerUi from "swagger-ui-express";
 import path from "path";
 import fs from "fs";
@@ -15,8 +17,25 @@ import { startAllJobs } from "./jobs";
 dotenv.config();
 
 const app = express();
-app.use(bodyParser.json());
+
+// Security: Helmet.js for HTTP security headers
+app.use(helmet());
+
+// Security: CORS - allow all origins
 app.use(cors());
+
+// Security: Rate limiting
+const limiter = rateLimit({
+  windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS || "900000"), // Default: 15 minutes
+  max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS || "100"), // Default: 100 requests per window
+  standardHeaders: true, // Return rate limit info in the `RateLimit-*` headers
+  legacyHeaders: false, // Disable the `X-RateLimit-*` headers
+  message: { error: "Too many requests, please try again later." },
+});
+
+app.use(limiter);
+
+app.use(bodyParser.json());
 
 // Serve Swagger documentation from static file (no auth required)
 const swaggerPath = path.join(__dirname, "../docs/swagger.json");
