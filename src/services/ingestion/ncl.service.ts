@@ -4,7 +4,11 @@
  * All values stored in lovelace (1 ADA = 1,000,000 lovelace)
  */
 
-import { PrismaClient, GovernanceType, ProposalStatus } from "@prisma/client";
+import {
+  PrismaClient,
+  governance_type,
+  proposal_status,
+} from "@prisma/client";
 import { koiosGet } from "../koios";
 import type { KoiosProposal } from "../../types/koios.types";
 
@@ -124,16 +128,16 @@ export async function updateNCL(): Promise<NCLUpdateResult> {
   );
 
   // Check if NCL record exists for this year
-  const existingNCL = await prisma.nCL.findUnique({
+  const existingNCL = await prisma.ncl.findUnique({
     where: { year: currentYear },
   });
 
   if (existingNCL) {
     // Update existing record
-    await prisma.nCL.update({
+    await prisma.ncl.update({
       where: { year: currentYear },
       data: {
-        updatedAt: new Date(),
+        updated_at: new Date(),
         epoch: currentEpoch,
         current: totalLovelace,
       },
@@ -150,14 +154,14 @@ export async function updateNCL(): Promise<NCLUpdateResult> {
     };
   } else {
     // Create new record with limit = 0 (admin needs to set the limit)
-    await prisma.nCL.create({
+    await prisma.ncl.create({
       data: {
         id: `ncl-${currentYear}`,
         year: currentYear,
         epoch: currentEpoch,
         current: totalLovelace,
         limit: BigInt(0), // Admin must set this manually
-        updatedAt: new Date(),
+        updated_at: new Date(),
       },
     });
 
@@ -190,17 +194,17 @@ export async function calculateNCLFromDatabase(_year: number): Promise<{
   // Query ratified/enacted treasury withdrawal proposals from database
   const treasuryProposals = await prisma.proposal.findMany({
     where: {
-      governanceActionType: GovernanceType.TREASURY_WITHDRAWALS,
+      governance_action_type: governance_type.TREASURY_WITHDRAWALS,
       status: {
-        in: [ProposalStatus.RATIFIED, ProposalStatus.ENACTED],
+        in: [proposal_status.RATIFIED, proposal_status.ENACTED],
       },
     },
     select: {
       id: true,
-      proposalId: true,
+      proposal_id: true,
       metadata: true,
-      ratifiedEpoch: true,
-      enactedEpoch: true,
+      ratified_epoch: true,
+      enacted_epoch: true,
     },
   });
 
@@ -220,7 +224,9 @@ export async function calculateNCLFromDatabase(_year: number): Promise<{
           }
         }
       } catch (e) {
-        console.warn(`[NCL] Failed to parse metadata for proposal ${proposal.proposalId}`);
+        console.warn(
+          `[NCL] Failed to parse metadata for proposal ${proposal.proposal_id}`
+        );
       }
     }
   }

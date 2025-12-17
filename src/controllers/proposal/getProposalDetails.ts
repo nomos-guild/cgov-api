@@ -11,13 +11,13 @@ import { syncProposalDetailsOnRead } from "../../services/syncOnRead";
 
 const buildProposalLookup = (
   identifier: string
-): Prisma.ProposalWhereInput | null => {
+): Prisma.proposalWhereInput | null => {
   const trimmed = identifier.trim();
   if (!trimmed) {
     return null;
   }
 
-  const filters: Prisma.ProposalWhereInput[] = [];
+  const filters: Prisma.proposalWhereInput[] = [];
   const numericId = Number(trimmed);
 
   // Check for numeric id
@@ -27,20 +27,20 @@ const buildProposalLookup = (
 
   // Check for proposalId (starts with "gov_action")
   if (trimmed.startsWith("gov_action")) {
-    filters.push({ proposalId: trimmed });
+    filters.push({ proposal_id: trimmed });
   }
 
   // Check for txHash:certIndex format or plain txHash
   if (trimmed.includes(":") && !trimmed.startsWith("gov_action")) {
     const [hashCandidate, certCandidate] = trimmed.split(":");
     if (hashCandidate && certCandidate) {
-      filters.push({ txHash: hashCandidate, certIndex: certCandidate });
+      filters.push({ tx_hash: hashCandidate, cert_index: certCandidate });
     } else if (hashCandidate) {
-      filters.push({ txHash: hashCandidate });
+      filters.push({ tx_hash: hashCandidate });
     }
   } else if (!trimmed.startsWith("gov_action")) {
     // Plain txHash (64 char hex string)
-    filters.push({ txHash: trimmed });
+    filters.push({ tx_hash: trimmed });
   }
 
   if (!filters.length) {

@@ -3,16 +3,92 @@
  * Handles ingestion of onchain votes for proposals
  */
 
-import { PrismaClient, VoteType, VoterType } from "@prisma/client";
+import { PrismaClient, vote_type, voter_type } from "@prisma/client";
 import type { Prisma } from "@prisma/client";
 import { koiosGet } from "../koios";
-import { ensureVoterExists } from "./voter.service";
+import { ensureVoterExists, fetchJsonWithBrowserLikeClient } from "./voter.service";
 import type { KoiosVote } from "../../types/koios.types";
 
 const prisma = new PrismaClient();
 
 // Cache all votes at module level to avoid fetching multiple times during sync
 let cachedVotes: KoiosVote[] | null = null;
+
+// Cache for vote metadata JSON keyed by anchor URL to avoid duplicate fetches
+const voteMetadataCache = new Map<string, string | null>();
+
+/**
+ * Fetches and serialises vote metadata JSON for a Koios vote.
+ *
+ * Preference order:
+ * 1. Use meta_json from Koios response when available (no extra HTTP).
+ * 2. Otherwise, fetch from meta_url / anchor_url, with IPFS gateway support.
+ *
+ * Returns the JSON as a string suitable for storing in Prisma String column,
+ * or null if nothing could be fetched.
+ */
+async function getVoteRationaleJson(koiosVote: KoiosVote): Promise<string | null> {
+  // 1) Prefer inline meta_json from Koios if present
+  if (koiosVote.meta_json) {
+    try {
+      return JSON.stringify(koiosVote.meta_json);
+    } catch (error: any) {
+      console.warn(
+        `[Vote Metadata] Failed to serialise meta_json for vote ${koiosVote.vote_tx_hash}:`,
+        error?.message ?? error
+      );
+      // Fall through to URL-based fetch as a fallback
+    }
+  }
+
+  // 2) Fallback to fetching from meta_url / anchor_url
+  const rawUrl = koiosVote.meta_url;
+  if (!rawUrl) {
+    return null;
+  }
+
+  // Return from cache if we've already attempted this URL
+  const cached = voteMetadataCache.get(rawUrl);
+  if (cached !== undefined) {
+    return cached;
+  }
+
+  let fetchUrl = rawUrl;
+
+  // Handle ipfs:// URLs by routing through a public HTTP gateway
+  if (fetchUrl.startsWith("ipfs://")) {
+    const ipfsHash = fetchUrl.replace("ipfs://", "");
+    fetchUrl = `https://ipfs.io/ipfs/${ipfsHash}`;
+    console.log(`[Vote Metadata] Converting IPFS URL to gateway: ${fetchUrl}`);
+  }
+
+  try {
+    // Use the shared browser-like JSON fetcher which:
+    // 1) Attempts a normal Axios HTTP GET first
+    // 2) Falls back to Puppeteer for providers that block plain HTTP clients
+    const meta = await fetchJsonWithBrowserLikeClient(fetchUrl);
+
+    if (!meta) {
+      voteMetadataCache.set(rawUrl, null);
+      return null;
+    }
+
+    const jsonString = JSON.stringify(meta);
+    voteMetadataCache.set(rawUrl, jsonString);
+    return jsonString;
+  } catch (error: any) {
+    const message =
+      error?.message ??
+      (typeof error?.toString === "function" ? error.toString() : String(error));
+
+    console.warn(
+      `[Vote Metadata] Failed to fetch vote metadata (with Puppeteer fallback) from ${rawUrl}`,
+      message
+    );
+    voteMetadataCache.set(rawUrl, null);
+    return null;
+  }
+}
 
 /**
  * Statistics for vote ingestion
@@ -219,9 +295,9 @@ async function ingestSingleVote(
   if (koiosVote.voter_role === "ConstitutionalCommittee" && koiosVote.meta_json?.authors) {
     const memberName = koiosVote.meta_json.authors[0]?.name;
     if (memberName) {
-      await tx.cC.update({
-        where: { ccId: voterResult.voterId },
-        data: { memberName },
+      await tx.cc.update({
+        where: { cc_id: voterResult.voterId },
+        data: { member_name: memberName },
       });
     }
   }
@@ -229,52 +305,56 @@ async function ingestSingleVote(
   // 2. Map Koios voter role to Prisma VoterType enum
   const voterType =
     koiosVote.voter_role === "DRep"
-      ? VoterType.DREP
+      ? voter_type.DREP
       : koiosVote.voter_role === "SPO"
-      ? VoterType.SPO
-      : VoterType.CC;
+      ? voter_type.SPO
+      : voter_type.CC;
 
   // 3. Map Koios vote to Prisma VoteType enum
   const voteType =
     koiosVote.vote === "Yes"
-      ? VoteType.YES
+      ? vote_type.YES
       : koiosVote.vote === "No"
-      ? VoteType.NO
-      : VoteType.ABSTAIN;
+      ? vote_type.NO
+      : vote_type.ABSTAIN;
 
   // 4. Prepare foreign key IDs based on voter type
-  const drepId = voterType === VoterType.DREP ? voterResult.voterId : null;
-  const spoId = voterType === VoterType.SPO ? voterResult.voterId : null;
-  const ccId = voterType === VoterType.CC ? voterResult.voterId : null;
+  const drepId = voterType === voter_type.DREP ? voterResult.voterId : null;
+  const spoId = voterType === voter_type.SPO ? voterResult.voterId : null;
+  const ccId = voterType === voter_type.CC ? voterResult.voterId : null;
 
   // 5. Get voter's voting power for this vote (stored in lovelace as BigInt)
   const voter = await getVoterWithPower(voterType, voterResult.voterId, tx);
   const votingPower = voter?.votingPower ?? null;
 
-  // 6. Check if this specific vote transaction already exists
+  // 6. Fetch vote rationale/metadata JSON (stored as string in DB)
+  const rationaleJson = await getVoteRationaleJson(koiosVote);
+
+  // 7. Check if this specific vote transaction already exists
   // Each vote is a separate on-chain transaction, so we check by txHash
   // (A DRep can change their vote, creating multiple vote transactions for the same proposal)
-  const existingVote = await tx.onchainVote.findFirst({
+  const existingVote = await tx.onchain_vote.findFirst({
     where: {
-      txHash: koiosVote.vote_tx_hash,
-      proposalId,
-      voterType,
-      drepId,
-      spoId,
-      ccId,
+      tx_hash: koiosVote.vote_tx_hash,
+      proposal_id: proposalId,
+      voter_type: voterType,
+      drep_id: drepId,
+      spo_id: spoId,
+      cc_id: ccId,
     },
   });
 
   if (existingVote) {
     // Update existing vote record (same transaction, just updating metadata)
-    await tx.onchainVote.update({
+    await tx.onchain_vote.update({
       where: { id: existingVote.id },
       data: {
         vote: voteType,
-        votingPower,
-        anchorUrl: koiosVote.meta_url,
-        anchorHash: koiosVote.meta_hash,
-        votedAt: koiosVote.block_time
+        voting_power: votingPower,
+        anchor_url: koiosVote.meta_url,
+        anchor_hash: koiosVote.meta_hash,
+        rationale: rationaleJson ?? undefined,
+        voted_at: koiosVote.block_time
           ? new Date(koiosVote.block_time * 1000)
           : undefined,
       },
@@ -288,22 +368,23 @@ async function ingestSingleVote(
     const voterKey = drepId ?? spoId ?? ccId ?? "unknown";
     const onchainVoteId = `${koiosVote.vote_tx_hash}:${proposalId}:${voterType}:${voterKey}`;
 
-    await tx.onchainVote.create({
+    await tx.onchain_vote.create({
       data: {
         id: onchainVoteId,
-        txHash: koiosVote.vote_tx_hash,
-        proposalId,
+        tx_hash: koiosVote.vote_tx_hash,
+        proposal_id: proposalId,
         vote: voteType,
-        voterType,
-        votingPower,
-        anchorUrl: koiosVote.meta_url,
-        anchorHash: koiosVote.meta_hash,
-        votedAt: koiosVote.block_time
+        voter_type: voterType,
+        voting_power: votingPower,
+        anchor_url: koiosVote.meta_url,
+        anchor_hash: koiosVote.meta_hash,
+        rationale: rationaleJson ?? undefined,
+        voted_at: koiosVote.block_time
           ? new Date(koiosVote.block_time * 1000) // Convert Unix timestamp to Date
           : undefined,
-        drepId,
-        spoId,
-        ccId,
+        drep_id: drepId,
+        spo_id: spoId,
+        cc_id: ccId,
       },
     });
     stats.votesIngested++;
@@ -314,14 +395,22 @@ async function ingestSingleVote(
  * Gets voter with their voting power (stored in lovelace as BigInt)
  */
 async function getVoterWithPower(
-  voterType: VoterType,
+  voterType: voter_type,
   voterId: string,
   tx: Prisma.TransactionClient
 ): Promise<{ votingPower: bigint } | null> {
-  if (voterType === VoterType.DREP) {
-    return await tx.drep.findUnique({ where: { drepId: voterId }, select: { votingPower: true } });
-  } else if (voterType === VoterType.SPO) {
-    return await tx.sPO.findUnique({ where: { poolId: voterId }, select: { votingPower: true } });
+  if (voterType === voter_type.DREP) {
+    const result = await tx.drep.findUnique({
+      where: { drep_id: voterId },
+      select: { voting_power: true },
+    });
+    return result ? { votingPower: result.voting_power } : null;
+  } else if (voterType === voter_type.SPO) {
+    const result = await tx.spo.findUnique({
+      where: { pool_id: voterId },
+      select: { voting_power: true },
+    });
+    return result ? { votingPower: result.voting_power } : null;
   }
   // CC members don't have voting power tracked
   return null;

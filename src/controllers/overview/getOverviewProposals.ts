@@ -18,8 +18,8 @@ export const getOverviewProposals = async (_req: Request, res: Response) => {
     const proposals = await prisma.proposal.findMany({
       select: proposalWithVotesSelect,
       orderBy: [
-        { submissionEpoch: "desc" },
-        { createdAt: "desc" },
+        { submission_epoch: "desc" },
+        { created_at: "desc" },
       ],
     });
 

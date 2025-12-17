@@ -19,16 +19,16 @@ export interface KoiosTreasuryWithdrawal {
 }
 
 export interface KoiosProposal {
-  proposal_id: string; // Maps to Proposal.proposalId
-  proposal_tx_hash: string; // Maps to Proposal.txHash
-  proposal_index: number; // Maps to Proposal.certIndex
-  proposal_type: string; // Maps to Proposal.governanceActionType
-  proposed_epoch: number; // Maps to Proposal.submissionEpoch
-  ratified_epoch?: number | null; // Maps to Proposal.ratifiedEpoch
-  enacted_epoch?: number | null; // Maps to Proposal.enactedEpoch
-  dropped_epoch?: number | null; // Maps to Proposal.droppedEpoch
-  expired_epoch?: number | null; // Maps to Proposal.expiredEpoch
-  expiration?: number | null; // Maps to Proposal.expirationEpoch (epoch when voting ends)
+  proposal_id: string; // Maps to proposal.proposal_id
+  proposal_tx_hash: string; // Maps to proposal.tx_hash
+  proposal_index: number; // Maps to proposal.cert_index
+  proposal_type: string; // Maps to proposal.governance_action_type
+  proposed_epoch: number; // Maps to proposal.submission_epoch
+  ratified_epoch?: number | null; // Maps to proposal.ratified_epoch
+  enacted_epoch?: number | null; // Maps to proposal.enacted_epoch
+  dropped_epoch?: number | null; // Maps to proposal.dropped_epoch
+  expired_epoch?: number | null; // Maps to proposal.expired_epoch
+  expiration?: number | null; // Maps to proposal.expiration_epoch (epoch when voting ends)
   meta_url?: string | null; // Fallback for metadata fetch
   meta_hash?: string | null;
   meta_json?: {
@@ -49,13 +49,13 @@ export interface KoiosProposal {
  * Endpoint: GET /vote_list
  */
 export interface KoiosVote {
-  vote_tx_hash: string; // Maps to OnchainVote.txHash
-  proposal_id: string; // Maps to OnchainVote.proposalId (need to look up)
-  voter_role: "DRep" | "SPO" | "ConstitutionalCommittee"; // Maps to OnchainVote.voterType
-  voter_id: string; // Maps to OnchainVote.drepId/spoId/ccId
-  vote: "Yes" | "No" | "Abstain"; // Maps to OnchainVote.vote
-  meta_url?: string | null; // Maps to OnchainVote.anchorUrl
-  meta_hash?: string | null; // Maps to OnchainVote.anchorHash
+  vote_tx_hash: string; // Maps to onchain_vote.tx_hash
+  proposal_id: string; // Maps to onchain_vote.proposal_id (need to look up)
+  voter_role: "DRep" | "SPO" | "ConstitutionalCommittee"; // Maps to onchain_vote.voter_type
+  voter_id: string; // Maps to onchain_vote.drep_id/spo_id/cc_id
+  vote: "Yes" | "No" | "Abstain"; // Maps to onchain_vote.vote
+  meta_url?: string | null; // Maps to onchain_vote.anchor_url
+  meta_hash?: string | null; // Maps to onchain_vote.anchor_hash
   meta_json?: {
     authors?: Array<{
       name?: string; // For CC votes, this is the member name
