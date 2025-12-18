@@ -158,13 +158,13 @@ async function ensureDrepExists(
   tx: Prisma.TransactionClient
 ): Promise<EnsureVoterResult> {
   const existing = await tx.drep.findUnique({
-    where: { drepId },
+    where: { drep_id: drepId },
   });
 
   // If voter exists, just return it without updating (optimization for initial sync)
   // Voting power updates can be done in a separate background job
   if (existing) {
-    return { voterId: existing.drepId, created: false, updated: false };
+    return { voterId: existing.drep_id, created: false, updated: false };
   }
 
   // Check cache first, then fetch if not cached
@@ -253,16 +253,16 @@ async function ensureDrepExists(
   // Create new DRep
   const newDrep = await tx.drep.create({
     data: {
-      drepId,
-      votingPower,
+      drep_id: drepId,
+      voting_power: votingPower,
       ...(name && { name }), // Only include if exists
-      ...(paymentAddress && { paymentAddress }), // Only include if exists
-      ...(iconUrl && { iconUrl }), // Only include if exists
-      ...(typeof doNotList === "boolean" && { doNotList }), // Only include if resolved
+      ...(paymentAddress && { payment_addr: paymentAddress }), // Only include if exists
+      ...(iconUrl && { icon_url: iconUrl }), // Only include if exists
+      ...(typeof doNotList === "boolean" && { do_not_list: doNotList }), // Only include if resolved
     },
   });
 
-  return { voterId: newDrep.drepId, created: true, updated: false };
+  return { voterId: newDrep.drep_id, created: true, updated: false };
 }
 
 /**
@@ -272,14 +272,14 @@ async function ensureSpoExists(
   poolId: string,
   tx: Prisma.TransactionClient
 ): Promise<EnsureVoterResult> {
-  const existing = await tx.sPO.findUnique({
-    where: { poolId },
+  const existing = await tx.spo.findUnique({
+    where: { pool_id: poolId },
   });
 
   // If voter exists, just return it without updating (optimization for initial sync)
   // Voting power updates can be done in a separate background job
   if (existing) {
-    return { voterId: existing.poolId, created: false, updated: false };
+    return { voterId: existing.pool_id, created: false, updated: false };
   }
 
   // Check cache first, then fetch if not cached
@@ -315,17 +315,17 @@ async function ensureSpoExists(
   const { poolName, ticker, iconUrl } = await getPoolMeta(koiosSpo);
 
   // Create new SPO
-  const newSpo = await tx.sPO.create({
+  const newSpo = await tx.spo.create({
     data: {
-      poolId,
-      poolName,
+      pool_id: poolId,
+      pool_name: poolName,
       ticker,
-      votingPower,
-      ...(iconUrl && { iconUrl }), // Only include if exists
+      voting_power: votingPower,
+      ...(iconUrl && { icon_url: iconUrl }), // Only include if exists
     },
   });
 
-  return { voterId: newSpo.poolId, created: true, updated: false };
+  return { voterId: newSpo.pool_id, created: true, updated: false };
 }
 
 /**
@@ -333,7 +333,7 @@ async function ensureSpoExists(
  * without protocol (e.g. "git.io/abc123" or "bit.ly/xyz"), which plain HTTP
  * clients and Puppeteer cannot navigate to directly.
  */
-function normaliseToHttpUrl(rawUrl: string): string {
+export function normaliseToHttpUrl(rawUrl: string): string {
   if (!rawUrl) return rawUrl;
 
   const trimmed = rawUrl.trim();
@@ -351,7 +351,7 @@ function normaliseToHttpUrl(rawUrl: string): string {
  * falls back to a real browser (Puppeteer) for providers that block plain
  * HTTP clients or require full browser behaviour.
  */
-async function fetchJsonWithBrowserLikeClient(
+export async function fetchJsonWithBrowserLikeClient(
   url: string,
   redirectDepth = 0
 ): Promise<any | null> {
@@ -635,13 +635,13 @@ async function ensureCcExists(
   ccId: string,
   tx: Prisma.TransactionClient
 ): Promise<EnsureVoterResult> {
-  const existing = await tx.cC.findUnique({
-    where: { ccId },
+  const existing = await tx.cc.findUnique({
+    where: { cc_id: ccId },
   });
 
   // If voter exists, just return it without updating (optimization for initial sync)
   if (existing) {
-    return { voterId: existing.ccId, created: false, updated: false };
+    return { voterId: existing.cc_id, created: false, updated: false };
   }
 
   // Fetch committee info from Koios
@@ -665,17 +665,17 @@ async function ensureCcExists(
   // The vote metadata contains the author name which we'll use to update the CC member
 
   // Create new CC member
-  const newCc = await tx.cC.create({
+  const newCc = await tx.cc.create({
     data: {
-      ccId,
-      hotCredential: ccMember?.cc_hot_id || ccId,
-      coldCredential: ccMember?.cc_cold_id,
+      cc_id: ccId,
+      hot_credential: ccMember?.cc_hot_id || ccId,
+      cold_credential: ccMember?.cc_cold_id,
       status,
-      memberName: null, // Will be updated when processing votes
+      member_name: null, // Will be updated when processing votes
     },
   });
 
-  return { voterId: newCc.ccId, created: true, updated: false };
+  return { voterId: newCc.cc_id, created: true, updated: false };
 }
 
 /**
@@ -764,7 +764,7 @@ async function syncDrepVotingPower(
 
   // Get all DReps from database
   const dreps = await prisma.drep.findMany({
-    select: { drepId: true },
+    select: { drep_id: true },
   });
 
   if (dreps.length === 0) {
@@ -784,7 +784,7 @@ async function syncDrepVotingPower(
         "/drep_voting_power_history",
         {
           _epoch_no: epoch,
-          _drep_id: drep.drepId,
+          _drep_id: drep.drep_id,
         }
       );
 
@@ -793,15 +793,15 @@ async function syncDrepVotingPower(
       if (votingPowerLovelace) {
         const newVotingPower = BigInt(votingPowerLovelace);
         await prisma.drep.update({
-          where: { drepId: drep.drepId },
-          data: { votingPower: newVotingPower },
+          where: { drep_id: drep.drep_id },
+          data: { voting_power: newVotingPower },
         });
         updated++;
       }
       // If no voting power found, the DRep might be inactive - skip update
     } catch (error: any) {
       failed++;
-      errors.push(`DRep ${drep.drepId}: ${error.message}`);
+      errors.push(`DRep ${drep.drep_id}: ${error.message}`);
     }
   }
 
@@ -825,8 +825,8 @@ async function syncSpoVotingPower(
   let failed = 0;
 
   // Get all SPOs from database
-  const spos = await prisma.sPO.findMany({
-    select: { poolId: true },
+  const spos = await prisma.spo.findMany({
+    select: { pool_id: true },
   });
 
   if (spos.length === 0) {
@@ -846,7 +846,7 @@ async function syncSpoVotingPower(
         "/pool_voting_power_history",
         {
           _epoch_no: epoch,
-          _pool_bech32: spo.poolId,
+          _pool_bech32: spo.pool_id,
         }
       );
 
@@ -854,16 +854,16 @@ async function syncSpoVotingPower(
 
       if (votingPowerLovelace) {
         const newVotingPower = BigInt(votingPowerLovelace);
-        await prisma.sPO.update({
-          where: { poolId: spo.poolId },
-          data: { votingPower: newVotingPower },
+        await prisma.spo.update({
+          where: { pool_id: spo.pool_id },
+          data: { voting_power: newVotingPower },
         });
         updated++;
       }
       // If no voting power found, the SPO might be inactive - skip update
     } catch (error: any) {
       failed++;
-      errors.push(`SPO ${spo.poolId}: ${error.message}`);
+      errors.push(`SPO ${spo.pool_id}: ${error.message}`);
     }
   }
 

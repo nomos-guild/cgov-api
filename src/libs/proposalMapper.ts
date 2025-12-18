@@ -1,13 +1,13 @@
 import {
-  Proposal as PrismaProposal,
-  OnchainVote,
-  GovernanceType,
-  ProposalStatus,
-  VoteType,
-  VoterType,
-  Drep,
-  SPO,
-  CC,
+  proposal,
+  onchain_vote,
+  governance_type,
+  proposal_status,
+  vote_type,
+  voter_type,
+  drep,
+  spo,
+  cc,
   Prisma,
 } from "@prisma/client";
 import {
@@ -20,58 +20,58 @@ import {
   VotingStatus,
 } from "../models";
 
-type VoteWithRelations = OnchainVote & {
-  Drep: Drep | null;
-  SPO: SPO | null;
-  CC: CC | null;
+type VoteWithRelations = onchain_vote & {
+  drep: drep | null;
+  spo: spo | null;
+  cc: cc | null;
 };
 
-export type ProposalWithVotes = PrismaProposal & {
-  OnchainVote: VoteWithRelations[];
+export type ProposalWithVotes = proposal & {
+  onchain_votes: VoteWithRelations[];
 };
 
 export const proposalWithVotesSelect = {
   id: true,
-  proposalId: true,
-  txHash: true,
-  certIndex: true,
+  proposal_id: true,
+  tx_hash: true,
+  cert_index: true,
   title: true,
   description: true,
   rationale: true,
-  governanceActionType: true,
+  governance_action_type: true,
   status: true,
-  submissionEpoch: true,
-  ratifiedEpoch: true,
-  enactedEpoch: true,
-  droppedEpoch: true,
-  expiredEpoch: true,
-  expirationEpoch: true,
+  submission_epoch: true,
+  ratified_epoch: true,
+  enacted_epoch: true,
+  dropped_epoch: true,
+  expired_epoch: true,
+  expiration_epoch: true,
   // DRep voting power fields
-  drepTotalVotePower: true,
-  drepActiveYesVotePower: true,
-  drepActiveNoVotePower: true,
-  drepActiveAbstainVotePower: true,
-  drepAlwaysAbstainVotePower: true,
-  drepAlwaysNoConfidenceVotePower: true,
-  drepInactiveVotePower: true,
+  drep_total_vote_power: true,
+  drep_active_yes_vote_power: true,
+  drep_active_no_vote_power: true,
+  drep_active_abstain_vote_power: true,
+  drep_always_abstain_vote_power: true,
+  drep_always_no_confidence_power: true,
+  drep_inactive_vote_power: true,
   // SPO voting power fields
-  spoTotalVotePower: true,
-  spoActiveYesVotePower: true,
-  spoActiveNoVotePower: true,
-  spoActiveAbstainVotePower: true,
-  spoAlwaysAbstainVotePower: true,
-  spoAlwaysNoConfidenceVotePower: true,
+  spo_total_vote_power: true,
+  spo_active_yes_vote_power: true,
+  spo_active_no_vote_power: true,
+  spo_active_abstain_vote_power: true,
+  spo_always_abstain_vote_power: true,
+  spo_always_no_confidence_power: true,
   metadata: true,
-  createdAt: true,
-  updatedAt: true,
-  OnchainVote: {
+  created_at: true,
+  updated_at: true,
+  onchain_votes: {
     include: {
-      Drep: true,
-      SPO: true,
-      CC: true,
+      drep: true,
+      spo: true,
+      cc: true,
     },
   },
-} satisfies Prisma.ProposalSelect;
+} satisfies Prisma.proposalSelect;
 
 interface AdaTally {
   yes: number;
@@ -82,7 +82,7 @@ interface AdaTally {
 
 interface CountTally extends AdaTally {}
 
-const statusLabelMap: Record<ProposalStatus, GovernanceAction["status"]> = {
+const statusLabelMap: Record<proposal_status, GovernanceAction["status"]> = {
   ACTIVE: "Active",
   RATIFIED: "Ratified",
   ENACTED: "Enacted",
@@ -93,7 +93,7 @@ const statusLabelMap: Record<ProposalStatus, GovernanceAction["status"]> = {
 /**
  * Maps database GovernanceType enum to full display labels
  */
-const governanceTypeLabelMap: Record<GovernanceType, string> = {
+const governanceTypeLabelMap: Record<governance_type, string> = {
   INFO_ACTION: "Info Action",
   TREASURY_WITHDRAWALS: "Treasury Withdrawals",
   NEW_CONSTITUTION: "New Constitution",
@@ -103,14 +103,14 @@ const governanceTypeLabelMap: Record<GovernanceType, string> = {
   UPDATE_COMMITTEE: "Update Committee",
 };
 
-const formatGovernanceType = (type?: GovernanceType | null): string => {
+const formatGovernanceType = (type?: governance_type | null): string => {
   if (!type) {
     return "Unknown";
   }
   return governanceTypeLabelMap[type] ?? "Unknown";
 };
 
-const formatStatus = (status: ProposalStatus) =>
+const formatStatus = (status: proposal_status) =>
   statusLabelMap[status] ?? "Active";
 
 const percent = (value: number, total: number) =>
@@ -120,8 +120,8 @@ const percent = (value: number, total: number) =>
  * Gets voting power in lovelace from a vote (BigInt stored, returned as number for tallying)
  */
 const getLovelaceValue = (vote: VoteWithRelations): number => {
-  if (vote.votingPower !== null && vote.votingPower !== undefined) {
-    return Number(vote.votingPower);
+  if (vote.voting_power !== null && vote.voting_power !== undefined) {
+    return Number(vote.voting_power);
   }
   return 0;
 };
@@ -134,9 +134,9 @@ const tallyLovelaceVotes = (votes: VoteWithRelations[]): AdaTally => {
 
   for (const vote of votes) {
     const power = getLovelaceValue(vote);
-    if (vote.vote === VoteType.YES) {
+    if (vote.vote === vote_type.YES) {
       totals.yes += power;
-    } else if (vote.vote === VoteType.NO) {
+    } else if (vote.vote === vote_type.NO) {
       totals.no += power;
     } else {
       totals.abstain += power;
@@ -151,9 +151,9 @@ const tallyCountVotes = (votes: VoteWithRelations[]): CountTally => {
   const totals: CountTally = { yes: 0, no: 0, abstain: 0, total: 0 };
 
   for (const vote of votes) {
-    if (vote.vote === VoteType.YES) {
+    if (vote.vote === vote_type.YES) {
       totals.yes += 1;
-    } else if (vote.vote === VoteType.NO) {
+    } else if (vote.vote === vote_type.NO) {
       totals.no += 1;
     } else {
       totals.abstain += 1;
@@ -196,13 +196,13 @@ const buildDrepVoteInfo = (
   proposal: ProposalWithVotes
 ): GovernanceActionVoteInfo => {
   // Convert to number for calculations (values are in lovelace)
-  const total = toNumber(proposal.drepTotalVotePower);
-  const yes = toNumber(proposal.drepActiveYesVotePower);
-  const no = toNumber(proposal.drepActiveNoVotePower);
-  const abstain = toNumber(proposal.drepActiveAbstainVotePower);
-  const alwaysAbstain = toNumber(proposal.drepAlwaysAbstainVotePower);
-  const alwaysNoConfidence = toNumber(proposal.drepAlwaysNoConfidenceVotePower);
-  const inactive = toNumber(proposal.drepInactiveVotePower);
+  const total = toNumber(proposal.drep_total_vote_power);
+  const yes = toNumber(proposal.drep_active_yes_vote_power);
+  const no = toNumber(proposal.drep_active_no_vote_power);
+  const abstain = toNumber(proposal.drep_active_abstain_vote_power);
+  const alwaysAbstain = toNumber(proposal.drep_always_abstain_vote_power);
+  const alwaysNoConfidence = toNumber(proposal.drep_always_no_confidence_power);
+  const inactive = toNumber(proposal.drep_inactive_vote_power);
 
   // Calculate "Not Voted" power
   const notVoted =
@@ -256,12 +256,12 @@ const SPO_FORMULA_TRANSITION_EPOCH = 534;
  */
 const shouldUseNewSpoFormula = (proposal: ProposalWithVotes): boolean => {
   // Check if this is the transition governance action itself
-  if (proposal.proposalId === SPO_FORMULA_TRANSITION_GOV_ACTION) {
+  if (proposal.proposal_id === SPO_FORMULA_TRANSITION_GOV_ACTION) {
     return true;
   }
 
   // Check by submission epoch - new formula for epoch >= 534
-  const submissionEpoch = proposal.submissionEpoch;
+  const submissionEpoch = proposal.submission_epoch;
   if (submissionEpoch !== null && submissionEpoch !== undefined) {
     return submissionEpoch >= SPO_FORMULA_TRANSITION_EPOCH;
   }
@@ -289,19 +289,19 @@ const buildSpoVoteInfo = (
 ): GovernanceActionVoteInfo | undefined => {
   // If no SPO voting power data, return undefined
   if (
-    proposal.spoTotalVotePower === null ||
-    proposal.spoTotalVotePower === undefined
+    proposal.spo_total_vote_power === null ||
+    proposal.spo_total_vote_power === undefined
   ) {
     return undefined;
   }
 
   // Convert to number for calculations (values are in lovelace)
-  const total = toNumber(proposal.spoTotalVotePower);
-  const yes = toNumber(proposal.spoActiveYesVotePower);
-  const no = toNumber(proposal.spoActiveNoVotePower);
-  const abstain = toNumber(proposal.spoActiveAbstainVotePower);
-  const alwaysAbstain = toNumber(proposal.spoAlwaysAbstainVotePower);
-  const alwaysNoConfidence = toNumber(proposal.spoAlwaysNoConfidenceVotePower);
+  const total = toNumber(proposal.spo_total_vote_power);
+  const yes = toNumber(proposal.spo_active_yes_vote_power);
+  const no = toNumber(proposal.spo_active_no_vote_power);
+  const abstain = toNumber(proposal.spo_active_abstain_vote_power);
+  const alwaysAbstain = toNumber(proposal.spo_always_abstain_vote_power);
+  const alwaysNoConfidence = toNumber(proposal.spo_always_no_confidence_power);
 
   // Calculate "Not Voted" power
   const notVoted = total - yes - no - abstain - alwaysAbstain - alwaysNoConfidence;
@@ -394,23 +394,23 @@ const buildCcVoteInfo = (tally: CountTally): CCGovernanceActionVoteInfo => {
   };
 };
 
-const formatVoterType = (type: VoterType): VoteRecord["voterType"] => {
+const formatVoterType = (type: voter_type): VoteRecord["voterType"] => {
   switch (type) {
-    case VoterType.DREP:
+    case voter_type.DREP:
       return "DRep";
-    case VoterType.SPO:
+    case voter_type.SPO:
       return "SPO";
-    case VoterType.CC:
+    case voter_type.CC:
     default:
       return "CC";
   }
 };
 
-const formatVoteChoice = (vote?: VoteType | null): VoteRecord["vote"] => {
-  if (vote === VoteType.YES) {
+const formatVoteChoice = (vote?: vote_type | null): VoteRecord["vote"] => {
+  if (vote === vote_type.YES) {
     return "Yes";
   }
-  if (vote === VoteType.NO) {
+  if (vote === vote_type.NO) {
     return "No";
   }
   return "Abstain";
@@ -420,36 +420,38 @@ const formatVoteDate = (value?: Date | null) =>
   value ? value.toISOString() : new Date().toISOString();
 
 const resolveVoterId = (vote: VoteWithRelations): string => {
-  if (vote.voterType === VoterType.DREP) {
-    return vote.Drep?.drepId ?? vote.drepId ?? vote.id;
+  if (vote.voter_type === voter_type.DREP) {
+    return vote.drep?.drep_id ?? vote.drep_id ?? vote.id;
   }
 
-  if (vote.voterType === VoterType.SPO) {
-    return vote.SPO?.poolId ?? vote.spoId ?? vote.id;
+  if (vote.voter_type === voter_type.SPO) {
+    return vote.spo?.pool_id ?? vote.spo_id ?? vote.id;
   }
 
-  return vote.CC?.ccId ?? vote.ccId ?? vote.id;
+  return vote.cc?.cc_id ?? vote.cc_id ?? vote.id;
 };
 
 const resolveVoterName = (vote: VoteWithRelations): string | undefined => {
-  if (vote.voterType === VoterType.DREP) {
+  if (vote.voter_type === voter_type.DREP) {
     // Prefer the DRep's display name, falling back to their payment address if available
-    return vote.Drep?.name ?? vote.Drep?.paymentAddress ?? undefined;
+    return vote.drep?.name ?? vote.drep?.payment_addr ?? undefined;
   }
 
-  if (vote.voterType === VoterType.SPO) {
-    return vote.SPO?.poolName ?? vote.SPO?.ticker ?? undefined;
+  if (vote.voter_type === voter_type.SPO) {
+    return vote.spo?.pool_name ?? vote.spo?.ticker ?? undefined;
   }
 
-  return vote.CC?.memberName ?? undefined;
+  return vote.cc?.member_name ?? undefined;
 };
 
 const mapVoteRecord = (vote: VoteWithRelations): VoteRecord => {
   const record: VoteRecord = {
-    voterType: formatVoterType(vote.voterType),
+    voterType: formatVoterType(vote.voter_type),
     voterId: resolveVoterId(vote),
     vote: formatVoteChoice(vote.vote),
-    votedAt: formatVoteDate(vote.votedAt ?? vote.createdAt ?? vote.updatedAt),
+    votedAt: formatVoteDate(
+      vote.voted_at ?? vote.created_at ?? vote.updated_at
+    ),
   };
 
   const voterName = resolveVoterName(vote);
@@ -458,16 +460,16 @@ const mapVoteRecord = (vote: VoteWithRelations): VoteRecord => {
   }
 
   // votingPower is stored as BigInt in lovelace, convert to string for API response
-  if (vote.votingPower !== null && vote.votingPower !== undefined) {
-    record.votingPower = vote.votingPower.toString();
+  if (vote.voting_power !== null && vote.voting_power !== undefined) {
+    record.votingPower = vote.voting_power.toString();
   }
 
-  if (vote.anchorUrl) {
-    record.anchorUrl = vote.anchorUrl;
+  if (vote.anchor_url) {
+    record.anchorUrl = vote.anchor_url;
   }
 
-  if (vote.anchorHash) {
-    record.anchorHash = vote.anchorHash;
+  if (vote.anchor_hash) {
+    record.anchorHash = vote.anchor_hash;
   }
 
   return record;
@@ -509,9 +511,9 @@ const determineConstitutionality = (ccCountTally: CountTally): string => {
 };
 
 const aggregateVotes = (votes: VoteWithRelations[]) => {
-  const drepVotes = votes.filter((vote) => vote.voterType === VoterType.DREP);
-  const spoVotes = votes.filter((vote) => vote.voterType === VoterType.SPO);
-  const ccVotes = votes.filter((vote) => vote.voterType === VoterType.CC);
+  const drepVotes = votes.filter((vote) => vote.voter_type === voter_type.DREP);
+  const spoVotes = votes.filter((vote) => vote.voter_type === voter_type.SPO);
+  const ccVotes = votes.filter((vote) => vote.voter_type === voter_type.CC);
 
   // Tally voting power in lovelace
   const drepLovelaceTally = tallyLovelaceVotes(drepVotes);
@@ -547,7 +549,7 @@ const aggregateVotes = (votes: VoteWithRelations[]) => {
  * Note: Protocol Parameter Change has sub-types with different thresholds,
  * but we don't have sub-type information from Koios, so we use the most common threshold (0.67)
  */
-const VOTING_THRESHOLDS: Record<GovernanceType, VotingThreshold> = {
+const VOTING_THRESHOLDS: Record<governance_type, VotingThreshold> = {
   // 1. Motion of no-confidence: CC doesn't vote, DRep 0.67, SPO 0.51
   NO_CONFIDENCE: {
     ccThreshold: null,
@@ -601,7 +603,7 @@ const VOTING_THRESHOLDS: Record<GovernanceType, VotingThreshold> = {
  * Get voting threshold for a governance action type
  */
 const getVotingThreshold = (
-  governanceType: GovernanceType | null | undefined
+  governanceType: governance_type | null | undefined
 ): VotingThreshold => {
   if (!governanceType) {
     // Default to Info Action thresholds for unknown types
@@ -683,17 +685,17 @@ const isProposalPassing = (votingStatus: VotingStatus): boolean => {
 };
 
 const buildProposalIdentifier = (proposal: ProposalWithVotes) => {
-  // Use the proposalId field from the database (Cardano governance action ID)
-  if (proposal.proposalId) {
-    return proposal.proposalId;
+  // Use the proposal_id field from the database (Cardano governance action ID)
+  if (proposal.proposal_id) {
+    return proposal.proposal_id;
   }
 
-  // Fallback to txHash:certIndex format if proposalId is not available
-  if (proposal.txHash) {
-    if (proposal.certIndex !== null && proposal.certIndex !== undefined) {
-      return `${proposal.txHash}:${proposal.certIndex}`;
+  // Fallback to tx_hash:cert_index format if proposal_id is not available
+  if (proposal.tx_hash) {
+    if (proposal.cert_index !== null && proposal.cert_index !== undefined) {
+      return `${proposal.tx_hash}:${proposal.cert_index}`;
     }
-    return proposal.txHash;
+    return proposal.tx_hash;
   }
 
   return proposal.id.toString();
@@ -702,12 +704,12 @@ const buildProposalIdentifier = (proposal: ProposalWithVotes) => {
 export const mapProposalToGovernanceAction = (
   proposal: ProposalWithVotes
 ): GovernanceAction => {
-  const voteAggregation = aggregateVotes(proposal.OnchainVote ?? []);
+  const voteAggregation = aggregateVotes(proposal.onchain_votes ?? []);
 
   // Use new voting power-based calculations if data is available, otherwise fall back to vote tally
   const hasDrepVotingPowerData =
-    proposal.drepTotalVotePower !== null &&
-    proposal.drepTotalVotePower !== undefined;
+    proposal.drep_total_vote_power !== null &&
+    proposal.drep_total_vote_power !== undefined;
   const drepInfo = hasDrepVotingPowerData
     ? buildDrepVoteInfo(proposal)
     : buildVoteInfo(voteAggregation.drepLovelaceTally);
@@ -729,12 +731,12 @@ export const mapProposalToGovernanceAction = (
   );
 
   // Build hash field (txHash:certIndex format)
-  const hash = proposal.certIndex
-    ? `${proposal.txHash}:${proposal.certIndex}`
-    : proposal.txHash;
+  const hash = proposal.cert_index
+    ? `${proposal.tx_hash}:${proposal.cert_index}`
+    : proposal.tx_hash;
 
   // Get voting thresholds based on governance action type
-  const threshold = getVotingThreshold(proposal.governanceActionType);
+  const threshold = getVotingThreshold(proposal.governance_action_type);
 
   // Determine voting status for each voter type
   const votingStatus = determineVotingStatus(threshold, drepInfo, spoInfo, ccInfo);
@@ -746,7 +748,7 @@ export const mapProposalToGovernanceAction = (
     proposalId: buildProposalIdentifier(proposal),
     hash,
     title: proposal.title,
-    type: formatGovernanceType(proposal.governanceActionType),
+    type: formatGovernanceType(proposal.governance_action_type),
     status: formatStatus(proposal.status),
     constitutionality,
     drep: drepInfo,
@@ -755,8 +757,8 @@ export const mapProposalToGovernanceAction = (
     totalYes: voteAggregation.totals.yes,
     totalNo: voteAggregation.totals.no,
     totalAbstain: voteAggregation.totals.abstain,
-    submissionEpoch: proposal.submissionEpoch ?? 0,
-    expiryEpoch: proposal.expirationEpoch ?? 0,
+    submissionEpoch: proposal.submission_epoch ?? 0,
+    expiryEpoch: proposal.expiration_epoch ?? 0,
     threshold,
     votingStatus,
     passing,
@@ -767,9 +769,9 @@ export const mapProposalToGovernanceActionDetail = (
   proposal: ProposalWithVotes
 ): GovernanceActionDetail => {
   const base = mapProposalToGovernanceAction(proposal);
-  const votes = proposal.OnchainVote ?? [];
-  const standardVotes = votes.filter((vote) => vote.voterType !== VoterType.CC);
-  const ccVotes = votes.filter((vote) => vote.voterType === VoterType.CC);
+  const votes = proposal.onchain_votes ?? [];
+  const standardVotes = votes.filter((vote) => vote.voter_type !== voter_type.CC);
+  const ccVotes = votes.filter((vote) => vote.voter_type === voter_type.CC);
 
   const mappedVotes = standardVotes.map(mapVoteRecord);
   const mappedCcVotes = ccVotes.map(mapVoteRecord);

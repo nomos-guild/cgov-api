@@ -3,7 +3,12 @@
  * Handles syncing proposals from Koios API to database
  */
 
-import { PrismaClient, ProposalStatus, GovernanceType } from "@prisma/client";
+import {
+  PrismaClient,
+  proposal_status,
+  governance_type,
+  voter_type,
+} from "@prisma/client";
 import { koiosGet } from "../koios";
 import {
   ingestVotesForProposal,
@@ -29,7 +34,7 @@ export interface ProposalIngestionResult {
   proposal: {
     id: number;
     proposalId: string;
-    status: ProposalStatus;
+    status: proposal_status;
   };
   stats: VoteIngestionStats;
 }
@@ -107,48 +112,50 @@ export async function ingestProposalData(
 
     // 5. Check if proposal exists to determine if creating or updating
     const existingProposal = await prisma.proposal.findUnique({
-      where: { proposalId: koiosProposal.proposal_id },
+      where: { proposal_id: koiosProposal.proposal_id },
     });
 
     const isUpdate = !!existingProposal;
 
     // 6. Upsert proposal (single atomic DB operation, no long transaction)
     const proposal = await prisma.proposal.upsert({
-      where: { proposalId: koiosProposal.proposal_id },
+      where: { proposal_id: koiosProposal.proposal_id },
       create: {
-        proposalId: koiosProposal.proposal_id,
-        txHash: koiosProposal.proposal_tx_hash,
-        certIndex: String(koiosProposal.proposal_index),
+        proposal_id: koiosProposal.proposal_id,
+        tx_hash: koiosProposal.proposal_tx_hash,
+        cert_index: String(koiosProposal.proposal_index),
         title,
         description,
         rationale,
-        governanceActionType,
+        governance_action_type: governanceActionType ?? undefined,
         status,
-        submissionEpoch: koiosProposal.proposed_epoch,
-        ratifiedEpoch: koiosProposal.ratified_epoch,
-        enactedEpoch: koiosProposal.enacted_epoch,
-        droppedEpoch: koiosProposal.dropped_epoch,
-        expiredEpoch: koiosProposal.expired_epoch,
-        expirationEpoch: koiosProposal.expiration,
+        submission_epoch: koiosProposal.proposed_epoch,
+        ratified_epoch: koiosProposal.ratified_epoch,
+        enacted_epoch: koiosProposal.enacted_epoch,
+        dropped_epoch: koiosProposal.dropped_epoch,
+        expired_epoch: koiosProposal.expired_epoch,
+        expiration_epoch: koiosProposal.expiration,
         metadata,
       },
       update: {
         // Only update mutable fields
         status,
         // Backfill governanceActionType when we have a valid mapping
-        ...(governanceActionType !== null && { governanceActionType }),
-        ratifiedEpoch: koiosProposal.ratified_epoch,
-        enactedEpoch: koiosProposal.enacted_epoch,
-        droppedEpoch: koiosProposal.dropped_epoch,
-        expiredEpoch: koiosProposal.expired_epoch,
-        expirationEpoch: koiosProposal.expiration,
+        ...(governanceActionType !== null && {
+          governance_action_type: governanceActionType,
+        }),
+        ratified_epoch: koiosProposal.ratified_epoch,
+        enacted_epoch: koiosProposal.enacted_epoch,
+        dropped_epoch: koiosProposal.dropped_epoch,
+        expired_epoch: koiosProposal.expired_epoch,
+        expiration_epoch: koiosProposal.expiration,
         metadata,
       },
     });
 
     console.log(
       `[Proposal Ingest] ${isUpdate ? "Updated" : "Created"} proposal - ` +
-        `proposalId: ${proposal.proposalId}, ` +
+        `proposalId: ${proposal.proposal_id}, ` +
         `type: ${governanceActionType || "null"}, koios_type: "${
           koiosProposal.proposal_type
         }"`
@@ -159,12 +166,9 @@ export async function ingestProposalData(
     // - Individual vote/voter inserts can commit as they go.
     // - If we hit a timeout or other error part-way through, a retry will
     //   see existing rows and continue without duplicating work.
-    const voteStats = await ingestVotesForProposal(
-      proposal.proposalId,
-      prisma,
-      minVotesEpochOverride,
-      { useCache: useCache !== false }
-    );
+    const voteStats = await ingestVotesForProposal(proposal.proposal_id, prisma, minVotesEpochOverride, {
+      useCache: useCache !== false,
+    });
 
     // 8. Fetch and update voting power summary data from Koios
     // This populates the DRep/SPO voting power fields for accurate percentage calculations
@@ -210,7 +214,7 @@ export async function ingestProposalData(
       ? koiosProposal.expiration!
       : currentEpoch;
     await updateProposalVotingPower(
-      proposal.proposalId,
+      proposal.proposal_id,
       drepTotalPowerEpoch,
       spoTotalPowerEpoch,
       inactivePowerEpoch,
@@ -221,7 +225,7 @@ export async function ingestProposalData(
       success: true,
       proposal: {
         id: proposal.id,
-        proposalId: proposal.proposalId,
+          proposalId: proposal.proposal_id,
         status: proposal.status,
       },
       stats: voteStats,
@@ -280,14 +284,14 @@ export async function syncAllProposals(): Promise<SyncAllProposalsResult> {
 
   // 1. Snapshot existing proposals from DB (IDs + status)
   const existingProposals = await prisma.proposal.findMany({
-    select: { proposalId: true, status: true },
+    select: { proposal_id: true, status: true },
   });
 
-  const existingIds = new Set(existingProposals.map((p) => p.proposalId));
+  const existingIds = new Set(existingProposals.map((p) => p.proposal_id));
   const activeIdsInDb = new Set(
     existingProposals
-      .filter((p) => p.status === ProposalStatus.ACTIVE)
-      .map((p) => p.proposalId)
+      .filter((p) => p.status === proposal_status.ACTIVE)
+      .map((p) => p.proposal_id)
   );
 
   // 2. Fetch all proposals from Koios (API does not support server-side filtering)
@@ -400,18 +404,18 @@ export async function syncAllProposals(): Promise<SyncAllProposalsResult> {
  */
 function mapGovernanceType(
   koiosType: string | undefined
-): GovernanceType | null {
+): governance_type | null {
   if (!koiosType) return null;
 
   // Koios uses PascalCase for proposal_type
-  const typeMap: Record<string, GovernanceType> = {
-    ParameterChange: GovernanceType.PROTOCOL_PARAMETER_CHANGE,
-    HardForkInitiation: GovernanceType.HARD_FORK_INITIATION,
-    TreasuryWithdrawals: GovernanceType.TREASURY_WITHDRAWALS,
-    NoConfidence: GovernanceType.NO_CONFIDENCE,
-    NewCommittee: GovernanceType.UPDATE_COMMITTEE,
-    NewConstitution: GovernanceType.NEW_CONSTITUTION,
-    InfoAction: GovernanceType.INFO_ACTION,
+  const typeMap: Record<string, governance_type> = {
+    ParameterChange: governance_type.PROTOCOL_PARAMETER_CHANGE,
+    HardForkInitiation: governance_type.HARD_FORK_INITIATION,
+    TreasuryWithdrawals: governance_type.TREASURY_WITHDRAWALS,
+    NoConfidence: governance_type.NO_CONFIDENCE,
+    NewCommittee: governance_type.UPDATE_COMMITTEE,
+    NewConstitution: governance_type.NEW_CONSTITUTION,
+    InfoAction: governance_type.INFO_ACTION,
   };
 
   return typeMap[koiosType] || null;
@@ -439,33 +443,33 @@ export async function getCurrentEpoch(): Promise<number> {
 function deriveProposalStatus(
   proposal: KoiosProposal,
   currentEpoch: number
-): ProposalStatus {
+): proposal_status {
   const isInfoAction = proposal.proposal_type === "InfoAction";
 
   // If enacted (applied to chain), return ENACTED
   if (proposal.enacted_epoch && proposal.enacted_epoch <= currentEpoch) {
-    return ProposalStatus.ENACTED;
+    return proposal_status.ENACTED;
   }
 
   // If ratified but not yet enacted
   if (proposal.ratified_epoch && proposal.ratified_epoch <= currentEpoch) {
-    return ProposalStatus.RATIFIED;
+    return proposal_status.RATIFIED;
   }
 
   // If expired
   if (proposal.expired_epoch && proposal.expired_epoch <= currentEpoch) {
     // INFO actions use CLOSED status when expired
-    return isInfoAction ? ProposalStatus.CLOSED : ProposalStatus.EXPIRED;
+    return isInfoAction ? proposal_status.CLOSED : proposal_status.EXPIRED;
   }
 
   // If dropped
   if (proposal.dropped_epoch && proposal.dropped_epoch <= currentEpoch) {
     // INFO actions use CLOSED status when dropped
-    return isInfoAction ? ProposalStatus.CLOSED : ProposalStatus.EXPIRED;
+    return isInfoAction ? proposal_status.CLOSED : proposal_status.EXPIRED;
   }
 
   // Otherwise, still ACTIVE
-  return ProposalStatus.ACTIVE;
+  return proposal_status.ACTIVE;
 }
 
 /**
@@ -836,25 +840,25 @@ async function fetchInactiveDrepVotingPowerForCompletedProposal(
     // epoch falls within the activity window
     const activeDrepIds = new Set<string>();
 
-    const activeVoters = await prisma.onchainVote.findMany({
+    const activeVoters = await prisma.onchain_vote.findMany({
       where: {
-        voterType: "DREP",
-        drepId: { not: null },
-      Proposal: {
+        voter_type: voter_type.DREP,
+        drep_id: { not: null },
+        proposal: {
           OR: [
             // Proposal was submitted within the activity window
             {
-              submissionEpoch: {
+              submission_epoch: {
                 gte: minActiveEpoch,
                 lte: referenceEpoch,
               },
             },
             // Proposal expires within or after the activity window (was active during the window)
             {
-              expirationEpoch: {
+              expiration_epoch: {
                 gte: minActiveEpoch,
               },
-              submissionEpoch: {
+              submission_epoch: {
                 lte: referenceEpoch,
               },
             },
@@ -862,14 +866,14 @@ async function fetchInactiveDrepVotingPowerForCompletedProposal(
         },
       },
       select: {
-        drepId: true,
+        drep_id: true,
       },
-      distinct: ["drepId"],
+      distinct: ["drep_id"],
     });
 
     for (const voter of activeVoters) {
-      if (voter.drepId) {
-        activeDrepIds.add(voter.drepId);
+      if (voter.drep_id) {
+        activeDrepIds.add(voter.drep_id);
       }
     }
 
@@ -1003,9 +1007,9 @@ async function updateProposalVotingPower(
     );
 
     // Fetch total voting powers for the epoch (these are needed for "Not Voted" calculation)
-    // - drepTotalVotePower uses drepTotalPowerEpoch
-    // - spoTotalVotePower uses spoTotalPowerEpoch (epoch - 1 because SPO stake snapshot is taken at epoch boundary)
-    // - drepInactiveVotePower uses inactivePowerEpoch (expiration epoch for completed proposals)
+    // - drep_total_vote_power uses drepTotalPowerEpoch
+    // - spo_total_vote_power uses spoTotalPowerEpoch (epoch - 1 because SPO stake snapshot is taken at epoch boundary)
+    // - drep_inactive_vote_power uses inactivePowerEpoch (expiration epoch for completed proposals)
     // Only calculate inactive DRep power for epochs >= 527 (when inactivity rules were introduced)
     const shouldCalculateInactive =
       inactivePowerEpoch >= DREP_INACTIVITY_START_EPOCH;
@@ -1034,41 +1038,41 @@ async function updateProposalVotingPower(
 
     // Update proposal with voting power data (all values stored in lovelace as BigInt)
     await prisma.proposal.update({
-      where: { proposalId },
+      where: { proposal_id: proposalId },
       data: {
         // DRep voting power fields (lovelace)
-        drepTotalVotePower,
-        drepActiveYesVotePower: lovelaceToBigInt(
+        drep_total_vote_power: drepTotalVotePower,
+        drep_active_yes_vote_power: lovelaceToBigInt(
           votingSummary.drep_active_yes_vote_power
         ),
-        drepActiveNoVotePower: lovelaceToBigInt(
+        drep_active_no_vote_power: lovelaceToBigInt(
           votingSummary.drep_active_no_vote_power
         ),
-        drepActiveAbstainVotePower: lovelaceToBigInt(
+        drep_active_abstain_vote_power: lovelaceToBigInt(
           votingSummary.drep_active_abstain_vote_power
         ),
-        drepAlwaysAbstainVotePower: lovelaceToBigInt(
+        drep_always_abstain_vote_power: lovelaceToBigInt(
           votingSummary.drep_always_abstain_vote_power
         ),
-        drepAlwaysNoConfidenceVotePower: lovelaceToBigInt(
+        drep_always_no_confidence_power: lovelaceToBigInt(
           votingSummary.drep_always_no_confidence_vote_power
         ),
-        drepInactiveVotePower,
+        drep_inactive_vote_power: drepInactiveVotePower,
         // SPO voting power fields (lovelace) - Koios uses "pool_" prefix
-        spoTotalVotePower,
-        spoActiveYesVotePower: lovelaceToBigInt(
+        spo_total_vote_power: spoTotalVotePower,
+        spo_active_yes_vote_power: lovelaceToBigInt(
           votingSummary.pool_active_yes_vote_power
         ),
-        spoActiveNoVotePower: lovelaceToBigInt(
+        spo_active_no_vote_power: lovelaceToBigInt(
           votingSummary.pool_active_no_vote_power
         ),
-        spoActiveAbstainVotePower: lovelaceToBigInt(
+        spo_active_abstain_vote_power: lovelaceToBigInt(
           votingSummary.pool_active_abstain_vote_power
         ),
-        spoAlwaysAbstainVotePower: lovelaceToBigInt(
+        spo_always_abstain_vote_power: lovelaceToBigInt(
           votingSummary.pool_passive_always_abstain_vote_power
         ),
-        spoAlwaysNoConfidenceVotePower: lovelaceToBigInt(
+        spo_always_no_confidence_power: lovelaceToBigInt(
           votingSummary.pool_passive_always_no_confidence_vote_power
         ),
       },
