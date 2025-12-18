@@ -472,6 +472,11 @@ const mapVoteRecord = (vote: VoteWithRelations): VoteRecord => {
     record.anchorHash = vote.anchor_hash;
   }
 
+  // Rationale/metadata JSON for this specific vote (stored as string in DB)
+  if (vote.rationale) {
+    record.rationale = vote.rationale;
+  }
+
   return record;
 };
 

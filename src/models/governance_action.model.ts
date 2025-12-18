@@ -62,6 +62,7 @@ export interface VotingThreshold {
     voterName?: string;
     vote: "Yes" | "No" | "Abstain";
     votingPower?: string; // Voting power in lovelace (string for BigInt serialization)
+    rationale?: string;
     anchorUrl?: string;
     anchorHash?: string;
     votedAt: string;
