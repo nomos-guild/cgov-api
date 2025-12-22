@@ -18,6 +18,7 @@ import {
   VoteRecord,
   VotingThreshold,
   VotingStatus,
+  RawVotingPowerValues,
 } from "../models";
 
 type VoteWithRelations = onchain_vote & {
@@ -750,6 +751,33 @@ export const mapProposalToGovernanceAction = (
   // Determine if proposal is passing overall
   const passing = isProposalPassing(votingStatus);
 
+  const rawVotingPowerValues: RawVotingPowerValues = {
+    drep_total_vote_power: proposal.drep_total_vote_power?.toString() ?? null,
+    drep_active_yes_vote_power:
+      proposal.drep_active_yes_vote_power?.toString() ?? null,
+    drep_active_no_vote_power:
+      proposal.drep_active_no_vote_power?.toString() ?? null,
+    drep_active_abstain_vote_power:
+      proposal.drep_active_abstain_vote_power?.toString() ?? null,
+    drep_always_abstain_vote_power:
+      proposal.drep_always_abstain_vote_power?.toString() ?? null,
+    drep_always_no_confidence_power:
+      proposal.drep_always_no_confidence_power?.toString() ?? null,
+    drep_inactive_vote_power:
+      proposal.drep_inactive_vote_power?.toString() ?? null,
+    spo_total_vote_power: proposal.spo_total_vote_power?.toString() ?? null,
+    spo_active_yes_vote_power:
+      proposal.spo_active_yes_vote_power?.toString() ?? null,
+    spo_active_no_vote_power:
+      proposal.spo_active_no_vote_power?.toString() ?? null,
+    spo_active_abstain_vote_power:
+      proposal.spo_active_abstain_vote_power?.toString() ?? null,
+    spo_always_abstain_vote_power:
+      proposal.spo_always_abstain_vote_power?.toString() ?? null,
+    spo_always_no_confidence_power:
+      proposal.spo_always_no_confidence_power?.toString() ?? null,
+  };
+
   return {
     proposalId: buildProposalIdentifier(proposal),
     hash,
@@ -768,6 +796,7 @@ export const mapProposalToGovernanceAction = (
     threshold,
     votingStatus,
     passing,
+    rawVotingPowerValues,
   };
 };
 
