@@ -17,6 +17,24 @@ export interface VotingThreshold {
     spoPassing: boolean | null; // null if SPO doesn't participate
   }
   
+  /**
+   * Reference entry from governance metadata (CIP-108)
+   * Passed through to the frontend so it can render links, labels, etc.
+   */
+  export interface GovernanceActionReference {
+    uri?: string;
+    label?: string;
+    "@type"?: string;
+    // Optional nested reference hash information (if present)
+    referenceHash?: {
+      hashDigest?: string;
+      hashAlgorithm?: string;
+      [key: string]: any;
+    };
+    // Allow additional metadata fields without forcing a strict schema
+    [key: string]: any;
+  }
+  
   export interface GovernanceAction {
     proposalId: string;
     hash: string; // txHash:certIndex format
@@ -57,6 +75,7 @@ export interface VotingThreshold {
   }
   
   export interface VoteRecord {
+    txHash: string;
     voterType: "DRep" | "SPO" | "CC";
     voterId: string;
     voterName?: string;
@@ -73,6 +92,7 @@ export interface VotingThreshold {
     rationale?: string;
     votes?: VoteRecord[];
     ccVotes?: VoteRecord[];
+    references?: GovernanceActionReference[];
   }
   
   export type GovernanceActionType =

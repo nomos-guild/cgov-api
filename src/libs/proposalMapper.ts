@@ -446,6 +446,7 @@ const resolveVoterName = (vote: VoteWithRelations): string | undefined => {
 
 const mapVoteRecord = (vote: VoteWithRelations): VoteRecord => {
   const record: VoteRecord = {
+    txHash: vote.tx_hash,
     voterType: formatVoterType(vote.voter_type),
     voterId: resolveVoterId(vote),
     vote: formatVoteChoice(vote.vote),
@@ -773,6 +774,26 @@ export const mapProposalToGovernanceAction = (
 export const mapProposalToGovernanceActionDetail = (
   proposal: ProposalWithVotes
 ): GovernanceActionDetail => {
+  // Extract references from CIP-108 metadata (if present)
+  let references: GovernanceActionDetail["references"];
+
+  if (proposal.metadata) {
+    try {
+      const parsed = JSON.parse(proposal.metadata as unknown as string) as {
+        body?: { references?: unknown };
+        [key: string]: unknown;
+      };
+
+      const maybeRefs = parsed?.body?.references;
+      if (Array.isArray(maybeRefs)) {
+        // Pass through as-is; shape is described by GovernanceActionReference
+        references = maybeRefs as GovernanceActionDetail["references"];
+      }
+    } catch {
+      // If metadata is not valid JSON, ignore and leave references undefined
+    }
+  }
+
   const base = mapProposalToGovernanceAction(proposal);
   const votes = proposal.onchain_votes ?? [];
   const standardVotes = votes.filter((vote) => vote.voter_type !== voter_type.CC);
@@ -787,5 +808,6 @@ export const mapProposalToGovernanceActionDetail = (
     rationale: proposal.rationale ?? undefined,
     votes: mappedVotes.length ? mappedVotes : undefined,
     ccVotes: mappedCcVotes.length ? mappedCcVotes : undefined,
+    references,
   };
 };
