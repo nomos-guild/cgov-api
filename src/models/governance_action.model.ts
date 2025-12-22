@@ -35,6 +35,22 @@ export interface VotingThreshold {
     [key: string]: any;
   }
   
+  export interface RawVotingPowerValues {
+    drep_total_vote_power: string | null;
+    drep_active_yes_vote_power: string | null;
+    drep_active_no_vote_power: string | null;
+    drep_active_abstain_vote_power: string | null;
+    drep_always_abstain_vote_power: string | null;
+    drep_always_no_confidence_power: string | null;
+    drep_inactive_vote_power: string | null;
+    spo_total_vote_power: string | null;
+    spo_active_yes_vote_power: string | null;
+    spo_active_no_vote_power: string | null;
+    spo_active_abstain_vote_power: string | null;
+    spo_always_abstain_vote_power: string | null;
+    spo_always_no_confidence_power: string | null;
+  }
+
   export interface GovernanceAction {
     proposalId: string;
     hash: string; // txHash:certIndex format
@@ -54,6 +70,8 @@ export interface VotingThreshold {
     threshold: VotingThreshold;
     votingStatus: VotingStatus;
     passing: boolean; // Overall: true if all required voter types meet their thresholds
+    // Raw voting power values from the proposal record
+    rawVotingPowerValues: RawVotingPowerValues;
   }
   
   export interface GovernanceActionVoteInfo {
