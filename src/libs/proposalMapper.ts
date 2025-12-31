@@ -354,16 +354,23 @@ const buildVoteInfo = (tally: AdaTally): GovernanceActionVoteInfo => ({
 
 /**
  * Total number of Constitutional Committee members
- * Non-voting CC members are treated as "No" votes for ratification purposes
+ * For ratification purposes, non-voting CC members effectively reduce the denominator
+ * for Yes % calculation (since denominator = TotalMembers - AbstainCount),
+ * which means they have the same effect as "No" votes on the ratification threshold.
  */
 const TOTAL_CC_MEMBERS = 7;
 
 /**
  * Build CC vote info with the formula:
- * - Non-voting CC members are treated as "No" votes
- * - Explicit Abstain is NOT counted as No, but excluded from the denominator
+ * - Explicit Abstain votes are excluded from the denominator for Yes/No percentages
  * - Yes % = YesCount / (TotalMembers - AbstainCount) × 100
- * - No % = (NoCount + NotVoted) / (TotalMembers - AbstainCount) × 100
+ * - No % = NoCount / (TotalMembers - AbstainCount) × 100
+ * - Abstain % = AbstainCount / TotalMembers × 100
+ * - NotVoted % = NotVotedCount / TotalMembers × 100
+ *
+ * Note: For ratification purposes, non-voting CC members are effectively treated as "No" votes
+ * (since they reduce the denominator for Yes % calculation), but the No % displayed here
+ * only reflects explicit "No" votes.
  *
  * @param tally - The count of actual votes cast (yes, no, abstain)
  */
@@ -373,25 +380,26 @@ const buildCcVoteInfo = (tally: CountTally): CCGovernanceActionVoteInfo => {
   // Calculate not voted members (those who haven't voted at all)
   const notVoted = Math.max(0, TOTAL_CC_MEMBERS - yes - no - abstain);
 
-  // Effective "No" includes explicit No votes plus non-voters
-  const effectiveNo = no + notVoted;
-
   // Denominator excludes abstain votes (as per Cardano governance rules)
   const denominator = TOTAL_CC_MEMBERS - abstain;
 
   // Calculate percentages
   const yesPercent = denominator > 0 ? (yes / denominator) * 100 : 0;
-  const noPercent = denominator > 0 ? (effectiveNo / denominator) * 100 : 0;
+  const noPercent = denominator > 0 ? (no / denominator) * 100 : 0;
   const abstainPercent =
     TOTAL_CC_MEMBERS > 0 ? (abstain / TOTAL_CC_MEMBERS) * 100 : 0;
+  const notVotedPercent =
+    TOTAL_CC_MEMBERS > 0 ? (notVoted / TOTAL_CC_MEMBERS) * 100 : 0;
 
   return {
     yesPercent: Number(yesPercent.toFixed(2)),
     noPercent: Number(noPercent.toFixed(2)),
     abstainPercent: Number(abstainPercent.toFixed(2)),
+    notVotedPercent: Number(notVotedPercent.toFixed(2)),
     yesCount: yes,
-    noCount: effectiveNo, // Includes non-voters
+    noCount: no,
     abstainCount: abstain,
+    notVotedCount: notVoted,
   };
 };
 
@@ -430,6 +438,53 @@ const resolveVoterId = (vote: VoteWithRelations): string => {
   }
 
   return vote.cc?.cc_id ?? vote.cc_id ?? vote.id;
+};
+
+/**
+ * Gets the timestamp for a vote, preferring voted_at, then created_at, then updated_at
+ */
+const getVoteTimestamp = (vote: VoteWithRelations): Date => {
+  return (
+    vote.voted_at ??
+    vote.created_at ??
+    vote.updated_at ??
+    new Date(0)
+  );
+};
+
+/**
+ * Filters CC votes to only include the most recent vote per CC member.
+ * When a CC member changes their vote, only their latest vote is counted.
+ */
+const getLatestCcVotes = (ccVotes: VoteWithRelations[]): VoteWithRelations[] => {
+  // Group votes by CC member ID
+  const votesByMember = new Map<string, VoteWithRelations[]>();
+
+  for (const vote of ccVotes) {
+    const ccId = resolveVoterId(vote);
+    const existing = votesByMember.get(ccId) ?? [];
+    existing.push(vote);
+    votesByMember.set(ccId, existing);
+  }
+
+  // For each CC member, get their most recent vote
+  const latestVotes: VoteWithRelations[] = [];
+  for (const [, votes] of votesByMember.entries()) {
+    if (votes.length === 1) {
+      // Only one vote, use it
+      latestVotes.push(votes[0]);
+    } else {
+      // Multiple votes - find the most recent one
+      const mostRecent = votes.reduce((latest, current) => {
+        const latestTime = getVoteTimestamp(latest);
+        const currentTime = getVoteTimestamp(current);
+        return currentTime > latestTime ? current : latest;
+      });
+      latestVotes.push(mostRecent);
+    }
+  }
+
+  return latestVotes;
 };
 
 const resolveVoterName = (vote: VoteWithRelations): string | undefined => {
@@ -487,9 +542,9 @@ const mapVoteRecord = (vote: VoteWithRelations): VoteRecord => {
  * A proposal is considered "Constitutional" if it receives ≥67% "Yes" votes from CC members
  *
  * Formula (same as buildCcVoteInfo):
- * - Non-voting CC members are treated as "No" votes
  * - Explicit Abstain is excluded from the denominator
  * - Yes % = YesCount / (TotalMembers - AbstainCount) × 100
+ * - Non-voting CC members effectively reduce the denominator (same effect as "No" votes)
  *
  * @param ccCountTally - The CC vote count tally
  * @returns "Constitutional", "Unconstitutional", or "Pending" if no CC votes yet
@@ -520,7 +575,11 @@ const determineConstitutionality = (ccCountTally: CountTally): string => {
 const aggregateVotes = (votes: VoteWithRelations[]) => {
   const drepVotes = votes.filter((vote) => vote.voter_type === voter_type.DREP);
   const spoVotes = votes.filter((vote) => vote.voter_type === voter_type.SPO);
-  const ccVotes = votes.filter((vote) => vote.voter_type === voter_type.CC);
+  const allCcVotes = votes.filter((vote) => vote.voter_type === voter_type.CC);
+
+  // Filter CC votes to only include the most recent vote per CC member
+  // This handles cases where CC members change their vote
+  const ccVotes = getLatestCcVotes(allCcVotes);
 
   // Tally voting power in lovelace
   const drepLovelaceTally = tallyLovelaceVotes(drepVotes);
@@ -826,7 +885,11 @@ export const mapProposalToGovernanceActionDetail = (
   const base = mapProposalToGovernanceAction(proposal);
   const votes = proposal.onchain_votes ?? [];
   const standardVotes = votes.filter((vote) => vote.voter_type !== voter_type.CC);
-  const ccVotes = votes.filter((vote) => vote.voter_type === voter_type.CC);
+  const allCcVotes = votes.filter((vote) => vote.voter_type === voter_type.CC);
+  
+  // Filter CC votes to only include the most recent vote per CC member
+  // This ensures the detail view also shows only final votes
+  const ccVotes = getLatestCcVotes(allCcVotes);
 
   const mappedVotes = standardVotes.map(mapVoteRecord);
   const mappedCcVotes = ccVotes.map(mapVoteRecord);
