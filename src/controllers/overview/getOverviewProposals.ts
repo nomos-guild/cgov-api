@@ -7,6 +7,7 @@ import {
   proposalWithVotesSelect,
 } from "../../libs/proposalMapper";
 import { syncProposalsOverviewOnRead } from "../../services/syncOnRead";
+import { getCachedEligibleCCInfo } from "../../services/ingestion/voter.service";
 
 export const getOverviewProposals = async (_req: Request, res: Response) => {
   try {
@@ -15,17 +16,22 @@ export const getOverviewProposals = async (_req: Request, res: Response) => {
     // New proposals will be available on the next request after sync completes.
     syncProposalsOverviewOnRead();
 
+    // Fetch eligible CC members count (for CC vote calculations)
+    // Uses cached data from database, falls back to Koios API if cache is empty
+    const ccInfo = await getCachedEligibleCCInfo(prisma);
+    const eligibleCCMembers = ccInfo.eligibleMembers;
+
     const proposals = await prisma.proposal.findMany({
       select: proposalWithVotesSelect,
       orderBy: [
-        { submission_epoch: "desc" },
-        { created_at: "desc" },
+        { submissionEpoch: "desc" },
+        { createdAt: "desc" },
       ],
     });
 
     const response: GetProposalListReponse = proposals.map(
       (proposal) =>
-        mapProposalToGovernanceAction(proposal as ProposalWithVotes)
+        mapProposalToGovernanceAction(proposal as ProposalWithVotes, eligibleCCMembers)
     );
 
     res.json(response);

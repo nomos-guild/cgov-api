@@ -15,6 +15,7 @@ import type {
   KoiosCommitteeInfo,
   KoiosTip,
 } from "../../types/koios.types";
+import { processInParallel, getVoterSyncConcurrency } from "./parallel";
 
 /**
  * Some Koios metadata fields (e.g. from /drep_updates) can be returned either
@@ -158,13 +159,13 @@ async function ensureDrepExists(
   tx: Prisma.TransactionClient
 ): Promise<EnsureVoterResult> {
   const existing = await tx.drep.findUnique({
-    where: { drep_id: drepId },
+    where: { drepId: drepId },
   });
 
   // If voter exists, just return it without updating (optimization for initial sync)
   // Voting power updates can be done in a separate background job
   if (existing) {
-    return { voterId: existing.drep_id, created: false, updated: false };
+    return { voterId: existing.drepId, created: false, updated: false };
   }
 
   // Check cache first, then fetch if not cached
@@ -253,16 +254,16 @@ async function ensureDrepExists(
   // Create new DRep
   const newDrep = await tx.drep.create({
     data: {
-      drep_id: drepId,
-      voting_power: votingPower,
+      drepId: drepId,
+      votingPower: votingPower,
       ...(name && { name }), // Only include if exists
-      ...(paymentAddress && { payment_addr: paymentAddress }), // Only include if exists
-      ...(iconUrl && { icon_url: iconUrl }), // Only include if exists
-      ...(typeof doNotList === "boolean" && { do_not_list: doNotList }), // Only include if resolved
+      ...(paymentAddress && { paymentAddr: paymentAddress }), // Only include if exists
+      ...(iconUrl && { iconUrl: iconUrl }), // Only include if exists
+      ...(typeof doNotList === "boolean" && { doNotList: doNotList }), // Only include if resolved
     },
   });
 
-  return { voterId: newDrep.drep_id, created: true, updated: false };
+  return { voterId: newDrep.drepId, created: true, updated: false };
 }
 
 /**
@@ -272,14 +273,14 @@ async function ensureSpoExists(
   poolId: string,
   tx: Prisma.TransactionClient
 ): Promise<EnsureVoterResult> {
-  const existing = await tx.spo.findUnique({
-    where: { pool_id: poolId },
+  const existing = await tx.sPO.findUnique({
+    where: { poolId: poolId },
   });
 
   // If voter exists, just return it without updating (optimization for initial sync)
   // Voting power updates can be done in a separate background job
   if (existing) {
-    return { voterId: existing.pool_id, created: false, updated: false };
+    return { voterId: existing.poolId, created: false, updated: false };
   }
 
   // Check cache first, then fetch if not cached
@@ -315,17 +316,17 @@ async function ensureSpoExists(
   const { poolName, ticker, iconUrl } = await getPoolMeta(koiosSpo);
 
   // Create new SPO
-  const newSpo = await tx.spo.create({
+  const newSpo = await tx.sPO.create({
     data: {
-      pool_id: poolId,
-      pool_name: poolName,
+      poolId: poolId,
+      poolName: poolName,
       ticker,
-      voting_power: votingPower,
-      ...(iconUrl && { icon_url: iconUrl }), // Only include if exists
+      votingPower: votingPower,
+      ...(iconUrl && { iconUrl: iconUrl }), // Only include if exists
     },
   });
 
-  return { voterId: newSpo.pool_id, created: true, updated: false };
+  return { voterId: newSpo.poolId, created: true, updated: false };
 }
 
 /**
@@ -635,13 +636,13 @@ async function ensureCcExists(
   ccId: string,
   tx: Prisma.TransactionClient
 ): Promise<EnsureVoterResult> {
-  const existing = await tx.cc.findUnique({
-    where: { cc_id: ccId },
+  const existing = await tx.cC.findUnique({
+    where: { ccId: ccId },
   });
 
   // If voter exists, just return it without updating (optimization for initial sync)
   if (existing) {
-    return { voterId: existing.cc_id, created: false, updated: false };
+    return { voterId: existing.ccId, created: false, updated: false };
   }
 
   // Fetch committee info from Koios
@@ -665,17 +666,17 @@ async function ensureCcExists(
   // The vote metadata contains the author name which we'll use to update the CC member
 
   // Create new CC member
-  const newCc = await tx.cc.create({
+  const newCc = await tx.cC.create({
     data: {
-      cc_id: ccId,
-      hot_credential: ccMember?.cc_hot_id || ccId,
-      cold_credential: ccMember?.cc_cold_id,
+      ccId: ccId,
+      hotCredential: ccMember?.cc_hot_id || ccId,
+      coldCredential: ccMember?.cc_cold_id,
       status,
-      member_name: null, // Will be updated when processing votes
+      memberName: null, // Will be updated when processing votes
     },
   });
 
-  return { voterId: newCc.cc_id, created: true, updated: false };
+  return { voterId: newCc.ccId, created: true, updated: false };
 }
 
 /**
@@ -753,18 +754,15 @@ export async function syncAllVoterVotingPower(
 /**
  * Syncs voting power for all DReps in the database
  * Only fetches voting power for DReps that exist in the database
+ * Uses parallel processing for improved performance
  */
 async function syncDrepVotingPower(
   prisma: Prisma.TransactionClient,
   epoch: number
 ): Promise<{ total: number; updated: number; failed: number; errors: string[] }> {
-  const errors: string[] = [];
-  let updated = 0;
-  let failed = 0;
-
   // Get all DReps from database
   const dreps = await prisma.drep.findMany({
-    select: { drep_id: true },
+    select: { drepId: true },
   });
 
   if (dreps.length === 0) {
@@ -772,19 +770,21 @@ async function syncDrepVotingPower(
     return { total: 0, updated: 0, failed: 0, errors: [] };
   }
 
+  const concurrency = getVoterSyncConcurrency();
   console.log(
-    `[Voter Service] Syncing voting power for ${dreps.length} DReps...`
+    `[Voter Service] Syncing voting power for ${dreps.length} DReps (concurrency: ${concurrency})...`
   );
 
-  // Fetch voting power for each DRep individually
-  // This is more efficient when we have fewer DReps in DB than on-chain
-  for (const drep of dreps) {
-    try {
+  // Process DReps in parallel with controlled concurrency
+  const result = await processInParallel(
+    dreps,
+    (drep) => drep.drepId,
+    async (drep) => {
       const votingPowerHistory = await koiosGet<KoiosDrepVotingPower[]>(
         "/drep_voting_power_history",
         {
           _epoch_no: epoch,
-          _drep_id: drep.drep_id,
+          _drep_id: drep.drepId,
         }
       );
 
@@ -793,17 +793,20 @@ async function syncDrepVotingPower(
       if (votingPowerLovelace) {
         const newVotingPower = BigInt(votingPowerLovelace);
         await prisma.drep.update({
-          where: { drep_id: drep.drep_id },
-          data: { voting_power: newVotingPower },
+          where: { drepId: drep.drepId },
+          data: { votingPower: newVotingPower },
         });
-        updated++;
+        return drep.drepId; // Return ID to count as updated
       }
       // If no voting power found, the DRep might be inactive - skip update
-    } catch (error: any) {
-      failed++;
-      errors.push(`DRep ${drep.drep_id}: ${error.message}`);
-    }
-  }
+      return null;
+    },
+    concurrency
+  );
+
+  const updated = result.successful.length;
+  const failed = result.failed.length;
+  const errors = result.failed.map((f) => `DRep ${f.id}: ${f.error}`);
 
   console.log(
     `[Voter Service] DRep sync complete: ${updated} updated, ${failed} failed`
@@ -815,18 +818,15 @@ async function syncDrepVotingPower(
 /**
  * Syncs voting power for all SPOs in the database
  * Only fetches voting power for SPOs that exist in the database
+ * Uses parallel processing for improved performance
  */
 async function syncSpoVotingPower(
   prisma: Prisma.TransactionClient,
   epoch: number
 ): Promise<{ total: number; updated: number; failed: number; errors: string[] }> {
-  const errors: string[] = [];
-  let updated = 0;
-  let failed = 0;
-
   // Get all SPOs from database
-  const spos = await prisma.spo.findMany({
-    select: { pool_id: true },
+  const spos = await prisma.sPO.findMany({
+    select: { poolId: true },
   });
 
   if (spos.length === 0) {
@@ -834,19 +834,21 @@ async function syncSpoVotingPower(
     return { total: 0, updated: 0, failed: 0, errors: [] };
   }
 
+  const concurrency = getVoterSyncConcurrency();
   console.log(
-    `[Voter Service] Syncing voting power for ${spos.length} SPOs...`
+    `[Voter Service] Syncing voting power for ${spos.length} SPOs (concurrency: ${concurrency})...`
   );
 
-  // Fetch voting power for each SPO individually
-  // This is more efficient when we have fewer SPOs in DB than on-chain
-  for (const spo of spos) {
-    try {
+  // Process SPOs in parallel with controlled concurrency
+  const result = await processInParallel(
+    spos,
+    (spo) => spo.poolId,
+    async (spo) => {
       const votingPowerHistory = await koiosGet<KoiosSpoVotingPower[]>(
         "/pool_voting_power_history",
         {
           _epoch_no: epoch,
-          _pool_bech32: spo.pool_id,
+          _pool_bech32: spo.poolId,
         }
       );
 
@@ -854,22 +856,170 @@ async function syncSpoVotingPower(
 
       if (votingPowerLovelace) {
         const newVotingPower = BigInt(votingPowerLovelace);
-        await prisma.spo.update({
-          where: { pool_id: spo.pool_id },
-          data: { voting_power: newVotingPower },
+        await prisma.sPO.update({
+          where: { poolId: spo.poolId },
+          data: { votingPower: newVotingPower },
         });
-        updated++;
+        return spo.poolId; // Return ID to count as updated
       }
       // If no voting power found, the SPO might be inactive - skip update
-    } catch (error: any) {
-      failed++;
-      errors.push(`SPO ${spo.pool_id}: ${error.message}`);
-    }
-  }
+      return null;
+    },
+    concurrency
+  );
+
+  const updated = result.successful.length;
+  const failed = result.failed.length;
+  const errors = result.failed.map((f) => `SPO ${f.id}: ${f.error}`);
 
   console.log(
     `[Voter Service] SPO sync complete: ${updated} updated, ${failed} failed`
   );
 
   return { total: spos.length, updated, failed, errors };
+}
+
+/**
+ * Result of fetching eligible CC member info
+ */
+export interface EligibleCCInfo {
+  totalMembers: number; // Total members in committee (including resigned/expired)
+  eligibleMembers: number; // Members who are authorized and not expired
+  quorumNumerator: number; // Voting threshold numerator (e.g., 2)
+  quorumDenominator: number; // Voting threshold denominator (e.g., 3)
+  isCommitteeValid: boolean; // Whether committee has enough eligible members (>= 7)
+}
+
+/**
+ * Minimum number of eligible CC members required for a valid committee
+ * Based on Cardano governance rules
+ */
+const MIN_ELIGIBLE_CC_MEMBERS = 7;
+
+/**
+ * Fetches committee info from Koios and calculates eligible member count
+ *
+ * A CC member is eligible if:
+ * - status === "authorized" (not resigned)
+ * - expiration_epoch > currentEpoch (not expired)
+ *
+ * @returns EligibleCCInfo with member counts and committee validity
+ */
+export async function getEligibleCCInfo(): Promise<EligibleCCInfo> {
+  // Fetch committee info from Koios
+  const committeeInfo = await koiosGet<KoiosCommitteeInfo[]>("/committee_info");
+
+  if (!committeeInfo || committeeInfo.length === 0 || !committeeInfo[0].members) {
+    return {
+      totalMembers: 0,
+      eligibleMembers: 0,
+      quorumNumerator: 2,
+      quorumDenominator: 3,
+      isCommitteeValid: false,
+    };
+  }
+
+  const info = committeeInfo[0];
+  const members = info.members;
+
+  // Get current epoch to check expiration
+  const tip = await koiosGet<KoiosTip[]>("/tip");
+  const currentEpoch = tip?.[0]?.epoch_no ?? 0;
+
+  // Calculate eligible members (authorized AND not expired)
+  const eligibleMembers = members.filter(
+    (member) =>
+      member.status === "authorized" && member.expiration_epoch > currentEpoch
+  );
+
+  const eligibleCount = eligibleMembers.length;
+
+  return {
+    totalMembers: members.length,
+    eligibleMembers: eligibleCount,
+    quorumNumerator: info.quorum_numerator,
+    quorumDenominator: info.quorum_denominator,
+    isCommitteeValid: eligibleCount >= MIN_ELIGIBLE_CC_MEMBERS,
+  };
+}
+
+/**
+ * Result of syncing committee state
+ */
+export interface SyncCommitteeStateResult {
+  epoch: number;
+  totalMembers: number;
+  eligibleMembers: number;
+  isCommitteeValid: boolean;
+  updated: boolean;
+}
+
+/**
+ * Syncs committee state from Koios to database cache
+ * Called by voter power sync job to keep cache fresh
+ */
+export async function syncCommitteeState(
+  prisma: Prisma.TransactionClient
+): Promise<SyncCommitteeStateResult> {
+  // Fetch fresh data from Koios
+  const ccInfo = await getEligibleCCInfo();
+
+  // Get current epoch
+  const tip = await koiosGet<KoiosTip[]>("/tip");
+  const currentEpoch = tip?.[0]?.epoch_no ?? 0;
+
+  // Upsert to cache table
+  await prisma.committeeState.upsert({
+    where: { id: "current" },
+    update: {
+      epoch: currentEpoch,
+      totalMembers: ccInfo.totalMembers,
+      eligibleMembers: ccInfo.eligibleMembers,
+      quorumNumerator: ccInfo.quorumNumerator,
+      quorumDenominator: ccInfo.quorumDenominator,
+      isCommitteeValid: ccInfo.isCommitteeValid,
+    },
+    create: {
+      id: "current",
+      epoch: currentEpoch,
+      totalMembers: ccInfo.totalMembers,
+      eligibleMembers: ccInfo.eligibleMembers,
+      quorumNumerator: ccInfo.quorumNumerator,
+      quorumDenominator: ccInfo.quorumDenominator,
+      isCommitteeValid: ccInfo.isCommitteeValid,
+    },
+  });
+
+  return {
+    epoch: currentEpoch,
+    totalMembers: ccInfo.totalMembers,
+    eligibleMembers: ccInfo.eligibleMembers,
+    isCommitteeValid: ccInfo.isCommitteeValid,
+    updated: true,
+  };
+}
+
+/**
+ * Gets cached eligible CC info from database
+ * Falls back to Koios API if cache is empty
+ */
+export async function getCachedEligibleCCInfo(
+  prisma: Prisma.TransactionClient
+): Promise<EligibleCCInfo> {
+  const cached = await prisma.committeeState.findUnique({
+    where: { id: "current" },
+  });
+
+  if (cached) {
+    return {
+      totalMembers: cached.totalMembers,
+      eligibleMembers: cached.eligibleMembers,
+      quorumNumerator: cached.quorumNumerator,
+      quorumDenominator: cached.quorumDenominator,
+      isCommitteeValid: cached.isCommitteeValid,
+    };
+  }
+
+  // Fallback to live API call if cache is empty
+  return getEligibleCCInfo();
 }

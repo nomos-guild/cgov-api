@@ -115,15 +115,30 @@ export interface KoiosSpoVotingPower {
 }
 
 /**
+ * Constitutional Committee Member from Koios API
+ */
+export interface KoiosCommitteeMember {
+  status: "authorized" | "resigned"; // Member state
+  cc_hot_id: string | null; // Hot credential (null if resigned)
+  cc_cold_id: string; // Cold credential
+  cc_hot_hex: string | null; // Hot credential hex
+  cc_cold_hex: string; // Cold credential hex
+  expiration_epoch: number; // When member authorization expires
+  cc_hot_has_script: boolean | null; // Whether hot credential has script
+  cc_cold_has_script: boolean; // Whether cold credential has script
+}
+
+/**
  * Constitutional Committee Info from Koios API
  * Endpoint: GET /committee_info
  */
 export interface KoiosCommitteeInfo {
-  members: Array<{
-    cc_hot_id: string; // Maps to CC.ccId and CC.hotCredential
-    cc_cold_id: string; // Maps to CC.coldCredential
-    expiration_epoch: number; // Used to derive CC.status
-  }>;
+  proposal_id: string; // Governance action that established this committee
+  proposal_tx_hash: string; // Transaction hash of the proposal
+  proposal_index: number; // Index of the proposal
+  quorum_numerator: number; // Voting threshold numerator (e.g., 2)
+  quorum_denominator: number; // Voting threshold denominator (e.g., 3 for 2/3)
+  members: KoiosCommitteeMember[];
 }
 
 /**

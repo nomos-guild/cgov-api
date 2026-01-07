@@ -7,159 +7,206 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-model cc {
-  cc_id           String         @id
-  user_id         String?        @unique
-  member_name     String?
-  hot_credential  String?
-  cold_credential String?
-  status          String?
-  created_at      DateTime?      @default(now())
-  updated_at      DateTime?
-  user            user?          @relation(fields: [user_id], references: [id])
-  onchain_votes   onchain_vote[]
+model CC {
+  ccId           String        @id @map("cc_id")
+  userId         String?       @unique @map("user_id")
+  memberName     String?       @map("member_name")
+  hotCredential  String?       @map("hot_credential")
+  coldCredential String?       @map("cold_credential")
+  status         String?
+  createdAt      DateTime?     @default(now()) @map("created_at")
+  updatedAt      DateTime?     @map("updated_at")
+  user           User?         @relation(fields: [userId], references: [id])
+  onchainVotes   OnchainVote[]
+
+  @@map("cc")
 }
 
-model crowdfunding_campaign {
-  id                Int            @id @default(autoincrement())
-  proposal_draft_id Int            @unique
-  created_at        DateTime?      @default(now())
-  updated_at        DateTime?
-  proposal_draft    proposal_draft @relation(fields: [proposal_draft_id], references: [id])
+model CrowdfundingCampaign {
+  id              Int           @id @default(autoincrement())
+  proposalDraftId Int           @unique @map("proposal_draft_id")
+  createdAt       DateTime?     @default(now()) @map("created_at")
+  updatedAt       DateTime?     @map("updated_at")
+  proposalDraft   ProposalDraft @relation(fields: [proposalDraftId], references: [id])
+
+  @@map("crowdfunding_campaign")
 }
 
-model drep {
-  drep_id       String         @id
-  user_id       String?        @unique
-  name          String?
-  payment_addr  String?
-  icon_url      String?
-  do_not_list   Boolean?
-  voting_power  BigInt
-  created_at    DateTime?      @default(now())
-  updated_at    DateTime?
-  user          user?          @relation(fields: [user_id], references: [id])
-  onchain_votes onchain_vote[]
+model Drep {
+  drepId       String        @id @map("drep_id")
+  userId       String?       @unique @map("user_id")
+  name         String?
+  paymentAddr  String?       @map("payment_addr")
+  iconUrl      String?       @map("icon_url")
+  doNotList    Boolean?      @map("do_not_list")
+  votingPower  BigInt        @map("voting_power")
+  createdAt    DateTime?     @default(now()) @map("created_at")
+  updatedAt    DateTime?     @map("updated_at")
+  user         User?         @relation(fields: [userId], references: [id])
+  onchainVotes OnchainVote[]
+
+  @@map("drep")
 }
 
-model last_ingested_time {
-  id String @id
+// Sync Status - Tracks sync job execution and provides distributed locking
+// Critical for GCP Cloud Run/Cloud Scheduler deployments to prevent concurrent job execution
+model SyncStatus {
+  jobName        String    @id @map("job_name") // "proposal-sync", "voter-power-sync"
+  displayName    String?   @map("display_name") // "Proposal Sync", "Voter Power Sync"
+  isRunning      Boolean   @default(false) @map("is_running")
+  startedAt      DateTime? @map("started_at")
+  completedAt    DateTime? @map("completed_at")
+  lastResult     String?   @map("last_result") // "success", "failed", "skipped"
+  errorMessage   String?   @map("error_message") // Store error message if failed
+  itemsProcessed Int?      @map("items_processed") // How many items were synced
+  lockedBy       String?   @map("locked_by") // Container/instance ID
+  expiresAt      DateTime? @map("expires_at") // Auto-unlock if crashed
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @updatedAt @map("updated_at")
+
+  @@map("sync_status")
 }
 
-model ncl {
-  id         String   @id
-  year       Int      @unique
-  epoch      Int
-  current    BigInt   @default(0)
-  limit      BigInt
-  created_at DateTime @default(now())
-  updated_at DateTime
+// Net Change Limit (NCL) tracking for treasury withdrawals
+model NCL {
+  id        String   @id
+  year      Int      @unique
+  epoch     Int
+  current   BigInt   @default(0)
+  limit     BigInt
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @map("updated_at")
+
+  @@map("ncl")
 }
 
-model onchain_vote {
-  id           String     @id
-  tx_hash      String
-  proposal_id  String
-  vote         vote_type?
-  voter_type   voter_type
-  voting_power BigInt?
-  anchor_url   String?
-  anchor_hash  String?
-  rationale    String?
-  voted_at     DateTime?  @default(now())
-  created_at   DateTime?  @default(now())
-  updated_at   DateTime?
-  drep_id      String?
-  spo_id       String?
-  cc_id        String?
+// Committee State - Caches eligible CC member count from Koios
+model CommitteeState {
+  id                String   @id @default("current")
+  epoch             Int      // Epoch when last synced
+  totalMembers      Int      @map("total_members")
+  eligibleMembers   Int      @map("eligible_members")
+  quorumNumerator   Int      @map("quorum_numerator")
+  quorumDenominator Int      @map("quorum_denominator")
+  isCommitteeValid  Boolean  @map("is_committee_valid")
+  createdAt         DateTime @default(now()) @map("created_at")
+  updatedAt         DateTime @updatedAt @map("updated_at")
 
-  cc       cc?      @relation(fields: [cc_id], references: [cc_id])
-  drep     drep?    @relation(fields: [drep_id], references: [drep_id])
-  proposal proposal @relation(fields: [proposal_id], references: [proposal_id])
-  spo      spo?     @relation(fields: [spo_id], references: [pool_id])
-
-  @@unique([tx_hash, proposal_id, voter_type, drep_id, spo_id, cc_id])
+  @@map("committee_state")
 }
 
-model proposal {
-  id                              Int              @id @default(autoincrement())
-  proposal_id                     String           @unique
-  tx_hash                         String
-  cert_index                      String
-  title                           String
-  description                     String?
-  rationale                       String?
-  governance_action_type          governance_type?
-  status                          proposal_status  @default(ACTIVE)
-  submission_epoch                Int?
-  ratified_epoch                  Int?
-  enacted_epoch                   Int?
-  dropped_epoch                   Int?
-  expired_epoch                   Int?
-  expiration_epoch                Int?
-  drep_total_vote_power           BigInt?
-  drep_active_yes_vote_power      BigInt?
-  drep_active_no_vote_power       BigInt?
-  drep_active_abstain_vote_power  BigInt?
-  drep_always_abstain_vote_power  BigInt?
-  drep_always_no_confidence_power BigInt?
-  drep_inactive_vote_power        BigInt?
-  spo_total_vote_power            BigInt?
-  spo_active_yes_vote_power       BigInt?
-  spo_active_no_vote_power        BigInt?
-  spo_active_abstain_vote_power   BigInt?
-  spo_always_abstain_vote_power   BigInt?
-  spo_always_no_confidence_power  BigInt?
-  metadata                        String?
-  created_at                      DateTime?        @default(now())
-  updated_at                      DateTime?
-  onchain_votes                   onchain_vote[]
+model OnchainVote {
+  id          String    @id
+  txHash      String    @map("tx_hash")
+  proposalId  String    @map("proposal_id")
+  vote        VoteType?
+  voterType   VoterType @map("voter_type")
+  votingPower BigInt?   @map("voting_power")
+  anchorUrl   String?   @map("anchor_url")
+  anchorHash  String?   @map("anchor_hash")
+  rationale   String?
+  votedAt     DateTime? @default(now()) @map("voted_at")
+  createdAt   DateTime? @default(now()) @map("created_at")
+  updatedAt   DateTime? @map("updated_at")
+  drepId      String?   @map("drep_id")
+  spoId       String?   @map("spo_id")
+  ccId        String?   @map("cc_id")
 
-  @@unique([tx_hash, cert_index])
+  cc       CC?      @relation(fields: [ccId], references: [ccId])
+  drep     Drep?    @relation(fields: [drepId], references: [drepId])
+  proposal Proposal @relation(fields: [proposalId], references: [proposalId])
+  spo      SPO?     @relation(fields: [spoId], references: [poolId])
+
+  @@unique([txHash, proposalId, voterType, drepId, spoId, ccId])
+  @@map("onchain_vote")
 }
 
-model proposal_draft {
-  id                     Int                    @id @default(autoincrement())
-  governance_action_type governance_type
-  title                  String
-  abstract               String?
-  motivation             String?
-  rationale              String?
-  comment                String?
-  references             String?
-  external_updates       String?
-  metadata               String?
-  created_at             DateTime?              @default(now())
-  updated_at             DateTime?
-  crowdfunding_campaign  crowdfunding_campaign?
+model Proposal {
+  id                          Int              @id @default(autoincrement())
+  proposalId                  String           @unique @map("proposal_id")
+  txHash                      String           @map("tx_hash")
+  certIndex                   String           @map("cert_index")
+  title                       String
+  description                 String?
+  rationale                   String?
+  governanceActionType        GovernanceType?  @map("governance_action_type")
+  status                      ProposalStatus   @default(ACTIVE)
+  submissionEpoch             Int?             @map("submission_epoch")
+  ratifiedEpoch               Int?             @map("ratified_epoch")
+  enactedEpoch                Int?             @map("enacted_epoch")
+  droppedEpoch                Int?             @map("dropped_epoch")
+  expiredEpoch                Int?             @map("expired_epoch")
+  expirationEpoch             Int?             @map("expiration_epoch")
+  drepTotalVotePower          BigInt?          @map("drep_total_vote_power")
+  drepActiveYesVotePower      BigInt?          @map("drep_active_yes_vote_power")
+  drepActiveNoVotePower       BigInt?          @map("drep_active_no_vote_power")
+  drepActiveAbstainVotePower  BigInt?          @map("drep_active_abstain_vote_power")
+  drepAlwaysAbstainVotePower  BigInt?          @map("drep_always_abstain_vote_power")
+  drepAlwaysNoConfidencePower BigInt?          @map("drep_always_no_confidence_power")
+  drepInactiveVotePower       BigInt?          @map("drep_inactive_vote_power")
+  spoTotalVotePower           BigInt?          @map("spo_total_vote_power")
+  spoActiveYesVotePower       BigInt?          @map("spo_active_yes_vote_power")
+  spoActiveNoVotePower        BigInt?          @map("spo_active_no_vote_power")
+  spoActiveAbstainVotePower   BigInt?          @map("spo_active_abstain_vote_power")
+  spoAlwaysAbstainVotePower   BigInt?          @map("spo_always_abstain_vote_power")
+  spoAlwaysNoConfidencePower  BigInt?          @map("spo_always_no_confidence_power")
+  metadata                    String?
+  createdAt                   DateTime?        @default(now()) @map("created_at")
+  updatedAt                   DateTime?        @map("updated_at")
+  onchainVotes                OnchainVote[]
+
+  @@unique([txHash, certIndex])
+  @@map("proposal")
 }
 
-model spo {
-  pool_id       String         @id
-  user_id       String?        @unique
-  pool_name     String?
-  ticker        String?
-  icon_url      String?
-  voting_power  BigInt
-  created_at    DateTime?      @default(now())
-  updated_at    DateTime?
-  onchain_votes onchain_vote[]
-  user          user?          @relation(fields: [user_id], references: [id])
+model ProposalDraft {
+  id                   Int                   @id @default(autoincrement())
+  governanceActionType GovernanceType        @map("governance_action_type")
+  title                String
+  abstract             String?
+  motivation           String?
+  rationale            String?
+  comment              String?
+  references           String?
+  externalUpdates      String?               @map("external_updates")
+  metadata             String?
+  createdAt            DateTime?             @default(now()) @map("created_at")
+  updatedAt            DateTime?             @map("updated_at")
+  crowdfundingCampaign CrowdfundingCampaign?
+
+  @@map("proposal_draft")
 }
 
-model user {
-  id                 String    @id
-  wallet_address     String?
-  stake_key_lovelace Float?
-  jwt                String?
-  created_at         DateTime? @default(now())
-  updated_at         DateTime?
-  cc                 cc?
-  drep               drep?
-  spo                spo?
+model SPO {
+  poolId       String        @id @map("pool_id")
+  userId       String?       @unique @map("user_id")
+  poolName     String?       @map("pool_name")
+  ticker       String?
+  iconUrl      String?       @map("icon_url")
+  votingPower  BigInt        @map("voting_power")
+  createdAt    DateTime?     @default(now()) @map("created_at")
+  updatedAt    DateTime?     @map("updated_at")
+  onchainVotes OnchainVote[]
+  user         User?         @relation(fields: [userId], references: [id])
+
+  @@map("spo")
 }
 
-enum governance_type {
+model User {
+  id               String    @id
+  walletAddress    String?   @map("wallet_address")
+  stakeKeyLovelace Float?    @map("stake_key_lovelace")
+  jwt              String?
+  createdAt        DateTime? @default(now()) @map("created_at")
+  updatedAt        DateTime? @map("updated_at")
+  cc               CC?
+  drep             Drep?
+  spo              SPO?
+
+  @@map("user")
+}
+
+enum GovernanceType {
   INFO_ACTION
   TREASURY_WITHDRAWALS
   NEW_CONSTITUTION
@@ -167,24 +214,32 @@ enum governance_type {
   PROTOCOL_PARAMETER_CHANGE
   NO_CONFIDENCE
   UPDATE_COMMITTEE
+
+  @@map("governance_type")
 }
 
-enum proposal_status {
+enum ProposalStatus {
   ACTIVE
   RATIFIED
   ENACTED
   EXPIRED
   CLOSED
+
+  @@map("proposal_status")
 }
 
-enum vote_type {
+enum VoteType {
   YES
   NO
   ABSTAIN
+
+  @@map("vote_type")
 }
 
-enum voter_type {
+enum VoterType {
   DREP
   SPO
   CC
+
+  @@map("voter_type")
 }

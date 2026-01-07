@@ -2,9 +2,7 @@
  * Script to check proposals in database
  */
 
-import { PrismaClient } from "@prisma/client";
-
-const prisma = new PrismaClient();
+import { prisma } from "./src/services";
 
 async function checkProposals() {
   console.log("Checking proposals in database...\n");

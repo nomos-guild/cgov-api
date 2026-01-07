@@ -18,6 +18,11 @@ dotenv.config();
 
 const app = express();
 
+// Trust proxy for GCP Cloud Run deployment
+// This ensures req.ip returns the real client IP from X-Forwarded-For header
+// instead of the internal proxy IP
+app.set("trust proxy", true);
+
 // Security: Helmet.js for HTTP security headers
 app.use(helmet());
 

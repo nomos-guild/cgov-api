@@ -5,10 +5,8 @@
  */
 
 import cron from "node-cron";
-import { PrismaClient } from "@prisma/client";
-import { syncAllVoterVotingPower } from "../services/ingestion/voter.service";
-
-const prisma = new PrismaClient();
+import { prisma } from "../services";
+import { syncAllVoterVotingPower, syncCommitteeState } from "../services/ingestion/voter.service";
 
 // Simple in-process guard to prevent overlapping runs in a single Node process
 let isVoterPowerSyncRunning = false;
@@ -84,6 +82,22 @@ function startVoterPowerSyncJobWithSchedule(schedule: string) {
         console.error(
           `[${timestamp}] SPO sync errors:`,
           results.spos.errors.slice(0, 10) // Limit to first 10 errors
+        );
+      }
+
+      // Sync committee state (eligible CC member count)
+      try {
+        const ccStateResult = await syncCommitteeState(prisma);
+        console.log(
+          `[${timestamp}] Committee state sync completed for epoch ${ccStateResult.epoch}:`,
+          `\n  - Total members: ${ccStateResult.totalMembers}`,
+          `\n  - Eligible members: ${ccStateResult.eligibleMembers}`,
+          `\n  - Committee valid: ${ccStateResult.isCommitteeValid}`
+        );
+      } catch (ccError: any) {
+        console.error(
+          `[${timestamp}] Committee state sync failed:`,
+          ccError.message
         );
       }
     } catch (error: any) {

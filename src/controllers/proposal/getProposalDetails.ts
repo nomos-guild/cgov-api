@@ -8,16 +8,17 @@ import {
 } from "../../libs/proposalMapper";
 import { GetProposalInfoResponse } from "../../responses";
 import { syncProposalDetailsOnRead } from "../../services/syncOnRead";
+import { getCachedEligibleCCInfo } from "../../services/ingestion/voter.service";
 
 const buildProposalLookup = (
   identifier: string
-): Prisma.proposalWhereInput | null => {
+): Prisma.ProposalWhereInput | null => {
   const trimmed = identifier.trim();
   if (!trimmed) {
     return null;
   }
 
-  const filters: Prisma.proposalWhereInput[] = [];
+  const filters: Prisma.ProposalWhereInput[] = [];
   const numericId = Number(trimmed);
 
   // Check for numeric id
@@ -27,20 +28,20 @@ const buildProposalLookup = (
 
   // Check for proposalId (starts with "gov_action")
   if (trimmed.startsWith("gov_action")) {
-    filters.push({ proposal_id: trimmed });
+    filters.push({ proposalId: trimmed });
   }
 
   // Check for txHash:certIndex format or plain txHash
   if (trimmed.includes(":") && !trimmed.startsWith("gov_action")) {
     const [hashCandidate, certCandidate] = trimmed.split(":");
     if (hashCandidate && certCandidate) {
-      filters.push({ tx_hash: hashCandidate, cert_index: certCandidate });
+      filters.push({ txHash: hashCandidate, certIndex: certCandidate });
     } else if (hashCandidate) {
-      filters.push({ tx_hash: hashCandidate });
+      filters.push({ txHash: hashCandidate });
     }
   } else if (!trimmed.startsWith("gov_action")) {
     // Plain txHash (64 char hex string)
-    filters.push({ tx_hash: trimmed });
+    filters.push({ txHash: trimmed });
   }
 
   if (!filters.length) {
@@ -87,8 +88,13 @@ export const getProposalDetails = async (req: Request, res: Response) => {
       });
     }
 
+    // Fetch eligible CC members count (for CC vote calculations)
+    // Uses cached data from database, falls back to Koios API if cache is empty
+    const ccInfo = await getCachedEligibleCCInfo(prisma);
+    const eligibleCCMembers = ccInfo.eligibleMembers;
+
     const response: GetProposalInfoResponse =
-      mapProposalToGovernanceActionDetail(proposal as ProposalWithVotes);
+      mapProposalToGovernanceActionDetail(proposal as ProposalWithVotes, eligibleCCMembers);
 
     return res.json(response);
   } catch (error) {

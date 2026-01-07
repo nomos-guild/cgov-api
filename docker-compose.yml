@@ -11,7 +11,7 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:
-      - "${PORT:-3000}:3000"
+      - "${PORT:-3000}:${PORT:-3000}"
     environment:
       # Override DATABASE_URL to connect to host machine's database
       # Uses DB_NAME env var or defaults to 'cgov'
