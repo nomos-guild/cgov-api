@@ -97,13 +97,13 @@ jobs:
           gcloud scheduler jobs delete drep-voter-power-sync --location=${{ env.REGION }} --quiet || true
           gcloud scheduler jobs create http drep-voter-power-sync \
             --location=${{ env.REGION }} \
-            --schedule="*/5 * * * *" \
+            --schedule="0 0 * * *" \
             --uri="${{ steps.url.outputs.url }}/data/trigger-voter-sync" \
             --http-method=POST \
             --headers="X-API-Key=${{ secrets.SERVER_API_KEY }}" \
             --attempt-deadline=900s \
             --time-zone="UTC" \
-            --description="Sync DRep and SPO voting power from Koios API every 5 minutes"
+            --description="Sync DRep and SPO voting power from Koios API every 24 hours"
 
       - name: Deployment Summary
         run: |
@@ -118,4 +118,4 @@ jobs:
           echo "| Job | Schedule | Endpoint |" >> $GITHUB_STEP_SUMMARY
           echo "|-----|----------|----------|" >> $GITHUB_STEP_SUMMARY
           echo "| drep-proposal-sync | \`*/5 * * * *\` | POST /data/trigger-sync |" >> $GITHUB_STEP_SUMMARY
-          echo "| drep-voter-power-sync | \`*/5 * * * *\` | POST /data/trigger-voter-sync |" >> $GITHUB_STEP_SUMMARY
+          echo "| drep-voter-power-sync | \`0 0 * * *\` | POST /data/trigger-voter-sync |" >> $GITHUB_STEP_SUMMARY
