@@ -31,11 +31,16 @@ app.use(cors());
 
 // Debug: Log IP information for rate limiting analysis
 app.use((req, _res, next) => {
+  const xff = req.headers['x-forwarded-for'];
+  const rateLimitKey = typeof xff === 'string'
+    ? xff.split(',')[0].trim()
+    : (Array.isArray(xff) && xff.length > 0)
+      ? xff[0].split(',')[0].trim()
+      : req.ip;
   console.log('[Rate Limit Debug]', {
     path: req.path,
-    'X-Forwarded-For': req.headers['x-forwarded-for'],
-    'req.ip': req.ip,
-    'req.ips': req.ips,
+    'X-Forwarded-For': xff,
+    'Rate-Limit-Key': rateLimitKey,
   });
   next();
 });
@@ -47,6 +52,20 @@ const limiter = rateLimit({
   standardHeaders: true, // Return rate limit info in the `RateLimit-*` headers
   legacyHeaders: false, // Disable the `X-RateLimit-*` headers
   message: { error: "Too many requests, please try again later." },
+  // Custom key generator to extract real client IP from X-Forwarded-For
+  // The frontend (Vercel) forwards the original client IP as the first entry
+  keyGenerator: (req) => {
+    const xff = req.headers["x-forwarded-for"];
+    if (typeof xff === "string") {
+      // X-Forwarded-For format: "client, proxy1, proxy2"
+      // First IP is the original client
+      return xff.split(",")[0].trim();
+    }
+    if (Array.isArray(xff) && xff.length > 0) {
+      return xff[0].split(",")[0].trim();
+    }
+    return req.ip || "unknown";
+  },
 });
 
 app.use(limiter);
