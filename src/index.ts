@@ -29,6 +29,17 @@ app.use(helmet());
 // Security: CORS - allow all origins
 app.use(cors());
 
+// Debug: Log IP information for rate limiting analysis
+app.use((req, res, next) => {
+  console.log('[Rate Limit Debug]', {
+    path: req.path,
+    'X-Forwarded-For': req.headers['x-forwarded-for'],
+    'req.ip': req.ip,
+    'req.ips': req.ips,
+  });
+  next();
+});
+
 // Security: Rate limiting
 const limiter = rateLimit({
   windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS || "900000"), // Default: 15 minutes
