@@ -30,7 +30,7 @@ app.use(helmet());
 app.use(cors());
 
 // Debug: Log IP information for rate limiting analysis
-app.use((req, res, next) => {
+app.use((req, _res, next) => {
   console.log('[Rate Limit Debug]', {
     path: req.path,
     'X-Forwarded-For': req.headers['x-forwarded-for'],
