@@ -3,7 +3,6 @@ import express, { Request, Response, NextFunction } from "express";
 import bodyParser from "body-parser";
 import cors from "cors";
 import helmet from "helmet";
-import rateLimit from "express-rate-limit";
 import swaggerUi from "swagger-ui-express";
 import path from "path";
 import fs from "fs";
@@ -29,58 +28,7 @@ app.use(helmet());
 // Security: CORS - allow all origins
 app.use(cors());
 
-// Debug: Log IP information for rate limiting analysis
-app.use((req, _res, next) => {
-  const realClientIp = req.headers['x-real-client-ip'];
-  const xff = req.headers['x-forwarded-for'];
-  // Priority: X-Real-Client-IP (set by frontend) > X-Forwarded-For > req.ip
-  let rateLimitKey: string;
-  if (realClientIp) {
-    rateLimitKey = Array.isArray(realClientIp) ? realClientIp[0] : realClientIp;
-  } else if (typeof xff === 'string') {
-    rateLimitKey = xff.split(',')[0].trim();
-  } else if (Array.isArray(xff) && xff.length > 0) {
-    rateLimitKey = xff[0].split(',')[0].trim();
-  } else {
-    rateLimitKey = req.ip || 'unknown';
-  }
-  console.log('[Rate Limit Debug]', {
-    path: req.path,
-    'X-Real-Client-IP': realClientIp,
-    'X-Forwarded-For': xff,
-    'Rate-Limit-Key': rateLimitKey,
-  });
-  next();
-});
-
-// Security: Rate limiting
-const limiter = rateLimit({
-  windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS || "900000"), // Default: 15 minutes
-  max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS || "100"), // Default: 100 requests per window
-  standardHeaders: true, // Return rate limit info in the `RateLimit-*` headers
-  legacyHeaders: false, // Disable the `X-RateLimit-*` headers
-  message: { error: "Too many requests, please try again later." },
-  // Custom key generator to extract real client IP
-  // Priority: X-Real-Client-IP (custom header from frontend) > X-Forwarded-For > req.ip
-  keyGenerator: (req) => {
-    // Check custom header first (set by frontend, not modified by proxies)
-    const realClientIp = req.headers["x-real-client-ip"];
-    if (realClientIp) {
-      return Array.isArray(realClientIp) ? realClientIp[0] : realClientIp;
-    }
-    // Fall back to X-Forwarded-For
-    const xff = req.headers["x-forwarded-for"];
-    if (typeof xff === "string") {
-      return xff.split(",")[0].trim();
-    }
-    if (Array.isArray(xff) && xff.length > 0) {
-      return xff[0].split(",")[0].trim();
-    }
-    return req.ip || "unknown";
-  },
-});
-
-app.use(limiter);
+// Note: Rate limiting is handled by Cloudflare
 
 app.use(bodyParser.json());
 
