@@ -2,7 +2,7 @@ name: Deploy API to GCP Cloud Run
 
 on:
   push:
-    branches: [gcp-deployment]
+    branches: [main]
   workflow_dispatch:
 
 env:
