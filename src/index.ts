@@ -31,14 +31,22 @@ app.use(cors());
 
 // Debug: Log IP information for rate limiting analysis
 app.use((req, _res, next) => {
+  const realClientIp = req.headers['x-real-client-ip'];
   const xff = req.headers['x-forwarded-for'];
-  const rateLimitKey = typeof xff === 'string'
-    ? xff.split(',')[0].trim()
-    : (Array.isArray(xff) && xff.length > 0)
-      ? xff[0].split(',')[0].trim()
-      : req.ip;
+  // Priority: X-Real-Client-IP (set by frontend) > X-Forwarded-For > req.ip
+  let rateLimitKey: string;
+  if (realClientIp) {
+    rateLimitKey = Array.isArray(realClientIp) ? realClientIp[0] : realClientIp;
+  } else if (typeof xff === 'string') {
+    rateLimitKey = xff.split(',')[0].trim();
+  } else if (Array.isArray(xff) && xff.length > 0) {
+    rateLimitKey = xff[0].split(',')[0].trim();
+  } else {
+    rateLimitKey = req.ip || 'unknown';
+  }
   console.log('[Rate Limit Debug]', {
     path: req.path,
+    'X-Real-Client-IP': realClientIp,
     'X-Forwarded-For': xff,
     'Rate-Limit-Key': rateLimitKey,
   });
@@ -52,13 +60,17 @@ const limiter = rateLimit({
   standardHeaders: true, // Return rate limit info in the `RateLimit-*` headers
   legacyHeaders: false, // Disable the `X-RateLimit-*` headers
   message: { error: "Too many requests, please try again later." },
-  // Custom key generator to extract real client IP from X-Forwarded-For
-  // The frontend (Vercel) forwards the original client IP as the first entry
+  // Custom key generator to extract real client IP
+  // Priority: X-Real-Client-IP (custom header from frontend) > X-Forwarded-For > req.ip
   keyGenerator: (req) => {
+    // Check custom header first (set by frontend, not modified by proxies)
+    const realClientIp = req.headers["x-real-client-ip"];
+    if (realClientIp) {
+      return Array.isArray(realClientIp) ? realClientIp[0] : realClientIp;
+    }
+    // Fall back to X-Forwarded-For
     const xff = req.headers["x-forwarded-for"];
     if (typeof xff === "string") {
-      // X-Forwarded-For format: "client, proxy1, proxy2"
-      // First IP is the original client
       return xff.split(",")[0].trim();
     }
     if (Array.isArray(xff) && xff.length > 0) {
