@@ -74,6 +74,20 @@ export interface GovernanceAction {
   rawVotingPowerValues: RawVotingPowerValues;
 }
 
+/**
+ * Breakdown of voting power for pie chart display
+ * Shows individual components before they are combined per ratification rules
+ */
+export interface VoteBreakdown {
+  activeYes: string;           // Explicit Yes votes (lovelace)
+  activeNo: string;            // Explicit No votes only (lovelace)
+  activeAbstain: string;       // Explicit Abstain votes (lovelace)
+  alwaysAbstain: string;       // Always Abstain delegation (lovelace)
+  alwaysNoConfidence: string;  // Always No Confidence delegation (lovelace)
+  inactive: string | null;     // Inactive/expired DReps (lovelace), null for SPO
+  notVoted: string;            // Didn't vote - counts as No in ratification (lovelace)
+}
+
 export interface GovernanceActionVoteInfo {
   yesPercent: number;
   noPercent: number;
@@ -81,6 +95,8 @@ export interface GovernanceActionVoteInfo {
   yesLovelace: string; // Voting power in lovelace (string for BigInt serialization)
   noLovelace: string;
   abstainLovelace: string;
+  // Breakdown for pie chart display
+  breakdown: VoteBreakdown;
 }
 
 export interface CCGovernanceActionVoteInfo {
@@ -92,6 +108,8 @@ export interface CCGovernanceActionVoteInfo {
   noCount: number;
   abstainCount: number;
   notVotedCount: number;
+  eligibleMembers: number; // Number of eligible CC members (authorized and not expired)
+  isCommitteeValid: boolean; // Whether committee has enough eligible members (>= 7)
 }
 
 export interface VoteRecord {

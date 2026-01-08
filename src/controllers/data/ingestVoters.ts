@@ -1,12 +1,10 @@
 import { Request, Response } from "express";
-import { PrismaClient } from "@prisma/client";
+import { prisma } from "../../services";
 import {
   ingestDrep,
   ingestSpo,
   ingestCc,
 } from "../../services/ingestion/voter.service";
-
-const prisma = new PrismaClient();
 
 /**
  * POST /data/drep/:drep_id

@@ -14,10 +14,8 @@
  * - Per-proposal sync: 30 second cooldown per proposal
  */
 
-import {
-  PrismaClient,
-  proposal_status,
-} from "@prisma/client";
+import { ProposalStatus } from "@prisma/client";
+import { prisma } from "./prisma";
 import { koiosGet } from "./koios";
 import {
   ingestProposalData,
@@ -27,8 +25,6 @@ import type {
   KoiosProposal,
   KoiosProposalVotingSummary,
 } from "../types/koios.types";
-
-const prisma = new PrismaClient();
 
 // Cooldown periods (in milliseconds)
 const OVERVIEW_SYNC_COOLDOWN_MS = 1_000; // 1 second
@@ -111,9 +107,9 @@ async function doOverviewSync(): Promise<void> {
   if (koiosCount > dbCount) {
     // Get existing proposal IDs from DB
     const existingProposals = await prisma.proposal.findMany({
-      select: { proposal_id: true },
+      select: { proposalId: true },
     });
-    const existingIds = new Set(existingProposals.map((p) => p.proposal_id));
+    const existingIds = new Set(existingProposals.map((p) => p.proposalId));
 
     // Find new proposals from Koios
     const newProposals = koiosProposals.filter(
@@ -218,7 +214,7 @@ async function doProposalSync(identifier: string): Promise<void> {
   }
 
   // Only sync if proposal is still ACTIVE (voting ongoing)
-  if (dbProposal.status !== proposal_status.ACTIVE) {
+  if (dbProposal.status !== ProposalStatus.ACTIVE) {
     console.log(
       `[Sync-on-Read] Proposal ${identifier} is ${dbProposal.status}, skipping sync`
     );
@@ -228,12 +224,12 @@ async function doProposalSync(identifier: string): Promise<void> {
   // Fetch votes from Koios for this proposal to compare count
   // This catches cases where a voter changes their vote back to the same choice
   // (e.g., Yes -> Abstain -> Yes), which wouldn't change voting power totals
-  const koiosVotes = await fetchVotesForProposal(dbProposal.proposal_id);
+  const koiosVotes = await fetchVotesForProposal(dbProposal.proposalId);
   const koiosVoteCount = koiosVotes.length;
 
   // Get vote count from DB
-  const dbVoteCount = await prisma.onchain_vote.count({
-    where: { proposal_id: dbProposal.proposal_id },
+  const dbVoteCount = await prisma.onchainVote.count({
+    where: { proposalId: dbProposal.proposalId },
   });
 
   console.log(
@@ -245,7 +241,7 @@ async function doProposalSync(identifier: string): Promise<void> {
 
   // Also check voting power totals for additional safety
   const koiosSummary = await koiosGet<KoiosProposalVotingSummary[]>(
-    `/proposal_voting_summary?_proposal_id=${dbProposal.proposal_id}`
+    `/proposal_voting_summary?_proposal_id=${dbProposal.proposalId}`
   );
 
   let hasVotingPowerChange = false;
@@ -263,14 +259,14 @@ async function doProposalSync(identifier: string): Promise<void> {
       summary.pool_active_abstain_vote_power || "0"
     );
 
-    const dbDrepYes = dbProposal.drep_active_yes_vote_power || BigInt(0);
-    const dbDrepNo = dbProposal.drep_active_no_vote_power || BigInt(0);
+    const dbDrepYes = dbProposal.drepActiveYesVotePower || BigInt(0);
+    const dbDrepNo = dbProposal.drepActiveNoVotePower || BigInt(0);
     const dbDrepAbstain =
-      dbProposal.drep_active_abstain_vote_power || BigInt(0);
-    const dbSpoYes = dbProposal.spo_active_yes_vote_power || BigInt(0);
-    const dbSpoNo = dbProposal.spo_active_no_vote_power || BigInt(0);
+      dbProposal.drepActiveAbstainVotePower || BigInt(0);
+    const dbSpoYes = dbProposal.spoActiveYesVotePower || BigInt(0);
+    const dbSpoNo = dbProposal.spoActiveNoVotePower || BigInt(0);
     const dbSpoAbstain =
-      dbProposal.spo_active_abstain_vote_power || BigInt(0);
+      dbProposal.spoActiveAbstainVotePower || BigInt(0);
 
     const hasDrepChanges =
       koiosDrepYes !== dbDrepYes ||
@@ -285,7 +281,7 @@ async function doProposalSync(identifier: string): Promise<void> {
 
     if (hasVotingPowerChange) {
       console.log(
-        `[Sync-on-Read] Voting power differences detected for ${dbProposal.proposal_id}`
+        `[Sync-on-Read] Voting power differences detected for ${dbProposal.proposalId}`
       );
     }
   }
@@ -293,14 +289,14 @@ async function doProposalSync(identifier: string): Promise<void> {
   // Sync if either vote count or voting power differs
   if (hasVoteCountChange || hasVotingPowerChange) {
     console.log(
-      `[Sync-on-Read] Changes detected for ${dbProposal.proposal_id}:` +
+      `[Sync-on-Read] Changes detected for ${dbProposal.proposalId}:` +
         ` voteCount=${hasVoteCountChange}, votingPower=${hasVotingPowerChange}`
     );
 
     // Re-ingest the proposal to get updated votes
     const koiosProposals = await koiosGet<KoiosProposal[]>("/proposal_list");
     const koiosProposal = koiosProposals?.find(
-      (p) => p.proposal_id === dbProposal.proposal_id
+      (p) => p.proposal_id === dbProposal.proposalId
     );
 
     if (koiosProposal) {
@@ -309,11 +305,11 @@ async function doProposalSync(identifier: string): Promise<void> {
         useCache: false, // Don't use global cache for on-demand sync
       });
       console.log(
-        `[Sync-on-Read] ✓ Re-synced proposal ${dbProposal.proposal_id}`
+        `[Sync-on-Read] ✓ Re-synced proposal ${dbProposal.proposalId}`
       );
     }
   } else {
-    console.log(`[Sync-on-Read] No changes for ${dbProposal.proposal_id}`);
+    console.log(`[Sync-on-Read] No changes for ${dbProposal.proposalId}`);
   }
 }
 
@@ -357,16 +353,16 @@ async function findProposalByIdentifier(identifier: string) {
   // Try proposalId (starts with "gov_action")
   if (trimmed.startsWith("gov_action")) {
     return prisma.proposal.findUnique({
-      where: { proposal_id: trimmed },
+      where: { proposalId: trimmed },
       select: {
-        proposal_id: true,
+        proposalId: true,
         status: true,
-        drep_active_yes_vote_power: true,
-        drep_active_no_vote_power: true,
-        drep_active_abstain_vote_power: true,
-        spo_active_yes_vote_power: true,
-        spo_active_no_vote_power: true,
-        spo_active_abstain_vote_power: true,
+        drepActiveYesVotePower: true,
+        drepActiveNoVotePower: true,
+        drepActiveAbstainVotePower: true,
+        spoActiveYesVotePower: true,
+        spoActiveNoVotePower: true,
+        spoActiveAbstainVotePower: true,
       },
     });
   }
@@ -377,14 +373,14 @@ async function findProposalByIdentifier(identifier: string) {
     const proposal = await prisma.proposal.findUnique({
       where: { id: numericId },
       select: {
-        proposal_id: true,
+        proposalId: true,
         status: true,
-        drep_active_yes_vote_power: true,
-        drep_active_no_vote_power: true,
-        drep_active_abstain_vote_power: true,
-        spo_active_yes_vote_power: true,
-        spo_active_no_vote_power: true,
-        spo_active_abstain_vote_power: true,
+        drepActiveYesVotePower: true,
+        drepActiveNoVotePower: true,
+        drepActiveAbstainVotePower: true,
+        spoActiveYesVotePower: true,
+        spoActiveNoVotePower: true,
+        spoActiveAbstainVotePower: true,
       },
     });
     if (proposal) return proposal;
@@ -394,32 +390,32 @@ async function findProposalByIdentifier(identifier: string) {
   if (trimmed.includes(":")) {
     const [txHash, certIndex] = trimmed.split(":");
     return prisma.proposal.findFirst({
-      where: { tx_hash: txHash, cert_index: certIndex },
+      where: { txHash: txHash, certIndex: certIndex },
       select: {
-        proposal_id: true,
+        proposalId: true,
         status: true,
-        drep_active_yes_vote_power: true,
-        drep_active_no_vote_power: true,
-        drep_active_abstain_vote_power: true,
-        spo_active_yes_vote_power: true,
-        spo_active_no_vote_power: true,
-        spo_active_abstain_vote_power: true,
+        drepActiveYesVotePower: true,
+        drepActiveNoVotePower: true,
+        drepActiveAbstainVotePower: true,
+        spoActiveYesVotePower: true,
+        spoActiveNoVotePower: true,
+        spoActiveAbstainVotePower: true,
       },
     });
   }
 
   // Plain txHash
   return prisma.proposal.findFirst({
-    where: { tx_hash: trimmed },
+    where: { txHash: trimmed },
     select: {
-      proposal_id: true,
+      proposalId: true,
       status: true,
-      drep_active_yes_vote_power: true,
-      drep_active_no_vote_power: true,
-      drep_active_abstain_vote_power: true,
-      spo_active_yes_vote_power: true,
-      spo_active_no_vote_power: true,
-      spo_active_abstain_vote_power: true,
+      drepActiveYesVotePower: true,
+      drepActiveNoVotePower: true,
+      drepActiveAbstainVotePower: true,
+      spoActiveYesVotePower: true,
+      spoActiveNoVotePower: true,
+      spoActiveAbstainVotePower: true,
     },
   });
 }

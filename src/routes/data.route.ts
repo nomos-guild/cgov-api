@@ -7,6 +7,8 @@ import {
   postIngestSpo,
   postIngestCc,
 } from "../controllers/data/ingestVoters";
+import { postTriggerSync } from "../controllers/data/triggerSync";
+import { postTriggerVoterSync } from "../controllers/data/triggerVoterSync";
 
 const router = express.Router();
 
@@ -172,5 +174,41 @@ router.post("/spo/:pool_id", postIngestSpo);
  *         description: Server error
  */
 router.post("/cc/:cc_id", postIngestCc);
+
+/**
+ * @openapi
+ * /data/trigger-sync:
+ *   post:
+ *     summary: Manually trigger proposal sync
+ *     description: Triggers a full sync of all governance proposals from Koios API. Used for manual testing and by Cloud Scheduler cron jobs.
+ *     tags:
+ *       - Data Ingestion
+ *     responses:
+ *       200:
+ *         description: Sync completed successfully
+ *       409:
+ *         description: Sync already running
+ *       500:
+ *         description: Sync failed
+ */
+router.post("/trigger-sync", postTriggerSync);
+
+/**
+ * @openapi
+ * /data/trigger-voter-sync:
+ *   post:
+ *     summary: Manually trigger voter power sync
+ *     description: Triggers a full sync of DRep and SPO voting power from Koios API. Used for manual testing and by Cloud Scheduler cron jobs.
+ *     tags:
+ *       - Data Ingestion
+ *     responses:
+ *       200:
+ *         description: Sync completed successfully
+ *       409:
+ *         description: Sync already running
+ *       500:
+ *         description: Sync failed
+ */
+router.post("/trigger-voter-sync", postTriggerVoterSync);
 
 export default router;

@@ -18,7 +18,7 @@ export interface NCLYearData {
  */
 export const getNCLData = async (_req: Request, res: Response) => {
   try {
-    const nclRecords = await prisma.ncl.findMany({
+    const nclRecords = await prisma.nCL.findMany({
       orderBy: { year: "desc" },
     });
 
@@ -27,7 +27,7 @@ export const getNCLData = async (_req: Request, res: Response) => {
       currentValue: record.current.toString(),
       targetValue: record.limit.toString(),
       epoch: record.epoch,
-      updatedAt: record.updated_at.toISOString(),
+      updatedAt: record.updatedAt.toISOString(),
     }));
 
     res.json(response);
@@ -56,7 +56,7 @@ export const getNCLDataByYear = async (req: Request, res: Response) => {
       return;
     }
 
-    const nclRecord = await prisma.ncl.findUnique({
+    const nclRecord = await prisma.nCL.findUnique({
       where: { year },
     });
 
@@ -73,7 +73,7 @@ export const getNCLDataByYear = async (req: Request, res: Response) => {
       currentValue: nclRecord.current.toString(),
       targetValue: nclRecord.limit.toString(),
       epoch: nclRecord.epoch,
-      updatedAt: nclRecord.updated_at.toISOString(),
+      updatedAt: nclRecord.updatedAt.toISOString(),
     };
 
     res.json(response);

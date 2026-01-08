@@ -1,10 +1,10 @@
 import { Request, Response } from "express";
-import { proposal_status } from "@prisma/client";
+import { ProposalStatus } from "@prisma/client";
 import { prisma } from "../../services";
 import { GetNCLDataResponse } from "../../responses";
 import { syncProposalsOverviewOnRead } from "../../services/syncOnRead";
 
-type StatusCountMap = Partial<Record<proposal_status, number>>;
+type StatusCountMap = Partial<Record<ProposalStatus, number>>;
 
 export const getOverviewSummary = async (_req: Request, res: Response) => {
   try {
@@ -21,7 +21,7 @@ export const getOverviewSummary = async (_req: Request, res: Response) => {
         by: ["status"],
         _count: { status: true },
       }),
-      prisma.ncl.findUnique({
+      prisma.nCL.findUnique({
         where: { year: currentYear },
       }),
     ]);
@@ -31,17 +31,17 @@ export const getOverviewSummary = async (_req: Request, res: Response) => {
       return acc;
     }, {});
 
-    const currentlyRatified = counts[proposal_status.RATIFIED] ?? 0;
-    const enacted = counts[proposal_status.ENACTED] ?? 0;
+    const currentlyRatified = counts[ProposalStatus.RATIFIED] ?? 0;
+    const enacted = counts[ProposalStatus.ENACTED] ?? 0;
 
     const summary = {
       totalProposals,
-      activeProposals: counts[proposal_status.ACTIVE] ?? 0,
+      activeProposals: counts[ProposalStatus.ACTIVE] ?? 0,
       // Ratified = currently ratified + enacted (since enacted proposals were ratified first)
       ratifiedProposals: currentlyRatified + enacted,
       enactedProposals: enacted,
-      expiredProposals: counts[proposal_status.EXPIRED] ?? 0,
-      closedProposals: counts[proposal_status.CLOSED] ?? 0,
+      expiredProposals: counts[ProposalStatus.EXPIRED] ?? 0,
+      closedProposals: counts[ProposalStatus.CLOSED] ?? 0,
     };
 
     const response: GetNCLDataResponse = {

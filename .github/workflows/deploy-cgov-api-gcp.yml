@@ -1,0 +1,119 @@
+name: Deploy API to GCP Cloud Run
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  PROJECT_ID: nomos-478416
+  REGION: asia-south1
+  SERVICE_NAME: cgov-api
+  ARTIFACT_REGISTRY: asia-south1-docker.pkg.dev
+  REPOSITORY: cgov-api
+
+jobs:
+  build-and-deploy:
+    name: Build and Deploy to Cloud Run
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker ${{ env.ARTIFACT_REGISTRY }} --quiet
+
+      - name: Build Docker image
+        run: |
+          docker build \
+            -t "${{ env.ARTIFACT_REGISTRY }}/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/${{ env.SERVICE_NAME }}:${{ github.sha }}" \
+            -t "${{ env.ARTIFACT_REGISTRY }}/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/${{ env.SERVICE_NAME }}:latest" \
+            .
+
+      - name: Push Docker image to Artifact Registry
+        run: |
+          docker push "${{ env.ARTIFACT_REGISTRY }}/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/${{ env.SERVICE_NAME }}:${{ github.sha }}"
+          docker push "${{ env.ARTIFACT_REGISTRY }}/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/${{ env.SERVICE_NAME }}:latest"
+
+      - name: Deploy to Cloud Run
+        run: |
+          gcloud run deploy ${{ env.SERVICE_NAME }} \
+            --image="${{ env.ARTIFACT_REGISTRY }}/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/${{ env.SERVICE_NAME }}:${{ github.sha }}" \
+            --region=${{ env.REGION }} \
+            --platform=managed \
+            --allow-unauthenticated \
+            --service-account=cgov-api-runner@${{ env.PROJECT_ID }}.iam.gserviceaccount.com \
+            --memory=1Gi \
+            --cpu=1 \
+            --min-instances=0 \
+            --max-instances=10 \
+            --timeout=900 \
+            --vpc-connector=cgov-api \
+            --vpc-egress=private-ranges-only \
+            --add-cloudsql-instances=${{ env.PROJECT_ID }}:${{ env.REGION }}:cgov-db \
+            --set-env-vars="DISABLE_CRON_IN_API=true" \
+            --set-env-vars="KOIOS_BASE_URL=https://api.koios.rest/api/v1" \
+            --set-env-vars="DATABASE_URL=${{ secrets.DATABASE_URL }}" \
+            --set-env-vars="MAINNET_BLOCKFROST_API_KEY=${{ secrets.MAINNET_BLOCKFROST_API_KEY }}" \
+            --set-env-vars="KOIOS_API_KEY=${{ secrets.KOIOS_API_KEY }}" \
+            --set-env-vars="SERVER_API_KEY=${{ secrets.SERVER_API_KEY }}"
+
+      - name: Get Cloud Run Service URL
+        id: url
+        run: |
+          URL=$(gcloud run services describe ${{ env.SERVICE_NAME }} --region=${{ env.REGION }} --format='value(status.url)')
+          echo "url=$URL" >> $GITHUB_OUTPUT
+
+      - name: Create/Update Proposal Sync Scheduler Job
+        run: |
+          gcloud scheduler jobs delete drep-proposal-sync --location=${{ env.REGION }} --quiet || true
+          gcloud scheduler jobs create http drep-proposal-sync \
+            --location=${{ env.REGION }} \
+            --schedule="*/5 * * * *" \
+            --uri="${{ steps.url.outputs.url }}/data/trigger-sync" \
+            --http-method=POST \
+            --headers="X-API-Key=${{ secrets.SERVER_API_KEY }}" \
+            --attempt-deadline=900s \
+            --time-zone="UTC" \
+            --description="Sync governance proposals from Koios API every 5 minutes"
+
+      - name: Create/Update Voter Power Sync Scheduler Job
+        run: |
+          gcloud scheduler jobs delete drep-voter-power-sync --location=${{ env.REGION }} --quiet || true
+          gcloud scheduler jobs create http drep-voter-power-sync \
+            --location=${{ env.REGION }} \
+            --schedule="0 0 * * *" \
+            --uri="${{ steps.url.outputs.url }}/data/trigger-voter-sync" \
+            --http-method=POST \
+            --headers="X-API-Key=${{ secrets.SERVER_API_KEY }}" \
+            --attempt-deadline=900s \
+            --time-zone="UTC" \
+            --description="Sync DRep and SPO voting power from Koios API every 24 hours"
+
+      - name: Deployment Summary
+        run: |
+          echo "## Deployment Complete" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Cloud Run Service" >> $GITHUB_STEP_SUMMARY
+          echo "- **Service URL:** ${{ steps.url.outputs.url }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **API Docs:** ${{ steps.url.outputs.url }}/api-docs" >> $GITHUB_STEP_SUMMARY
+          echo "- **Image:** \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Cloud Scheduler Jobs" >> $GITHUB_STEP_SUMMARY
+          echo "| Job | Schedule | Endpoint |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----|----------|----------|" >> $GITHUB_STEP_SUMMARY
+          echo "| drep-proposal-sync | \`*/5 * * * *\` | POST /data/trigger-sync |" >> $GITHUB_STEP_SUMMARY
+          echo "| drep-voter-power-sync | \`0 0 * * *\` | POST /data/trigger-voter-sync |" >> $GITHUB_STEP_SUMMARY

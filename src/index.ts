@@ -3,7 +3,6 @@ import express, { Request, Response, NextFunction } from "express";
 import bodyParser from "body-parser";
 import cors from "cors";
 import helmet from "helmet";
-import rateLimit from "express-rate-limit";
 import swaggerUi from "swagger-ui-express";
 import path from "path";
 import fs from "fs";
@@ -18,22 +17,18 @@ dotenv.config();
 
 const app = express();
 
+// Trust proxy for GCP Cloud Run deployment
+// Set to 1 to trust only the first proxy hop (Cloud Run's load balancer)
+// This ensures req.ip returns the real client IP from X-Forwarded-For header
+app.set("trust proxy", 1);
+
 // Security: Helmet.js for HTTP security headers
 app.use(helmet());
 
 // Security: CORS - allow all origins
 app.use(cors());
 
-// Security: Rate limiting
-const limiter = rateLimit({
-  windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS || "900000"), // Default: 15 minutes
-  max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS || "100"), // Default: 100 requests per window
-  standardHeaders: true, // Return rate limit info in the `RateLimit-*` headers
-  legacyHeaders: false, // Disable the `X-RateLimit-*` headers
-  message: { error: "Too many requests, please try again later." },
-});
-
-app.use(limiter);
+// Note: Rate limiting is handled by Cloudflare
 
 app.use(bodyParser.json());
 
