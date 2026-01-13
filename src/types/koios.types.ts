@@ -240,3 +240,29 @@ export interface KoiosDrepInfo {
   meta_url?: string | null;
   meta_hash?: string | null;
 }
+
+/**
+ * Epoch Totals from Koios API
+ * Endpoint: GET /totals?_epoch_no=<E>
+ */
+export interface KoiosTotals {
+  epoch_no: number;
+  circulation?: string | null;
+  treasury?: string | null;
+  reward?: string | null;
+  supply?: string | null;
+  reserves?: string | null;
+}
+
+/**
+ * DRep Delegators from Koios API
+ * Endpoint: GET /drep_delegators?_drep_id=<drepId>
+ *
+ * Note: Koios responses for delegator snapshots have been observed to include
+ * `stake_address` and `amount` (lovelace). Some deployments may include `epoch_no`.
+ */
+export interface KoiosDrepDelegator {
+  stake_address: string;
+  amount: string;
+  epoch_no?: number | null;
+}

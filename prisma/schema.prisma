@@ -33,19 +33,76 @@ model CrowdfundingCampaign {
 }
 
 model Drep {
-  drepId       String        @id @map("drep_id")
-  userId       String?       @unique @map("user_id")
+  drepId       String                  @id @map("drep_id")
+  userId       String?                 @unique @map("user_id")
   name         String?
-  paymentAddr  String?       @map("payment_addr")
-  iconUrl      String?       @map("icon_url")
-  doNotList    Boolean?      @map("do_not_list")
-  votingPower  BigInt        @map("voting_power")
-  createdAt    DateTime?     @default(now()) @map("created_at")
-  updatedAt    DateTime?     @map("updated_at")
-  user         User?         @relation(fields: [userId], references: [id])
+  paymentAddr  String?                 @map("payment_addr")
+  iconUrl      String?                 @map("icon_url")
+  doNotList    Boolean?                @map("do_not_list")
+  // Voting power in lovelace. Default 0 so we can bulk-inventory DReps before
+  // we have their current voting power synced.
+  votingPower  BigInt                  @default(0) @map("voting_power")
+  // Koios /drep_info fields (optional; populated by background sync jobs)
+  registered   Boolean?                @map("registered")
+  active       Boolean?                @map("active")
+  expiresEpoch Int?                    @map("expires_epoch")
+  metaUrl      String?                 @map("meta_url")
+  metaHash     String?                 @map("meta_hash")
+  createdAt    DateTime?               @default(now()) @map("created_at")
+  updatedAt    DateTime?               @map("updated_at")
+  user         User?                   @relation(fields: [userId], references: [id])
   onchainVotes OnchainVote[]
+  delegators   DrepDelegatorSnapshot[]
 
   @@map("drep")
+}
+
+// Epoch-level denominators/totals used by analytics dashboards.
+// This is designed to let the client compute KPIs DB-first without hitting Koios at read time.
+model EpochTotals {
+  epoch              Int      @id @map("epoch_no")
+  circulation        BigInt?  @map("circulation")
+  treasury           BigInt?  @map("treasury")
+  reward             BigInt?  @map("reward")
+  supply             BigInt?  @map("supply")
+  reserves           BigInt?  @map("reserves")
+  // Cached denominators used in governance analytics:
+  delegatedDrepPower BigInt?  @map("delegated_drep_power")
+  totalPoolVotePower BigInt?  @map("total_pool_vote_power")
+  createdAt          DateTime @default(now()) @map("created_at")
+  updatedAt          DateTime @updatedAt @map("updated_at")
+
+  @@map("epoch_totals")
+}
+
+// Snapshot of stake addresses delegating to each DRep at a given epoch.
+// Needed for wallet-level participation, delegation distribution, and "new delegators" KPIs.
+model DrepDelegatorSnapshot {
+  id           Int      @id @default(autoincrement())
+  epoch        Int      @map("epoch_no")
+  drepId       String   @map("drep_id")
+  stakeAddress String   @map("stake_address")
+  amount       BigInt   @map("amount") // lovelace
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  drep Drep @relation(fields: [drepId], references: [drepId])
+
+  @@unique([epoch, drepId, stakeAddress])
+  @@index([epoch, drepId])
+  @@map("drep_delegator_snapshot")
+}
+
+// Tracks per-epoch completion state for the governance analytics sync job.
+// This lets the job run frequently but only do heavy work once per epoch.
+model EpochAnalyticsSync {
+  epoch              Int       @id @map("epoch_no")
+  drepsSyncedAt      DateTime? @map("dreps_synced_at")
+  totalsSyncedAt     DateTime? @map("totals_synced_at")
+  delegatorsSyncedAt DateTime? @map("delegators_synced_at")
+  createdAt          DateTime  @default(now()) @map("created_at")
+  updatedAt          DateTime  @updatedAt @map("updated_at")
+
+  @@map("epoch_analytics_sync")
 }
 
 // Sync Status - Tracks sync job execution and provides distributed locking
@@ -83,7 +140,7 @@ model NCL {
 // Committee State - Caches eligible CC member count from Koios
 model CommitteeState {
   id                String   @id @default("current")
-  epoch             Int      // Epoch when last synced
+  epoch             Int // Epoch when last synced
   totalMembers      Int      @map("total_members")
   eligibleMembers   Int      @map("eligible_members")
   quorumNumerator   Int      @map("quorum_numerator")
@@ -122,37 +179,37 @@ model OnchainVote {
 }
 
 model Proposal {
-  id                          Int              @id @default(autoincrement())
-  proposalId                  String           @unique @map("proposal_id")
-  txHash                      String           @map("tx_hash")
-  certIndex                   String           @map("cert_index")
+  id                          Int             @id @default(autoincrement())
+  proposalId                  String          @unique @map("proposal_id")
+  txHash                      String          @map("tx_hash")
+  certIndex                   String          @map("cert_index")
   title                       String
   description                 String?
   rationale                   String?
-  governanceActionType        GovernanceType?  @map("governance_action_type")
-  status                      ProposalStatus   @default(ACTIVE)
-  submissionEpoch             Int?             @map("submission_epoch")
-  ratifiedEpoch               Int?             @map("ratified_epoch")
-  enactedEpoch                Int?             @map("enacted_epoch")
-  droppedEpoch                Int?             @map("dropped_epoch")
-  expiredEpoch                Int?             @map("expired_epoch")
-  expirationEpoch             Int?             @map("expiration_epoch")
-  drepTotalVotePower          BigInt?          @map("drep_total_vote_power")
-  drepActiveYesVotePower      BigInt?          @map("drep_active_yes_vote_power")
-  drepActiveNoVotePower       BigInt?          @map("drep_active_no_vote_power")
-  drepActiveAbstainVotePower  BigInt?          @map("drep_active_abstain_vote_power")
-  drepAlwaysAbstainVotePower  BigInt?          @map("drep_always_abstain_vote_power")
-  drepAlwaysNoConfidencePower BigInt?          @map("drep_always_no_confidence_power")
-  drepInactiveVotePower       BigInt?          @map("drep_inactive_vote_power")
-  spoTotalVotePower           BigInt?          @map("spo_total_vote_power")
-  spoActiveYesVotePower       BigInt?          @map("spo_active_yes_vote_power")
-  spoActiveNoVotePower        BigInt?          @map("spo_active_no_vote_power")
-  spoActiveAbstainVotePower   BigInt?          @map("spo_active_abstain_vote_power")
-  spoAlwaysAbstainVotePower   BigInt?          @map("spo_always_abstain_vote_power")
-  spoAlwaysNoConfidencePower  BigInt?          @map("spo_always_no_confidence_power")
+  governanceActionType        GovernanceType? @map("governance_action_type")
+  status                      ProposalStatus  @default(ACTIVE)
+  submissionEpoch             Int?            @map("submission_epoch")
+  ratifiedEpoch               Int?            @map("ratified_epoch")
+  enactedEpoch                Int?            @map("enacted_epoch")
+  droppedEpoch                Int?            @map("dropped_epoch")
+  expiredEpoch                Int?            @map("expired_epoch")
+  expirationEpoch             Int?            @map("expiration_epoch")
+  drepTotalVotePower          BigInt?         @map("drep_total_vote_power")
+  drepActiveYesVotePower      BigInt?         @map("drep_active_yes_vote_power")
+  drepActiveNoVotePower       BigInt?         @map("drep_active_no_vote_power")
+  drepActiveAbstainVotePower  BigInt?         @map("drep_active_abstain_vote_power")
+  drepAlwaysAbstainVotePower  BigInt?         @map("drep_always_abstain_vote_power")
+  drepAlwaysNoConfidencePower BigInt?         @map("drep_always_no_confidence_power")
+  drepInactiveVotePower       BigInt?         @map("drep_inactive_vote_power")
+  spoTotalVotePower           BigInt?         @map("spo_total_vote_power")
+  spoActiveYesVotePower       BigInt?         @map("spo_active_yes_vote_power")
+  spoActiveNoVotePower        BigInt?         @map("spo_active_no_vote_power")
+  spoActiveAbstainVotePower   BigInt?         @map("spo_active_abstain_vote_power")
+  spoAlwaysAbstainVotePower   BigInt?         @map("spo_always_abstain_vote_power")
+  spoAlwaysNoConfidencePower  BigInt?         @map("spo_always_no_confidence_power")
   metadata                    String?
-  createdAt                   DateTime?        @default(now()) @map("created_at")
-  updatedAt                   DateTime?        @map("updated_at")
+  createdAt                   DateTime?       @default(now()) @map("created_at")
+  updatedAt                   DateTime?       @map("updated_at")
   onchainVotes                OnchainVote[]
 
   @@unique([txHash, certIndex])
