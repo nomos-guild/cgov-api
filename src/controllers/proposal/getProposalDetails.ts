@@ -53,7 +53,10 @@ const buildProposalLookup = (
 
 export const getProposalDetails = async (req: Request, res: Response) => {
   try {
-    const proposalId = req.params.proposal_id;
+    const rawProposalId = req.params.proposal_id;
+    const proposalId = Array.isArray(rawProposalId)
+      ? rawProposalId[0]
+      : rawProposalId;
 
     if (!proposalId) {
       return res.status(400).json({

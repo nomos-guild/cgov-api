@@ -33,26 +33,26 @@ model CrowdfundingCampaign {
 }
 
 model Drep {
-  drepId       String                  @id @map("drep_id")
-  userId       String?                 @unique @map("user_id")
-  name         String?
-  paymentAddr  String?                 @map("payment_addr")
-  iconUrl      String?                 @map("icon_url")
-  doNotList    Boolean?                @map("do_not_list")
+  drepId                String                 @id @map("drep_id")
+  userId                String?                @unique @map("user_id")
+  name                  String?
+  paymentAddr           String?                @map("payment_addr")
+  iconUrl               String?                @map("icon_url")
+  doNotList             Boolean?               @map("do_not_list")
   // Voting power in lovelace. Default 0 so we can bulk-inventory DReps before
   // we have their current voting power synced.
-  votingPower  BigInt                  @default(0) @map("voting_power")
+  votingPower           BigInt                 @default(0) @map("voting_power")
   // Koios /drep_info fields (optional; populated by background sync jobs)
-  registered   Boolean?                @map("registered")
-  active       Boolean?                @map("active")
-  expiresEpoch Int?                    @map("expires_epoch")
-  metaUrl      String?                 @map("meta_url")
-  metaHash     String?                 @map("meta_hash")
-  createdAt    DateTime?               @default(now()) @map("created_at")
-  updatedAt    DateTime?               @map("updated_at")
-  user         User?                   @relation(fields: [userId], references: [id])
-  onchainVotes OnchainVote[]
-  delegators   DrepDelegatorSnapshot[]
+  registered            Boolean?               @map("registered")
+  active                Boolean?               @map("active")
+  expiresEpoch          Int?                   @map("expires_epoch")
+  metaUrl               String?                @map("meta_url")
+  metaHash              String?                @map("meta_hash")
+  createdAt             DateTime?              @default(now()) @map("created_at")
+  updatedAt             DateTime?              @map("updated_at")
+  user                  User?                  @relation(fields: [userId], references: [id])
+  onchainVotes          OnchainVote[]
+  stakeDelegationStates StakeDelegationState[]
 
   @@map("drep")
 }
@@ -75,32 +75,67 @@ model EpochTotals {
   @@map("epoch_totals")
 }
 
-// Snapshot of stake addresses delegating to each DRep at a given epoch.
-// Needed for wallet-level participation, delegation distribution, and "new delegators" KPIs.
-model DrepDelegatorSnapshot {
-  id           Int      @id @default(autoincrement())
-  epoch        Int      @map("epoch_no")
-  drepId       String   @map("drep_id")
-  stakeAddress String   @map("stake_address")
-  amount       BigInt   @map("amount") // lovelace
-  createdAt    DateTime @default(now()) @map("created_at")
+// Inventory of stake addresses to support delegation change tracking.
+model StakeAddress {
+  stakeAddress      String                  @id @map("stake_address")
+  createdAt         DateTime                @default(now()) @map("created_at")
+  updatedAt         DateTime                @updatedAt @map("updated_at")
+  delegationState   StakeDelegationState?
+  delegationChanges StakeDelegationChange[]
 
-  drep Drep @relation(fields: [drepId], references: [drepId])
+  @@map("stake_address")
+}
 
-  @@unique([epoch, drepId, stakeAddress])
-  @@index([epoch, drepId])
-  @@map("drep_delegator_snapshot")
+// Current DRep delegation state for each stake address.
+model StakeDelegationState {
+  stakeAddress   String   @id @map("stake_address")
+  drepId         String?  @map("drep_id")
+  amount         BigInt?  @map("amount")
+  delegatedEpoch Int?     @map("delegated_epoch_no")
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  stakeAddressRef StakeAddress @relation(fields: [stakeAddress], references: [stakeAddress])
+  drep            Drep?        @relation(fields: [drepId], references: [drepId])
+
+  @@index([drepId])
+  @@map("stake_delegation_state")
+}
+
+// Append-only change log for stake address DRep delegation changes.
+model StakeDelegationChange {
+  id             Int      @id @default(autoincrement())
+  stakeAddress   String   @map("stake_address")
+  fromDrepId     String?  @map("from_drep_id")
+  toDrepId       String?  @map("to_drep_id")
+  delegatedEpoch Int?     @map("delegated_epoch_no")
+  amount         BigInt?  @map("amount")
+  observedAt     DateTime @default(now()) @map("observed_at")
+
+  stakeAddressRef StakeAddress @relation(fields: [stakeAddress], references: [stakeAddress])
+
+  @@index([stakeAddress])
+  @@index([toDrepId])
+  @@map("stake_delegation_change")
+}
+
+// Global sync state for delegation change ingestion.
+model StakeDelegationSyncState {
+  id                 String   @id
+  lastProcessedEpoch Int?     @map("last_processed_epoch")
+  updatedAt          DateTime @updatedAt @map("updated_at")
+
+  @@map("stake_delegation_sync_state")
 }
 
 // Tracks per-epoch completion state for the governance analytics sync job.
 // This lets the job run frequently but only do heavy work once per epoch.
 model EpochAnalyticsSync {
-  epoch              Int       @id @map("epoch_no")
-  drepsSyncedAt      DateTime? @map("dreps_synced_at")
-  totalsSyncedAt     DateTime? @map("totals_synced_at")
-  delegatorsSyncedAt DateTime? @map("delegators_synced_at")
-  createdAt          DateTime  @default(now()) @map("created_at")
-  updatedAt          DateTime  @updatedAt @map("updated_at")
+  epoch          Int       @id @map("epoch_no")
+  drepsSyncedAt  DateTime? @map("dreps_synced_at")
+  totalsSyncedAt DateTime? @map("totals_synced_at")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @updatedAt @map("updated_at")
 
   @@map("epoch_analytics_sync")
 }
@@ -118,6 +153,13 @@ model SyncStatus {
   itemsProcessed Int?      @map("items_processed") // How many items were synced
   lockedBy       String?   @map("locked_by") // Container/instance ID
   expiresAt      DateTime? @map("expires_at") // Auto-unlock if crashed
+  backfillCursor         String?   @map("backfill_cursor")
+  backfillIsRunning      Boolean?  @default(false) @map("backfill_is_running")
+  backfillStartedAt      DateTime? @map("backfill_started_at")
+  backfillCompletedAt    DateTime? @map("backfill_completed_at")
+  backfillItemsProcessed Int?      @map("backfill_items_processed")
+  backfillItemsTotal     Int?      @map("backfill_items_total")
+  backfillErrorMessage   String?   @map("backfill_error_message")
   createdAt      DateTime  @default(now()) @map("created_at")
   updatedAt      DateTime  @updatedAt @map("updated_at")
 

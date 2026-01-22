@@ -255,14 +255,48 @@ export interface KoiosTotals {
 }
 
 /**
+ * Stake Account List from Koios API
+ * Endpoint: GET /account_list
+ */
+export interface KoiosAccountListEntry {
+  stake_address: string;
+  stake_address_hex?: string | null;
+  script_hash?: string | null;
+}
+
+/**
  * DRep Delegators from Koios API
  * Endpoint: GET /drep_delegators?_drep_id=<drepId>
  *
- * Note: Koios responses for delegator snapshots have been observed to include
- * `stake_address` and `amount` (lovelace). Some deployments may include `epoch_no`.
+ * Note: Koios responses for delegators include `stake_address` and `amount`
+ * (lovelace). Some deployments may include `epoch_no`.
  */
 export interface KoiosDrepDelegator {
   stake_address: string;
   amount: string;
   epoch_no?: number | null;
+}
+
+/**
+ * Stake Account Update History from Koios API
+ * Endpoint: POST /account_update_history
+ */
+export interface KoiosAccountUpdateHistoryEntry {
+  stake_address: string;
+  action_type: string;
+  tx_hash?: string | null;
+  epoch_no?: number | null;
+  epoch_slot?: number | null;
+  absolute_slot?: number | null;
+  block_time?: number | null;
+  drep_id?: string | null;
+  delegated_drep?: string | null;
+  drep?: string | null;
+  pool_id?: string | null;
+  pool_id_bech32?: string | null;
+  info?: {
+    drep_id?: string | null;
+    delegated_drep?: string | null;
+    drep?: string | null;
+  } | null;
 }

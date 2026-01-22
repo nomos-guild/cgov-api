@@ -8,12 +8,14 @@
  * - Inventory ALL DReps (Koios /drep_list) into DB (not just those who voted)
  * - At the start of each new epoch, sync the previous epoch's:
  *   - epoch totals / denominators (Koios /totals, /drep_epoch_summary, /pool_voting_power_history)
- *   - (optional) DRep delegator snapshots (Koios /drep_delegators)
  */
 
 import cron from "node-cron";
 import { prisma } from "../services";
-import { syncGovernanceAnalyticsForPreviousEpoch } from "../services/ingestion/epoch-analytics.service";
+import {
+  syncGovernanceAnalyticsForPreviousEpoch,
+  syncMissingEpochAnalytics,
+} from "../services/ingestion/epoch-analytics.service";
 
 // Simple in-process guard to prevent overlapping runs in a single Node process
 let isEpochAnalyticsSyncRunning = false;
@@ -21,28 +23,10 @@ let isEpochAnalyticsSyncRunning = false;
 /**
  * Starts the governance analytics epoch sync job.
  *
- * Schedule is configurable via EPOCH_ANALYTICS_SYNC_SCHEDULE env variable.
- * Defaults to every hour at minute 10.
+ * Runs every hour at minute 10.
  */
 export const startEpochAnalyticsSyncJob = () => {
-  const schedule = process.env.EPOCH_ANALYTICS_SYNC_SCHEDULE || "10 * * * *";
-  const enabled = process.env.ENABLE_CRON_JOBS !== "false";
-
-  if (!enabled) {
-    console.log(
-      "[Cron] Epoch analytics sync job disabled via ENABLE_CRON_JOBS env variable"
-    );
-    return;
-  }
-
-  if (!cron.validate(schedule)) {
-    console.error(
-      `[Cron] Invalid cron schedule: ${schedule}. Using default: 10 * * * *`
-    );
-    return startEpochAnalyticsSyncJobWithSchedule("10 * * * *");
-  }
-
-  startEpochAnalyticsSyncJobWithSchedule(schedule);
+  startEpochAnalyticsSyncJobWithSchedule("10 * * * *");
 };
 
 function startEpochAnalyticsSyncJobWithSchedule(schedule: string) {
@@ -82,18 +66,15 @@ function startEpochAnalyticsSyncJobWithSchedule(schedule: string) {
         console.log(`  Totals: skipped=${result.skipped.totals}`);
       }
 
-      if (result.delegators) {
-        console.log(
-          `  Delegators: drepsProcessed=${result.delegators.drepsProcessed}, rowsInserted=${result.delegators.rowsInserted}, failed=${result.delegators.failed.length}`
+      const backfill = await syncMissingEpochAnalytics(prisma);
+      console.log(
+        `  Missing epochs: range=${backfill.startEpoch}-${backfill.endEpoch}, totals missing=${backfill.totals.missing.length}, attempted=${backfill.totals.attempted.length}, synced=${backfill.totals.synced.length}, failed=${backfill.totals.failed.length}`
+      );
+      if (backfill.totals.failed.length > 0) {
+        console.error(
+          `  Missing totals: first failures:`,
+          backfill.totals.failed.slice(0, 10)
         );
-        if (result.delegators.failed.length > 0) {
-          console.error(
-            `  Delegators: first failures:`,
-            result.delegators.failed.slice(0, 10)
-          );
-        }
-      } else {
-        console.log(`  Delegators: skipped=${result.skipped.delegators}`);
       }
     } catch (error: any) {
       console.error(

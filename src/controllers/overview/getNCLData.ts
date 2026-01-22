@@ -46,7 +46,9 @@ export const getNCLData = async (_req: Request, res: Response) => {
  */
 export const getNCLDataByYear = async (req: Request, res: Response) => {
   try {
-    const year = parseInt(req.params.year, 10);
+    const rawYear = req.params.year;
+    const yearParam = Array.isArray(rawYear) ? rawYear[0] : rawYear;
+    const year = parseInt(yearParam ?? "", 10);
 
     if (isNaN(year)) {
       res.status(400).json({

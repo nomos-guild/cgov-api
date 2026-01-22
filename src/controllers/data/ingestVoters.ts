@@ -17,7 +17,8 @@ import {
  */
 export const postIngestDrep = async (req: Request, res: Response) => {
   try {
-    const { drep_id } = req.params;
+    const rawDrepId = req.params.drep_id;
+    const drep_id = Array.isArray(rawDrepId) ? rawDrepId[0] : rawDrepId;
 
     if (!drep_id) {
       return res.status(400).json({
@@ -65,7 +66,8 @@ export const postIngestDrep = async (req: Request, res: Response) => {
  */
 export const postIngestSpo = async (req: Request, res: Response) => {
   try {
-    const { pool_id } = req.params;
+    const rawPoolId = req.params.pool_id;
+    const pool_id = Array.isArray(rawPoolId) ? rawPoolId[0] : rawPoolId;
 
     if (!pool_id) {
       return res.status(400).json({
@@ -113,7 +115,8 @@ export const postIngestSpo = async (req: Request, res: Response) => {
  */
 export const postIngestCc = async (req: Request, res: Response) => {
   try {
-    const { cc_id } = req.params;
+    const rawCcId = req.params.cc_id;
+    const cc_id = Array.isArray(rawCcId) ? rawCcId[0] : rawCcId;
 
     if (!cc_id) {
       return res.status(400).json({
