@@ -609,6 +609,14 @@ export async function syncStakeAddressInventory(
 /**
  * Sync stake address delegation changes based on current DRep delegators.
  * This keeps a compact change log and a current-state table instead of per-epoch snapshots.
+ *
+ * Two-phase approach to reduce API rate limit pressure:
+ * - Phase 1: Collect all delegators from all DReps (only /drep_delegators calls)
+ * - Phase 2: Identify NEW stake addresses and backfill history only for those
+ * - Phase 3: Process delegator data to update states and detect changes
+ *
+ * After initial backfill, history is only fetched for newly discovered stake addresses.
+ * Changes for existing addresses are detected by comparing current delegator data to stored state.
  */
 export async function syncDrepDelegationChanges(
   prisma: Prisma.TransactionClient
@@ -650,84 +658,109 @@ export async function syncDrepDelegationChanges(
     `[DRep Delegation Sync] currentEpoch=${currentEpoch} lastProcessedEpoch=${lastProcessedEpoch} minVotingPower=${minVotingPower.toString()} drepCount=${drepIds.length}`
   );
 
+  // Check backfill status
+  const backfillStatus = (await (prisma as any).syncStatus.findUnique({
+    where: { jobName: DREP_DELEGATION_BACKFILL_JOB_NAME },
+  })) as any;
+  const backfillCompleted = !!backfillStatus?.backfillCompletedAt;
+  const hasBackfillCheckpoint =
+    !!backfillStatus?.backfillCursor && !backfillCompleted;
+  const shouldBackfill = !backfillCompleted;
+
+  // ============================================================
+  // PHASE 1: Collect all delegators from all DReps
+  // ============================================================
+  console.log(`[DRep Delegation Sync] Phase 1: Collecting delegators from all DReps...`);
+
+  // Map: stakeAddress -> { drepId, delegator data }
+  const allDelegatorsByStake = new Map<
+    string,
+    { drepId: string; delegator: KoiosDrepDelegator }
+  >();
+  // Track all unique stake addresses
+  const allStakeAddresses = new Set<string>();
+
+  const delegatorFetchResult = await processInParallel(
+    drepIds,
+    (drepId) => drepId,
+    async (drepId) => {
+      const delegators = await fetchDelegatorsForDrep(drepId);
+      const validDelegators = (delegators ?? []).filter(
+        (row) => row?.stake_address && row?.amount
+      );
+      return { drepId, delegators: validDelegators };
+    },
+    DREP_DELEGATION_SYNC_CONCURRENCY
+  );
+
+  if (delegatorFetchResult.failed.length > 0) {
+    console.warn(
+      `[DRep Delegation Sync] Phase 1 fetch failures: ${delegatorFetchResult.failed.length}`
+    );
+  }
+
+  // Aggregate all delegator data
+  for (const { drepId, delegators } of delegatorFetchResult.successful) {
+    for (const delegator of delegators) {
+      const stakeAddress = delegator.stake_address;
+      allStakeAddresses.add(stakeAddress);
+      // If a stake address appears under multiple DReps, keep the latest one
+      // (shouldn't happen normally, but handle gracefully)
+      allDelegatorsByStake.set(stakeAddress, { drepId, delegator });
+    }
+  }
+
+  console.log(
+    `[DRep Delegation Sync] Phase 1 complete: ${allStakeAddresses.size} unique stake addresses from ${delegatorFetchResult.successful.length} DReps`
+  );
+
+  // ============================================================
+  // PHASE 2: Identify NEW stake addresses and backfill history
+  // ============================================================
+  console.log(`[DRep Delegation Sync] Phase 2: Identifying new stake addresses...`);
+
   const backfilledStakeAddresses = new Set<string>();
   const latestHistoryByStake = new Map<
     string,
     { drepId: string; epochNo: number | null }
   >();
 
-  const stakeAddressCount = await delegationClient.stakeAddress.count();
-  const backfillStatus = (await (prisma as any).syncStatus.findUnique({
-    where: { jobName: DREP_DELEGATION_BACKFILL_JOB_NAME },
-  })) as any;
-  const backfillCompleted = !!backfillStatus?.backfillCompletedAt;
-  const hasBackfillCheckpoint = !!backfillStatus?.backfillCursor && !backfillCompleted;
-  const shouldBackfill = !backfillCompleted;
-
-  if (shouldBackfill && stakeAddressCount === 0) {
-    console.log(
-      `[DRep Delegation Sync] StakeAddress table empty. Seeding from current delegators and backfilling history...`
-    );
-    const stakeAddressSet = new Set<string>();
-    const initialFetch = await processInParallel(
-      drepIds,
-      (drepId) => drepId,
-      async (drepId) => {
-        const delegators = await fetchDelegatorsForDrep(drepId);
-        if (delegators && delegators.length > 0) {
-          for (const row of delegators) {
-            if (row?.stake_address) {
-              stakeAddressSet.add(row.stake_address);
-            }
-          }
-        }
-        return delegators?.length ?? 0;
-      },
-      DREP_DELEGATION_SYNC_CONCURRENCY
-    );
-    if (initialFetch.failed.length > 0) {
-      console.warn(
-        `[DRep Delegation Sync] Initial delegator fetch failures: ${initialFetch.failed.length}`
-      );
-    }
-    const stakeAddresses = Array.from(stakeAddressSet);
-    if (stakeAddresses.length > 0) {
-      await delegationClient.stakeAddress.createMany({
-        data: stakeAddresses.map((stakeAddress) => ({ stakeAddress })),
-        skipDuplicates: true,
-      });
-      const backfill = await backfillStakeDelegationHistory(
-        delegationClient,
-        stakeAddresses,
-        {
-          jobName: DREP_DELEGATION_BACKFILL_JOB_NAME,
-          displayName: "DRep Delegation Backfill",
-        }
-      );
-      for (const [stakeAddress, latest] of backfill.latestByStake.entries()) {
-        latestHistoryByStake.set(stakeAddress, latest);
-        backfilledStakeAddresses.add(stakeAddress);
-      }
-      console.log(
-        `[DRep Delegation Sync] Backfill complete: stakeAddresses=${stakeAddresses.length}, changesInserted=${backfill.changesInserted}`
-      );
-    } else {
-      console.log(
-        `[DRep Delegation Sync] Backfill skipped: no delegators returned.`
-      );
-    }
-  } else if (shouldBackfill && stakeAddressCount > 0) {
-    const backfillAction = hasBackfillCheckpoint ? "Resuming" : "Starting";
-    console.log(
-      `[DRep Delegation Sync] ${backfillAction} backfill from cursor=${backfillStatus?.backfillCursor ?? "null"}`
-    );
-    const existingStakeAddresses = await delegationClient.stakeAddress.findMany({
+  // Get existing stake addresses from DB
+  const existingStakeAddressRows: Array<{ stakeAddress: string }> =
+    await delegationClient.stakeAddress.findMany({
       select: { stakeAddress: true },
     });
-    const stakeAddresses = existingStakeAddresses.map((row) => row.stakeAddress);
+  const existingStakeAddressSet = new Set<string>(
+    existingStakeAddressRows.map((row) => row.stakeAddress)
+  );
+
+  // Determine new stake addresses
+  const allStakeAddressArray = Array.from(allStakeAddresses);
+  const newStakeAddresses = allStakeAddressArray.filter(
+    (addr) => !existingStakeAddressSet.has(addr)
+  );
+
+  console.log(
+    `[DRep Delegation Sync] Found ${newStakeAddresses.length} new stake addresses (existing: ${existingStakeAddressSet.size})`
+  );
+
+  // Create all stake address records (new ones)
+  if (newStakeAddresses.length > 0) {
+    await delegationClient.stakeAddress.createMany({
+      data: newStakeAddresses.map((stakeAddress) => ({ stakeAddress })),
+      skipDuplicates: true,
+    });
+  }
+
+  // Handle initial backfill vs incremental sync
+  if (shouldBackfill && existingStakeAddressSet.size === 0) {
+    // Initial backfill: fetch history for ALL stake addresses
+    console.log(
+      `[DRep Delegation Sync] Initial backfill: fetching history for all ${allStakeAddressArray.length} stake addresses...`
+    );
     const backfill = await backfillStakeDelegationHistory(
       delegationClient,
-      stakeAddresses,
+      allStakeAddressArray,
       {
         jobName: DREP_DELEGATION_BACKFILL_JOB_NAME,
         displayName: "DRep Delegation Backfill",
@@ -738,277 +771,208 @@ export async function syncDrepDelegationChanges(
       backfilledStakeAddresses.add(stakeAddress);
     }
     console.log(
-      `[DRep Delegation Sync] Backfill resumed: stakeAddresses=${stakeAddresses.length}, changesInserted=${backfill.changesInserted}`
+      `[DRep Delegation Sync] Initial backfill complete: changesInserted=${backfill.changesInserted}`
     );
-  } else if (!shouldBackfill) {
+  } else if (shouldBackfill && hasBackfillCheckpoint) {
+    // Resume interrupted backfill
     console.log(
-      `[DRep Delegation Sync] Backfill skipped: sync status indicates completion.`
+      `[DRep Delegation Sync] Resuming backfill from cursor=${backfillStatus?.backfillCursor ?? "null"}`
+    );
+    const allExistingAddresses = Array.from(existingStakeAddressSet);
+    const backfill = await backfillStakeDelegationHistory(
+      delegationClient,
+      allExistingAddresses,
+      {
+        jobName: DREP_DELEGATION_BACKFILL_JOB_NAME,
+        displayName: "DRep Delegation Backfill",
+      }
+    );
+    for (const [stakeAddress, latest] of backfill.latestByStake.entries()) {
+      latestHistoryByStake.set(stakeAddress, latest);
+      backfilledStakeAddresses.add(stakeAddress);
+    }
+    console.log(
+      `[DRep Delegation Sync] Backfill resumed: changesInserted=${backfill.changesInserted}`
+    );
+  } else if (newStakeAddresses.length > 0) {
+    // Incremental sync: only backfill history for NEW stake addresses
+    console.log(
+      `[DRep Delegation Sync] Incremental sync: backfilling history for ${newStakeAddresses.length} new stake addresses only...`
+    );
+    const backfill = await backfillStakeDelegationHistory(
+      delegationClient,
+      newStakeAddresses
+    );
+    for (const [stakeAddress, latest] of backfill.latestByStake.entries()) {
+      latestHistoryByStake.set(stakeAddress, latest);
+      backfilledStakeAddresses.add(stakeAddress);
+    }
+    console.log(
+      `[DRep Delegation Sync] Incremental backfill complete: changesInserted=${backfill.changesInserted}`
+    );
+  } else {
+    console.log(
+      `[DRep Delegation Sync] No new stake addresses - skipping history backfill`
     );
   }
 
-  const processDrepDelegators = async (drepId: string) => {
-    console.log(`[DRep Delegation Sync] Fetching delegators for ${drepId}`);
-    const delegators = await fetchDelegatorsForDrep(drepId);
-    console.log(
-      `[DRep Delegation Sync] ${drepId} delegators=${delegators?.length ?? 0}`
-    );
-    if (!delegators || delegators.length === 0) {
-      return {
-        drepId,
-        delegatorsProcessed: 0,
-        statesUpdated: 0,
-        changesInserted: 0,
-        maxDelegationEpoch: lastProcessedEpoch,
-      };
+  // ============================================================
+  // PHASE 3: Process delegator data - update states, detect changes
+  // ============================================================
+  console.log(`[DRep Delegation Sync] Phase 3: Processing delegator state updates...`);
+
+  // Fetch all existing delegation states for the stake addresses we're processing
+  const existingStates: Array<{
+    stakeAddress: string;
+    drepId: string | null;
+    amount: bigint | null;
+    delegatedEpoch: number | null;
+  }> = await delegationClient.stakeDelegationState.findMany({
+    where: { stakeAddress: { in: allStakeAddressArray } },
+    select: {
+      stakeAddress: true,
+      drepId: true,
+      amount: true,
+      delegatedEpoch: true,
+    },
+  });
+  const existingStateMap = new Map(
+    existingStates.map((row) => [row.stakeAddress, row])
+  );
+
+  const toCreate: Array<{
+    stakeAddress: string;
+    drepId: string;
+    amount: bigint;
+    delegatedEpoch: number | null;
+  }> = [];
+  const toUpdate: Array<{
+    stakeAddress: string;
+    drepId: string;
+    amount: bigint;
+    delegatedEpoch: number | null;
+  }> = [];
+  const changeLog: Array<{
+    stakeAddress: string;
+    fromDrepId: string | null;
+    toDrepId: string;
+    delegatedEpoch: number | null;
+    amount: bigint;
+  }> = [];
+
+  let maxDelegationEpoch = lastProcessedEpoch;
+
+  // Process each delegator
+  for (const [stakeAddress, { drepId, delegator }] of allDelegatorsByStake) {
+    const epochNo =
+      typeof delegator.epoch_no === "number" ? delegator.epoch_no : null;
+    const normalizedEpoch = epochNo ?? Math.max(0, currentEpoch - 1);
+    const delegatedEpoch = epochNo ?? normalizedEpoch;
+
+    if (normalizedEpoch > maxDelegationEpoch) {
+      maxDelegationEpoch = normalizedEpoch;
     }
 
-    const validDelegators = delegators.filter(
-      (row) => row?.stake_address && row?.amount
-    );
-    if (validDelegators.length === 0) {
-      return {
-        drepId,
-        delegatorsProcessed: 0,
-        statesUpdated: 0,
-        changesInserted: 0,
-        maxDelegationEpoch: lastProcessedEpoch,
-      };
-    }
+    const amount = BigInt(delegator.amount);
+    const currentState = existingStateMap.get(stakeAddress);
+    const stateChanged = !currentState || currentState.drepId !== drepId;
+    const stateNeedsUpdate =
+      !currentState ||
+      currentState.drepId !== drepId ||
+      currentState.amount !== amount ||
+      currentState.delegatedEpoch !== delegatedEpoch;
 
-    const stakeAddresses = Array.from(
-      new Set(validDelegators.map((row) => row.stake_address))
-    );
+    // Check if this change was already recorded via history backfill
+    const historyLatest = latestHistoryByStake.get(stakeAddress);
+    const historyMatchesCurrent =
+      historyLatest?.drepId === drepId &&
+      backfilledStakeAddresses.has(stakeAddress);
 
-    const existingStakeAddresses = await delegationClient.stakeAddress.findMany({
-      where: { stakeAddress: { in: stakeAddresses } },
-      select: { stakeAddress: true },
-    });
-    const existingStakeAddressSet = new Set(
-      existingStakeAddresses.map((row) => row.stakeAddress)
-    );
-    const newStakeAddresses = stakeAddresses.filter(
-      (stakeAddress) => !existingStakeAddressSet.has(stakeAddress)
-    );
-
-    await delegationClient.stakeAddress.createMany({
-      data: stakeAddresses.map((stakeAddress) => ({ stakeAddress })),
-      skipDuplicates: true,
-    });
-
-    if (newStakeAddresses.length > 0) {
-      const backfill = await backfillStakeDelegationHistory(
-        delegationClient,
-        newStakeAddresses
-      );
-      for (const [stakeAddress, latest] of backfill.latestByStake.entries()) {
-        latestHistoryByStake.set(stakeAddress, latest);
-        backfilledStakeAddresses.add(stakeAddress);
-      }
-      console.log(
-        `[DRep Delegation Sync] Backfilled ${newStakeAddresses.length} new stake addresses (changesInserted=${backfill.changesInserted})`
-      );
-    }
-
-    const existingStates: Array<{
-      stakeAddress: string;
-      drepId: string | null;
-      amount: bigint | null;
-      delegatedEpoch: number | null;
-    }> = await delegationClient.stakeDelegationState.findMany({
-      where: { stakeAddress: { in: stakeAddresses } },
-      select: {
-        stakeAddress: true,
-        drepId: true,
-        amount: true,
-        delegatedEpoch: true,
-      },
-    });
-    const existingMap = new Map(
-      existingStates.map((row) => [row.stakeAddress, row])
-    );
-
-    const toCreate: Array<{
-      stakeAddress: string;
-      drepId: string;
-      amount: bigint;
-      delegatedEpoch: number | null;
-    }> = [];
-    const toUpdate: Array<{
-      stakeAddress: string;
-      drepId: string;
-      amount: bigint;
-      delegatedEpoch: number | null;
-    }> = [];
-    const changeLog: Array<{
-      stakeAddress: string;
-      fromDrepId: string | null;
-      toDrepId: string;
-      delegatedEpoch: number | null;
-      amount: bigint;
-    }> = [];
-
-    let maxDelegationEpoch = lastProcessedEpoch;
-
-    for (const delegator of validDelegators) {
-      const stakeAddress = delegator.stake_address;
-      const epochNo =
-        typeof delegator.epoch_no === "number" ? delegator.epoch_no : null;
-      const normalizedEpoch = epochNo ?? Math.max(0, currentEpoch - 1);
-      const delegatedEpoch = epochNo ?? normalizedEpoch;
-
-      if (normalizedEpoch > maxDelegationEpoch) {
-        maxDelegationEpoch = normalizedEpoch;
-      }
-
-      const amount = BigInt(delegator.amount);
-      const currentState = existingMap.get(stakeAddress);
-      const stateChanged = !currentState || currentState.drepId !== drepId;
-      const stateNeedsUpdate =
-        !currentState ||
-        currentState.drepId !== drepId ||
-        currentState.amount !== amount ||
-        currentState.delegatedEpoch !== delegatedEpoch;
-
-      const historyLatest = latestHistoryByStake.get(stakeAddress);
-      const historyMatchesCurrent =
-        historyLatest?.drepId === drepId &&
-        backfilledStakeAddresses.has(stakeAddress);
-
-      if (stateChanged && !historyMatchesCurrent) {
-        changeLog.push({
-          stakeAddress,
-          fromDrepId: currentState?.drepId ?? null,
-          toDrepId: drepId,
-          delegatedEpoch,
-          amount,
-        });
-      }
-
-      if (stateNeedsUpdate) {
-        if (!currentState) {
-          toCreate.push({
-            stakeAddress,
-            drepId,
-            amount,
-            delegatedEpoch,
-          });
-        } else {
-          toUpdate.push({
-            stakeAddress,
-            drepId,
-            amount,
-            delegatedEpoch,
-          });
-        }
-      }
-    }
-
-    if (toCreate.length > 0) {
-      await delegationClient.stakeDelegationState.createMany({
-        data: toCreate,
-        skipDuplicates: true,
+    // Record change if DRep changed and not already in history
+    if (stateChanged && !historyMatchesCurrent) {
+      changeLog.push({
+        stakeAddress,
+        fromDrepId: currentState?.drepId ?? null,
+        toDrepId: drepId,
+        delegatedEpoch,
+        amount,
       });
     }
 
-    if (toUpdate.length > 0) {
-      const chunkSize = 500;
-      for (let i = 0; i < toUpdate.length; i += chunkSize) {
-        const chunk = toUpdate.slice(i, i + chunkSize);
-        await Promise.all(
-          chunk.map((row) =>
-            delegationClient.stakeDelegationState.update({
-              where: { stakeAddress: row.stakeAddress },
-              data: {
-                drepId: row.drepId,
-                amount: row.amount,
-                delegatedEpoch: row.delegatedEpoch,
-              },
-            })
-          )
-        );
+    // Queue state update
+    if (stateNeedsUpdate) {
+      if (!currentState) {
+        toCreate.push({ stakeAddress, drepId, amount, delegatedEpoch });
+      } else {
+        toUpdate.push({ stakeAddress, drepId, amount, delegatedEpoch });
       }
     }
-
-    if (changeLog.length > 0) {
-      const chunkSize = 1000;
-      for (let i = 0; i < changeLog.length; i += chunkSize) {
-        const chunk = changeLog.slice(i, i + chunkSize);
-        await delegationClient.stakeDelegationChange.createMany({
-          data: chunk,
-        });
-      }
-    }
-
-    return {
-      drepId,
-      delegatorsProcessed: validDelegators.length,
-      statesUpdated: toCreate.length + toUpdate.length,
-      changesInserted: changeLog.length,
-      maxDelegationEpoch,
-    };
-  };
-
-  const result = await processInParallel(
-    drepIds,
-    (drepId) => drepId,
-    processDrepDelegators,
-    DREP_DELEGATION_SYNC_CONCURRENCY
-  );
-
-  if (result.failed.length > 0) {
-    console.warn(
-      `[DRep Delegation Sync] Retrying failed DReps (${result.failed.length}) with concurrency=1`
-    );
-    const retryIds = result.failed.map((item) => item.id);
-    const retryResult = await processInParallel(
-      retryIds,
-      (drepId) => drepId,
-      processDrepDelegators,
-      1
-    );
-    result.failed = retryResult.failed;
-    result.successful.push(...retryResult.successful);
   }
 
-  const failed = result.failed.map((f) => ({ drepId: f.id, error: f.error }));
-  const successful = result.successful;
+  // Batch create new states
+  if (toCreate.length > 0) {
+    await delegationClient.stakeDelegationState.createMany({
+      data: toCreate,
+      skipDuplicates: true,
+    });
+  }
 
-  const aggregated = successful.reduce(
-    (acc, item) => {
-      acc.delegatorsProcessed += item.delegatorsProcessed;
-      acc.statesUpdated += item.statesUpdated;
-      acc.changesInserted += item.changesInserted;
-      acc.maxDelegationEpoch = Math.max(
-        acc.maxDelegationEpoch,
-        item.maxDelegationEpoch
+  // Batch update existing states
+  if (toUpdate.length > 0) {
+    const chunkSize = 500;
+    for (let i = 0; i < toUpdate.length; i += chunkSize) {
+      const chunk = toUpdate.slice(i, i + chunkSize);
+      await Promise.all(
+        chunk.map((row) =>
+          delegationClient.stakeDelegationState.update({
+            where: { stakeAddress: row.stakeAddress },
+            data: {
+              drepId: row.drepId,
+              amount: row.amount,
+              delegatedEpoch: row.delegatedEpoch,
+            },
+          })
+        )
       );
-      acc.drepsProcessed += 1;
-      return acc;
-    },
-    {
-      delegatorsProcessed: 0,
-      statesUpdated: 0,
-      changesInserted: 0,
-      maxDelegationEpoch: lastProcessedEpoch,
-      drepsProcessed: 0,
     }
+  }
+
+  // Batch insert change log entries
+  if (changeLog.length > 0) {
+    const chunkSize = 1000;
+    for (let i = 0; i < changeLog.length; i += chunkSize) {
+      const chunk = changeLog.slice(i, i + chunkSize);
+      await delegationClient.stakeDelegationChange.createMany({
+        data: chunk,
+      });
+    }
+  }
+
+  console.log(
+    `[DRep Delegation Sync] Phase 3 complete: created=${toCreate.length}, updated=${toUpdate.length}, changes=${changeLog.length}`
   );
 
-  if (failed.length === 0 && aggregated.maxDelegationEpoch >= lastProcessedEpoch) {
+  // Update sync state
+  const failed = delegatorFetchResult.failed.map((f) => ({
+    drepId: f.id,
+    error: f.error,
+  }));
+
+  if (failed.length === 0 && maxDelegationEpoch >= lastProcessedEpoch) {
     await delegationClient.stakeDelegationSyncState.update({
       where: { id: STAKE_DELEGATION_SYNC_STATE_ID },
-      data: { lastProcessedEpoch: aggregated.maxDelegationEpoch },
+      data: { lastProcessedEpoch: maxDelegationEpoch },
     });
   }
 
   return {
     currentEpoch,
     lastProcessedEpoch,
-    maxDelegationEpoch: aggregated.maxDelegationEpoch,
-    drepsProcessed: aggregated.drepsProcessed,
-    delegatorsProcessed: aggregated.delegatorsProcessed,
-    statesUpdated: aggregated.statesUpdated,
-    changesInserted: aggregated.changesInserted,
+    maxDelegationEpoch,
+    drepsProcessed: delegatorFetchResult.successful.length,
+    delegatorsProcessed: allDelegatorsByStake.size,
+    statesUpdated: toCreate.length + toUpdate.length,
+    changesInserted: changeLog.length,
     failed,
   };
 }
