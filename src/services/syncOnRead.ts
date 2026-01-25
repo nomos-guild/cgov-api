@@ -294,19 +294,34 @@ async function doProposalSync(identifier: string): Promise<void> {
     );
 
     // Re-ingest the proposal to get updated votes
+    // Use deferExpiredStatus to ensure full sync completes before marking expired
     const koiosProposals = await koiosGet<KoiosProposal[]>("/proposal_list");
     const koiosProposal = koiosProposals?.find(
       (p) => p.proposal_id === dbProposal.proposalId
     );
 
     if (koiosProposal) {
-      await ingestProposalData(koiosProposal, {
+      const result = await ingestProposalData(koiosProposal, {
         minVotesEpoch: koiosProposal.proposed_epoch,
         useCache: false, // Don't use global cache for on-demand sync
+        deferExpiredStatus: true, // Keep ACTIVE until sync completes
       });
-      console.log(
-        `[Sync-on-Read] ✓ Re-synced proposal ${dbProposal.proposalId}`
-      );
+
+      // After successful sync, update to the intended status if different
+      // This ensures the proposal is only marked EXPIRED after all data is synced
+      if (result.intendedStatus && result.intendedStatus !== result.proposal.status) {
+        await prisma.proposal.update({
+          where: { proposalId: dbProposal.proposalId },
+          data: { status: result.intendedStatus },
+        });
+        console.log(
+          `[Sync-on-Read] ✓ Re-synced proposal ${dbProposal.proposalId} and updated status to ${result.intendedStatus}`
+        );
+      } else {
+        console.log(
+          `[Sync-on-Read] ✓ Re-synced proposal ${dbProposal.proposalId}`
+        );
+      }
     }
   } else {
     console.log(`[Sync-on-Read] No changes for ${dbProposal.proposalId}`);

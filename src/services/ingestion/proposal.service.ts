@@ -34,6 +34,13 @@ export interface ProposalIngestionResult {
     status: ProposalStatus;
   };
   stats: VoteIngestionStats;
+  /**
+   * The intended final status for the proposal.
+   * When deferExpiredStatus is true and the proposal should be EXPIRED/CLOSED,
+   * status will be ACTIVE but intendedStatus will be EXPIRED/CLOSED.
+   * The caller should update the status after successful sync completion.
+   */
+  intendedStatus?: ProposalStatus;
 }
 
 /**
@@ -60,6 +67,14 @@ export interface IngestProposalOptions {
    * (ideal for sync-on-read).
    */
   useCache?: boolean;
+  /**
+   * When true, keeps the proposal status as ACTIVE during ingestion even if
+   * the derived status would be EXPIRED/CLOSED. The intended final status is
+   * returned in the result so the caller can update it after successful sync.
+   * This ensures interrupted syncs will retry on the next read.
+   * (Ideal for sync-on-read to ensure data is fully synced before marking expired)
+   */
+  deferExpiredStatus?: boolean;
 }
 
 /**
@@ -79,7 +94,7 @@ export async function ingestProposalData(
   koiosProposal: KoiosProposal,
   options?: IngestProposalOptions
 ): Promise<ProposalIngestionResult> {
-  const { currentEpoch: currentEpochOverride, minVotesEpoch: minVotesEpochOverride, useCache } = options ?? {};
+  const { currentEpoch: currentEpochOverride, minVotesEpoch: minVotesEpochOverride, useCache, deferExpiredStatus } = options ?? {};
   // Wrap entire operation in retry logic
   return withRetry(async () => {
     // 1. Get current epoch for status calculation
@@ -101,7 +116,20 @@ export async function ingestProposalData(
     }
 
     // 3. Derive status from epoch fields
-    const status = deriveProposalStatus(koiosProposal, currentEpoch);
+    const derivedStatus = deriveProposalStatus(koiosProposal, currentEpoch);
+
+    // When deferExpiredStatus is true, keep the proposal ACTIVE during ingestion
+    // so that if the sync is interrupted, it will retry on the next read.
+    // The intended status is returned so the caller can update it after successful sync.
+    const isExpiredOrClosed =
+      derivedStatus === ProposalStatus.EXPIRED ||
+      derivedStatus === ProposalStatus.CLOSED;
+    const status =
+      deferExpiredStatus && isExpiredOrClosed
+        ? ProposalStatus.ACTIVE
+        : derivedStatus;
+    const intendedStatus =
+      deferExpiredStatus && isExpiredOrClosed ? derivedStatus : undefined;
 
     // 4. Extract metadata (from meta_json or fetch from meta_url)
     const { title, description, rationale, metadata } =
@@ -226,6 +254,7 @@ export async function ingestProposalData(
         status: proposal.status,
       },
       stats: voteStats,
+      intendedStatus,
     };
   });
 }
