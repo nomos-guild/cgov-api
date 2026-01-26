@@ -103,6 +103,9 @@ model StakeDelegationState {
 }
 
 // Append-only change log for stake address DRep delegation changes.
+// NOTE: A unique index exists at DB level using COALESCE to handle NULLs:
+//   UNIQUE(stake_address, COALESCE(from_drep_id,''), COALESCE(to_drep_id,''), COALESCE(delegated_epoch_no,-1))
+// Use createMany({ skipDuplicates: true }) when inserting to handle job restarts gracefully.
 model StakeDelegationChange {
   id             Int      @id @default(autoincrement())
   stakeAddress   String   @map("stake_address")
@@ -131,11 +134,12 @@ model StakeDelegationSyncState {
 // Tracks per-epoch completion state for the governance analytics sync job.
 // This lets the job run frequently but only do heavy work once per epoch.
 model EpochAnalyticsSync {
-  epoch          Int       @id @map("epoch_no")
-  drepsSyncedAt  DateTime? @map("dreps_synced_at")
-  totalsSyncedAt DateTime? @map("totals_synced_at")
-  createdAt      DateTime  @default(now()) @map("created_at")
-  updatedAt      DateTime  @updatedAt @map("updated_at")
+  epoch            Int       @id @map("epoch_no")
+  drepsSyncedAt    DateTime? @map("dreps_synced_at")
+  drepInfoSyncedAt DateTime? @map("drep_info_synced_at")
+  totalsSyncedAt   DateTime? @map("totals_synced_at")
+  createdAt        DateTime  @default(now()) @map("created_at")
+  updatedAt        DateTime  @updatedAt @map("updated_at")
 
   @@map("epoch_analytics_sync")
 }

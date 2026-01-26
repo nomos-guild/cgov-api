@@ -58,6 +58,14 @@ function startEpochAnalyticsSyncJobWithSchedule(schedule: string) {
         console.log(`  DReps: skipped=${result.skipped.dreps}`);
       }
 
+      if (result.drepInfo) {
+        console.log(
+          `  DRep Info: total=${result.drepInfo.totalDreps}, updated=${result.drepInfo.updated}, failedBatches=${result.drepInfo.failedBatches}`
+        );
+      } else {
+        console.log(`  DRep Info: skipped=${result.skipped.drepInfo}`);
+      }
+
       if (result.totals) {
         console.log(
           `  Totals: upserted=${result.totals.upserted}, circulation=${result.totals.circulation?.toString() ?? "null"}, treasury=${result.totals.treasury?.toString() ?? "null"}, delegatedDrepPower=${result.totals.delegatedDrepPower?.toString() ?? "null"}, totalPoolVotePower=${result.totals.totalPoolVotePower?.toString() ?? "null"}`

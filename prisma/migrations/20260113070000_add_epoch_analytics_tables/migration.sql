@@ -38,7 +38,7 @@ CREATE TABLE "epoch_totals" (
 CREATE TABLE "epoch_analytics_sync" (
     "epoch_no" INTEGER NOT NULL,
     "dreps_synced_at" TIMESTAMP(3),
-    "delegators_synced_at" TIMESTAMP(3),
+    "drep_info_synced_at" TIMESTAMP(3),
     "totals_synced_at" TIMESTAMP(3),
     "created_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updated_at" TIMESTAMP(3) NOT NULL,
@@ -97,6 +97,16 @@ CREATE INDEX "stake_delegation_change_stake_address_idx" ON "stake_delegation_ch
 
 -- CreateIndex
 CREATE INDEX "stake_delegation_change_to_drep_id_idx" ON "stake_delegation_change"("to_drep_id");
+
+-- CreateIndex (unique constraint to prevent duplicate change entries on job interruption/restart)
+-- Uses COALESCE to handle NULLs since PostgreSQL treats NULLs as distinct in unique indexes
+CREATE UNIQUE INDEX "stake_delegation_change_unique_change_idx" 
+ON "stake_delegation_change"(
+    "stake_address", 
+    COALESCE("from_drep_id", ''), 
+    COALESCE("to_drep_id", ''), 
+    COALESCE("delegated_epoch_no", -1)
+);
 
 -- AddForeignKey
 ALTER TABLE "stake_delegation_state" ADD CONSTRAINT "stake_delegation_state_stake_address_fkey" FOREIGN KEY ("stake_address") REFERENCES "stake_address"("stake_address") ON DELETE RESTRICT ON UPDATE CASCADE;
