@@ -106,13 +106,14 @@ CREATE TABLE IF NOT EXISTS "stake_delegation_state" (
 
 -- ============================================================
 -- CreateTable: stake_delegation_change - Append-only change log
+-- Uses sentinel values: "" for no DRep, -1 for unknown epoch
 -- ============================================================
 CREATE TABLE IF NOT EXISTS "stake_delegation_change" (
     "id" SERIAL NOT NULL,
     "stake_address" TEXT NOT NULL,
-    "from_drep_id" TEXT,
-    "to_drep_id" TEXT,
-    "delegated_epoch_no" INTEGER,
+    "from_drep_id" TEXT NOT NULL DEFAULT '',
+    "to_drep_id" TEXT NOT NULL DEFAULT '',
+    "delegated_epoch_no" INTEGER NOT NULL DEFAULT -1,
     "amount" BIGINT,
     "observed_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
@@ -176,14 +177,9 @@ CREATE INDEX IF NOT EXISTS "stake_delegation_change_stake_address_idx" ON "stake
 CREATE INDEX IF NOT EXISTS "stake_delegation_change_to_drep_id_idx" ON "stake_delegation_change"("to_drep_id");
 
 -- Unique constraint to prevent duplicate change entries on job interruption/restart
--- Uses COALESCE to handle NULLs since PostgreSQL treats NULLs as distinct in unique indexes
-CREATE UNIQUE INDEX IF NOT EXISTS "stake_delegation_change_unique_change_idx" 
-ON "stake_delegation_change"(
-    "stake_address", 
-    COALESCE("from_drep_id", ''), 
-    COALESCE("to_drep_id", ''), 
-    COALESCE("delegated_epoch_no", -1)
-);
+ALTER TABLE "stake_delegation_change"
+ADD CONSTRAINT "stake_delegation_change_stake_address_from_drep_id_to_drep__key"
+UNIQUE ("stake_address", "from_drep_id", "to_drep_id", "delegated_epoch_no");
 
 -- ============================================================
 -- CreateIndexes: drep_lifecycle_event
@@ -193,13 +189,9 @@ CREATE INDEX IF NOT EXISTS "drep_lifecycle_event_epoch_no_idx" ON "drep_lifecycl
 CREATE INDEX IF NOT EXISTS "drep_lifecycle_event_action_idx" ON "drep_lifecycle_event"("action");
 
 -- Unique constraint to prevent duplicate lifecycle events
-CREATE UNIQUE INDEX IF NOT EXISTS "drep_lifecycle_event_unique_idx"
-ON "drep_lifecycle_event"(
-    "drep_id",
-    "action",
-    "epoch_no",
-    COALESCE("tx_hash", '')
-);
+ALTER TABLE "drep_lifecycle_event" 
+ADD CONSTRAINT "drep_lifecycle_event_drep_id_action_epoch_no_tx_hash_key" 
+UNIQUE ("drep_id", "action", "epoch_no", "tx_hash");
 
 -- ============================================================
 -- CreateIndexes: pool_group

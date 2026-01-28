@@ -111,20 +111,20 @@ model StakeDelegationState {
 }
 
 // Append-only change log for stake address DRep delegation changes.
-// NOTE: A unique index exists at DB level using COALESCE to handle NULLs:
-//   UNIQUE(stake_address, COALESCE(from_drep_id,''), COALESCE(to_drep_id,''), COALESCE(delegated_epoch_no,-1))
+// Uses sentinel values for uniqueness: "" for no DRep, -1 for unknown epoch.
 // Use createMany({ skipDuplicates: true }) when inserting to handle job restarts gracefully.
 model StakeDelegationChange {
   id             Int      @id @default(autoincrement())
   stakeAddress   String   @map("stake_address")
-  fromDrepId     String?  @map("from_drep_id")
-  toDrepId       String?  @map("to_drep_id")
-  delegatedEpoch Int?     @map("delegated_epoch_no")
+  fromDrepId     String   @default("") @map("from_drep_id") // "" = no previous DRep
+  toDrepId       String   @default("") @map("to_drep_id")   // "" = no new DRep
+  delegatedEpoch Int      @default(-1) @map("delegated_epoch_no") // -1 = unknown
   amount         BigInt?  @map("amount")
   observedAt     DateTime @default(now()) @map("observed_at")
 
   stakeAddressRef StakeAddress @relation(fields: [stakeAddress], references: [stakeAddress])
 
+  @@unique([stakeAddress, fromDrepId, toDrepId, delegatedEpoch])
   @@index([stakeAddress])
   @@index([toDrepId])
   @@map("stake_delegation_change")

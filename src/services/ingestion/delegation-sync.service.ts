@@ -115,18 +115,18 @@ function buildDrepChangeLogForStake(
 ): {
   changes: Array<{
     stakeAddress: string;
-    fromDrepId: string | null;
+    fromDrepId: string;      // "" = no previous DRep (sentinel)
     toDrepId: string;
-    delegatedEpoch: number | null;
+    delegatedEpoch: number;  // -1 = unknown epoch (sentinel)
     amount: bigint | null;
   }>;
   latest: { drepId: string; epochNo: number | null } | null;
 } {
   const changes: Array<{
     stakeAddress: string;
-    fromDrepId: string | null;
+    fromDrepId: string;
     toDrepId: string;
-    delegatedEpoch: number | null;
+    delegatedEpoch: number;
     amount: bigint | null;
   }> = [];
 
@@ -138,16 +138,16 @@ function buildDrepChangeLogForStake(
     const drepId = extractDelegatedDrepId(entry);
     if (!drepId || drepId === lastDrepId) continue;
     const delegatedEpoch =
-      typeof entry.epoch_no === "number" ? entry.epoch_no : null;
+      typeof entry.epoch_no === "number" ? entry.epoch_no : -1;
     changes.push({
       stakeAddress,
-      fromDrepId: lastDrepId,
+      fromDrepId: lastDrepId ?? "",  // Sentinel for no previous DRep
       toDrepId: drepId,
       delegatedEpoch,
       amount: null,
     });
     lastDrepId = drepId;
-    lastEpoch = delegatedEpoch;
+    lastEpoch = typeof entry.epoch_no === "number" ? entry.epoch_no : null;
   }
 
   return {
@@ -604,9 +604,9 @@ export async function syncDrepDelegationChanges(
   }> = [];
   const changeLog: Array<{
     stakeAddress: string;
-    fromDrepId: string | null;
+    fromDrepId: string;      // "" = no previous DRep (sentinel)
     toDrepId: string;
-    delegatedEpoch: number | null;
+    delegatedEpoch: number;  // -1 = unknown epoch (sentinel)
     amount: bigint;
   }> = [];
 
@@ -639,9 +639,9 @@ export async function syncDrepDelegationChanges(
     if (stateChanged && !historyMatchesCurrent) {
       changeLog.push({
         stakeAddress,
-        fromDrepId: currentState?.drepId ?? null,
+        fromDrepId: currentState?.drepId ?? "",  // Sentinel for no previous DRep
         toDrepId: drepId,
-        delegatedEpoch,
+        delegatedEpoch: delegatedEpoch ?? -1,    // Sentinel for unknown epoch
         amount,
       });
     }
