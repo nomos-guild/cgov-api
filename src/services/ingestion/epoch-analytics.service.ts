@@ -6,8 +6,10 @@
  *
  * Domain services:
  * - drep-sync.service.ts: DRep inventory and info sync
- * - epoch-totals.service.ts: Epoch totals and missing epochs backfill
+ * - epoch-totals.service.ts: Epoch totals, timestamps, and missing epochs backfill
  * - delegation-sync.service.ts: Stake address delegation tracking
+ * - drep-lifecycle.service.ts: DRep registration/deregistration events
+ * - pool-groups.service.ts: Multi-pool operator groupings
  * - sync-utils.ts: Shared utilities and constants
  */
 
@@ -22,10 +24,12 @@ export {
   type SyncDrepInfoResult,
 } from "./drep-sync.service";
 
-// Re-export from epoch-totals.service
+// Re-export from epoch-totals.service (includes epoch timestamps)
 export {
   syncEpochTotals,
   syncMissingEpochAnalytics,
+  getEpochTimestamps,
+  getEpochDuration,
   type SyncEpochTotalsResult,
   type SyncMissingEpochsResult,
 } from "./epoch-totals.service";
@@ -38,9 +42,25 @@ export {
   type SyncDrepDelegationChangesResult,
 } from "./delegation-sync.service";
 
+// Re-export from drep-lifecycle.service
+export {
+  syncDrepLifecycleEvents,
+  syncDrepLifecycleEventsForEpochRange,
+  type SyncDrepLifecycleResult,
+} from "./drep-lifecycle.service";
+
+// Re-export from pool-groups.service
+export {
+  syncPoolGroups,
+  getPoolGroupStats,
+  type SyncPoolGroupsResult,
+} from "./pool-groups.service";
+
 // Import for orchestration
 import { syncAllDrepsInventory, syncAllDrepsInfo, type SyncDrepInventoryResult, type SyncDrepInfoResult } from "./drep-sync.service";
 import { syncEpochTotals, type SyncEpochTotalsResult } from "./epoch-totals.service";
+import { syncDrepLifecycleEvents, type SyncDrepLifecycleResult } from "./drep-lifecycle.service";
+import { syncPoolGroups, type SyncPoolGroupsResult } from "./pool-groups.service";
 
 // ============================================================
 // Orchestration Types
@@ -51,11 +71,15 @@ export interface SyncGovernanceAnalyticsEpochResult {
   currentEpoch: number;
   dreps?: SyncDrepInventoryResult;
   drepInfo?: SyncDrepInfoResult;
-  totals?: SyncEpochTotalsResult;
+  totals?: SyncEpochTotalsResult; // Now includes epoch timestamps
+  drepLifecycle?: SyncDrepLifecycleResult;
+  poolGroups?: SyncPoolGroupsResult;
   skipped: {
     dreps: boolean;
     drepInfo: boolean;
     totals: boolean;
+    drepLifecycle: boolean;
+    poolGroups: boolean;
   };
 }
 
@@ -66,6 +90,9 @@ export interface SyncGovernanceAnalyticsEpochResult {
 /**
  * Sync governance analytics for a specific epoch.
  * Uses per-step checkpoints to avoid re-running completed work.
+ *
+ * Note: Epoch timestamps are now fetched as part of the totals sync (step 3),
+ * so there's no separate epoch info sync step.
  */
 async function syncGovernanceAnalyticsForEpoch(
   prisma: Prisma.TransactionClient,
@@ -76,7 +103,13 @@ async function syncGovernanceAnalyticsForEpoch(
     return {
       epoch: epochToSync,
       currentEpoch,
-      skipped: { dreps: true, drepInfo: true, totals: true },
+      skipped: {
+        dreps: true,
+        drepInfo: true,
+        totals: true,
+        drepLifecycle: true,
+        poolGroups: true,
+      },
     };
   }
 
@@ -94,6 +127,8 @@ async function syncGovernanceAnalyticsForEpoch(
       dreps: !!state.drepsSyncedAt,
       drepInfo: !!state.drepInfoSyncedAt,
       totals: !!state.totalsSyncedAt,
+      drepLifecycle: !!state.drepLifecycleSyncedAt,
+      poolGroups: !!state.poolGroupsSyncedAt,
     },
   };
 
@@ -115,12 +150,30 @@ async function syncGovernanceAnalyticsForEpoch(
     });
   }
 
-  // 3) Epoch denominators/totals
+  // 3) Epoch denominators/totals + timestamps (from /totals, /drep_epoch_summary, /epoch_info)
   if (!state.totalsSyncedAt) {
     res.totals = await syncEpochTotals(prisma, epochToSync);
     await prisma.epochAnalyticsSync.update({
       where: { epoch: epochToSync },
       data: { totalsSyncedAt: new Date() },
+    });
+  }
+
+  // 4) DRep lifecycle events (registrations, deregistrations, updates)
+  if (!state.drepLifecycleSyncedAt) {
+    res.drepLifecycle = await syncDrepLifecycleEvents(prisma);
+    await prisma.epochAnalyticsSync.update({
+      where: { epoch: epochToSync },
+      data: { drepLifecycleSyncedAt: new Date() },
+    });
+  }
+
+  // 5) Pool groups (multi-pool operator mappings)
+  if (!state.poolGroupsSyncedAt) {
+    res.poolGroups = await syncPoolGroups(prisma);
+    await prisma.epochAnalyticsSync.update({
+      where: { epoch: epochToSync },
+      data: { poolGroupsSyncedAt: new Date() },
     });
   }
 

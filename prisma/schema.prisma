@@ -59,18 +59,26 @@ model Drep {
 
 // Epoch-level denominators/totals used by analytics dashboards.
 // This is designed to let the client compute KPIs DB-first without hitting Koios at read time.
+// Also includes epoch timestamps for wall-clock calculations (Time-to-Enactment KPI).
 model EpochTotals {
-  epoch              Int      @id @map("epoch_no")
-  circulation        BigInt?  @map("circulation")
-  treasury           BigInt?  @map("treasury")
-  reward             BigInt?  @map("reward")
-  supply             BigInt?  @map("supply")
-  reserves           BigInt?  @map("reserves")
+  epoch              Int       @id @map("epoch_no")
+  circulation        BigInt?   @map("circulation")
+  treasury           BigInt?   @map("treasury")
+  reward             BigInt?   @map("reward")
+  supply             BigInt?   @map("supply")
+  reserves           BigInt?   @map("reserves")
   // Cached denominators used in governance analytics:
-  delegatedDrepPower BigInt?  @map("delegated_drep_power")
-  totalPoolVotePower BigInt?  @map("total_pool_vote_power")
-  createdAt          DateTime @default(now()) @map("created_at")
-  updatedAt          DateTime @updatedAt @map("updated_at")
+  delegatedDrepPower BigInt?   @map("delegated_drep_power")
+  totalPoolVotePower BigInt?   @map("total_pool_vote_power")
+  // Epoch timestamps from /epoch_info for wall-clock calculations:
+  startTime          DateTime? @map("start_time")
+  endTime            DateTime? @map("end_time")
+  firstBlockTime     Int?      @map("first_block_time") // Unix timestamp
+  lastBlockTime      Int?      @map("last_block_time") // Unix timestamp
+  blockCount         Int?      @map("block_count")
+  txCount            Int?      @map("tx_count")
+  createdAt          DateTime  @default(now()) @map("created_at")
+  updatedAt          DateTime  @updatedAt @map("updated_at")
 
   @@map("epoch_totals")
 }
@@ -134,12 +142,14 @@ model StakeDelegationSyncState {
 // Tracks per-epoch completion state for the governance analytics sync job.
 // This lets the job run frequently but only do heavy work once per epoch.
 model EpochAnalyticsSync {
-  epoch            Int       @id @map("epoch_no")
-  drepsSyncedAt    DateTime? @map("dreps_synced_at")
-  drepInfoSyncedAt DateTime? @map("drep_info_synced_at")
-  totalsSyncedAt   DateTime? @map("totals_synced_at")
-  createdAt        DateTime  @default(now()) @map("created_at")
-  updatedAt        DateTime  @updatedAt @map("updated_at")
+  epoch                  Int       @id @map("epoch_no")
+  drepsSyncedAt          DateTime? @map("dreps_synced_at")
+  drepInfoSyncedAt       DateTime? @map("drep_info_synced_at")
+  totalsSyncedAt         DateTime? @map("totals_synced_at")
+  drepLifecycleSyncedAt  DateTime? @map("drep_lifecycle_synced_at")
+  poolGroupsSyncedAt     DateTime? @map("pool_groups_synced_at")
+  createdAt              DateTime  @default(now()) @map("created_at")
+  updatedAt              DateTime  @updatedAt @map("updated_at")
 
   @@map("epoch_analytics_sync")
 }
@@ -196,6 +206,38 @@ model CommitteeState {
   updatedAt         DateTime @updatedAt @map("updated_at")
 
   @@map("committee_state")
+}
+
+// DRep Lifecycle Events - Tracks registration, deregistration, and update actions
+// Enables DRep Lifecycle Rate KPI computation
+model DrepLifecycleEvent {
+  id        Int      @id @default(autoincrement())
+  drepId    String   @map("drep_id")
+  action    String   // "registration", "deregistration", "update"
+  epochNo   Int      @map("epoch_no")
+  blockTime Int?     @map("block_time") // Unix timestamp
+  txHash    String?  @map("tx_hash")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@unique([drepId, action, epochNo, txHash])
+  @@index([drepId])
+  @@index([epochNo])
+  @@index([action])
+  @@map("drep_lifecycle_event")
+}
+
+// Pool Groups - Maps pools to multi-pool operators/entities
+// Each pool belongs to exactly one group; multiple pools can share a group
+// Enables SPO Entity Voting Power Concentration KPI
+model PoolGroup {
+  poolId    String   @id @map("pool_id") // Pool bech32 ID - each pool can only belong to one group
+  groupId   String   @map("group_id") // Koios group identifier (stake key) - can be shared by multiple pools
+  groupName String?  @map("group_name") // Human-readable entity name if available
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@index([groupId])
+  @@map("pool_group")
 }
 
 model OnchainVote {

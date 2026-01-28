@@ -300,3 +300,62 @@ export interface KoiosAccountUpdateHistoryEntry {
     drep?: string | null;
   } | null;
 }
+
+/**
+ * DRep Updates from Koios API
+ * Endpoint: GET /drep_updates?_drep_id=<drepId>
+ * Used for DRep lifecycle events (registration, deregistration, updates)
+ */
+export interface KoiosDrepUpdate {
+  drep_id: string;
+  hex?: string | null;
+  has_script?: boolean | null;
+  update_tx_hash: string;
+  cert_index?: number | null;
+  block_time: number; // Unix timestamp
+  action_type: string; // "registration", "deregistration", or certificate update type
+  deposit?: string | null;
+  meta_url?: string | null;
+  meta_hash?: string | null;
+  meta_json?: {
+    body?: {
+      givenName?: unknown;
+      paymentAddress?: unknown;
+      doNotList?: unknown;
+      image?: {
+        contentUrl?: unknown;
+      };
+    };
+  } | null;
+}
+
+/**
+ * Pool Groups from Koios API
+ * Endpoint: GET /pool_groups
+ * Maps pools to multi-pool operator entities
+ */
+export interface KoiosPoolGroup {
+  pool_id_bech32: string; // Pool ID in bech32 format
+  pool_id_hex?: string | null;
+  group_id: string; // Entity/group identifier (usually stake key)
+}
+
+/**
+ * Epoch Info from Koios API
+ * Endpoint: GET /epoch_info?_epoch_no=<epoch>
+ * Provides epoch timestamps for wall-clock calculations
+ */
+export interface KoiosEpochInfo {
+  epoch_no: number;
+  out_sum?: string | null;
+  fees?: string | null;
+  tx_count?: number | null;
+  blk_count?: number | null;
+  start_time?: number | null; // Unix timestamp
+  end_time?: number | null; // Unix timestamp
+  first_block_time?: number | null; // Unix timestamp
+  last_block_time?: number | null; // Unix timestamp
+  active_stake?: string | null;
+  total_rewards?: string | null;
+  avg_blk_reward?: string | null;
+}

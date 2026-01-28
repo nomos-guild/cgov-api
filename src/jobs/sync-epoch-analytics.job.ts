@@ -7,7 +7,9 @@
  * Responsibilities:
  * - Inventory ALL DReps (Koios /drep_list) into DB (not just those who voted)
  * - At the start of each new epoch, sync the previous epoch's:
- *   - epoch totals / denominators (Koios /totals, /drep_epoch_summary, /pool_voting_power_history)
+ *   - epoch totals / denominators / timestamps (Koios /totals, /drep_epoch_summary, /epoch_info, /pool_voting_power_history)
+ *   - DRep lifecycle events (registrations, deregistrations)
+ *   - Pool groups (multi-pool operator mappings)
  */
 
 import cron from "node-cron";
@@ -66,21 +68,44 @@ function startEpochAnalyticsSyncJobWithSchedule(schedule: string) {
         console.log(`  DRep Info: skipped=${result.skipped.drepInfo}`);
       }
 
+      // Log totals + timestamps sync results
       if (result.totals) {
         console.log(
           `  Totals: upserted=${result.totals.upserted}, circulation=${result.totals.circulation?.toString() ?? "null"}, treasury=${result.totals.treasury?.toString() ?? "null"}, delegatedDrepPower=${result.totals.delegatedDrepPower?.toString() ?? "null"}, totalPoolVotePower=${result.totals.totalPoolVotePower?.toString() ?? "null"}`
+        );
+        console.log(
+          `  Epoch Timestamps: startTime=${result.totals.startTime?.toISOString() ?? "null"}, endTime=${result.totals.endTime?.toISOString() ?? "null"}, blocks=${result.totals.blockCount ?? "null"}, txs=${result.totals.txCount ?? "null"}`
         );
       } else {
         console.log(`  Totals: skipped=${result.skipped.totals}`);
       }
 
+      // Log DRep lifecycle sync results
+      if (result.drepLifecycle) {
+        console.log(
+          `  DRep Lifecycle: dreps=${result.drepLifecycle.drepsProcessed}, events=${result.drepLifecycle.eventsIngested} (reg=${result.drepLifecycle.eventsByType.registration}, dereg=${result.drepLifecycle.eventsByType.deregistration}, update=${result.drepLifecycle.eventsByType.update}), failed=${result.drepLifecycle.failed.length}`
+        );
+      } else {
+        console.log(`  DRep Lifecycle: skipped=${result.skipped.drepLifecycle}`);
+      }
+
+      // Log pool groups sync results
+      if (result.poolGroups) {
+        console.log(
+          `  Pool Groups: fetched=${result.poolGroups.totalFetched}, created=${result.poolGroups.created}, updated=${result.poolGroups.updated}, uniqueGroups=${result.poolGroups.uniqueGroups}`
+        );
+      } else {
+        console.log(`  Pool Groups: skipped=${result.skipped.poolGroups}`);
+      }
+
+      // Backfill missing epoch totals (includes timestamps now)
       const backfill = await syncMissingEpochAnalytics(prisma);
       console.log(
-        `  Missing epochs: range=${backfill.startEpoch}-${backfill.endEpoch}, totals missing=${backfill.totals.missing.length}, attempted=${backfill.totals.attempted.length}, synced=${backfill.totals.synced.length}, failed=${backfill.totals.failed.length}`
+        `  Missing epochs: range=${backfill.startEpoch}-${backfill.endEpoch}, missing=${backfill.totals.missing.length}, synced=${backfill.totals.synced.length}, failed=${backfill.totals.failed.length}`
       );
       if (backfill.totals.failed.length > 0) {
         console.error(
-          `  Missing totals: first failures:`,
+          `  Missing epochs: first failures:`,
           backfill.totals.failed.slice(0, 10)
         );
       }
