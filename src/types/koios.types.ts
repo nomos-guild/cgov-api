@@ -198,6 +198,8 @@ export interface KoiosProposalVotingSummary {
   pool_active_abstain_vote_power: string | null;
   pool_passive_always_abstain_vote_power: string | null;
   pool_passive_always_no_confidence_vote_power: string | null;
+  // SPO calculated total "No" power (includes notVoted + alwaysNoConfidence + explicit no)
+  pool_no_vote_power: string | null;
   // CC votes
   cc_yes_vote: number | null;
   cc_no_vote: number | null;

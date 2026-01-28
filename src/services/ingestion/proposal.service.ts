@@ -1101,6 +1101,8 @@ async function updateProposalVotingPower(
         spoAlwaysNoConfidencePower: lovelaceToBigInt(
           votingSummary.pool_passive_always_no_confidence_vote_power
         ),
+        // Koios pool_no_vote_power (includes notVoted + alwaysNoConfidence + explicit no)
+        spoNoVotePower: lovelaceToBigInt(votingSummary.pool_no_vote_power),
       },
     });
 

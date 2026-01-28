@@ -13,10 +13,7 @@ import { ingestProposal } from "../../services/ingestion/proposal.service";
  */
 export const postIngestProposal = async (req: Request, res: Response) => {
   try {
-    const rawProposalHash = req.params.proposal_hash;
-    const proposal_hash = Array.isArray(rawProposalHash)
-      ? rawProposalHash[0]
-      : rawProposalHash;
+    const proposal_hash = req.params.proposal_hash as string;
 
     if (!proposal_hash) {
       return res.status(400).json({

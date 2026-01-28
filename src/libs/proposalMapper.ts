@@ -63,6 +63,7 @@ export const proposalWithVotesSelect = {
   spoActiveAbstainVotePower: true,
   spoAlwaysAbstainVotePower: true,
   spoAlwaysNoConfidencePower: true,
+  spoNoVotePower: true, // Koios pool_no_vote_power (includes notVoted)
   metadata: true,
   createdAt: true,
   updatedAt: true,
@@ -347,12 +348,44 @@ const buildSpoVoteInfo = (
   }
 
   // Convert to number for calculations (values are in lovelace)
-  const total = toNumber(proposal.spoTotalVotePower);
+  const storedTotal = toNumber(proposal.spoTotalVotePower);
   const yes = toNumber(proposal.spoActiveYesVotePower);
   const no = toNumber(proposal.spoActiveNoVotePower);
   const abstain = toNumber(proposal.spoActiveAbstainVotePower);
   const alwaysAbstain = toNumber(proposal.spoAlwaysAbstainVotePower);
   const alwaysNoConfidence = toNumber(proposal.spoAlwaysNoConfidencePower);
+
+  // Koios pool_no_vote_power (includes notVoted + alwaysNoConfidence + explicit no)
+  const koiosNoVotePower = toNumber(proposal.spoNoVotePower);
+
+  let effectiveTotal: number;
+  let notVotedFromKoios: number;
+
+  // PRIORITY: Use Koios pool_no_vote_power if available for consistent data
+  // This ensures all values come from the same epoch snapshot
+  if (proposal.spoNoVotePower !== null && proposal.spoNoVotePower !== undefined) {
+    // Derive notVoted from Koios: pool_no_vote_power - explicit_no - alwaysNoConfidence
+    notVotedFromKoios = koiosNoVotePower - no - alwaysNoConfidence;
+
+    // Calculate effectiveTotal from consistent Koios data
+    // effectiveTotal = yes + koiosNoVotePower + abstain + alwaysAbstain
+    // (koiosNoVotePower already includes: no + alwaysNoConfidence + notVoted)
+    effectiveTotal = yes + koiosNoVotePower + abstain + alwaysAbstain;
+  } else {
+    // FALLBACK: Use old logic for historical data without Koios pool_no_vote_power
+    const breakdownSum = yes + no + abstain + alwaysAbstain + alwaysNoConfidence;
+
+    // Detect and log data inconsistency (breakdown > total indicates epoch mismatch)
+    if (breakdownSum > storedTotal && storedTotal > 0) {
+      console.warn(
+        `[SPO Vote] Data inconsistency detected: breakdown sum (${breakdownSum}) > total (${storedTotal}) for proposal`
+      );
+    }
+
+    // Use effective total to ensure consistent calculations
+    effectiveTotal = Math.max(storedTotal, breakdownSum);
+    notVotedFromKoios = effectiveTotal - yes - no - abstain - alwaysAbstain - alwaysNoConfidence;
+  }
 
   // Determine if this governance action uses the new formula (epoch >= 534)
   const useNewFormula = shouldUseNewSpoFormula(proposal);
@@ -376,24 +409,27 @@ const buildSpoVoteInfo = (
       // HardForkInitiation: ALL non-voters (including alwaysNoConfidence/alwaysAbstain) count as No
       yesTotal = yes;
       abstainTotal = abstain; // Only explicit abstain votes
-      notVotedCalc = total - yes - no - abstain; // Includes alwaysNoConfidence + alwaysAbstain
+      // notVotedCalc includes: pureNotVoted + alwaysNoConfidence + alwaysAbstain
+      notVotedCalc = notVotedFromKoios + alwaysNoConfidence + alwaysAbstain;
     } else if (isNoConfidence) {
       // NoConfidence: AlwaysNoConfidence counts as Yes, AlwaysAbstain counts as Abstain
       yesTotal = yes + alwaysNoConfidence;
       abstainTotal = abstain + alwaysAbstain;
-      notVotedCalc = total - yes - no - abstain - alwaysAbstain - alwaysNoConfidence;
+      // Pure notVoted only
+      notVotedCalc = notVotedFromKoios;
     } else {
       // Other actions: AlwaysAbstain counts as Abstain, AlwaysNoConfidence counts as No
       yesTotal = yes;
       abstainTotal = abstain + alwaysAbstain;
-      notVotedCalc = total - yes - no - abstain - alwaysAbstain - alwaysNoConfidence;
+      // Pure notVoted only
+      notVotedCalc = notVotedFromKoios;
     }
 
     // noTotal = explicit No votes + notVoted (which counts as No)
     noTotal = no + Math.max(0, notVotedCalc);
 
-    // Denominator per Cardano ledger: total - abstainTotal
-    denominator = total - abstainTotal;
+    // Denominator per Cardano ledger: effectiveTotal - abstainTotal
+    denominator = effectiveTotal - abstainTotal;
   } else {
     // Old formula (epoch < 534): excludes NotVoted, no special cases
     yesTotal = yes;
@@ -403,14 +439,25 @@ const buildSpoVoteInfo = (
   }
 
   // Calculate percentages
-  const yesPercent = denominator > 0 ? (yesTotal / denominator) * 100 : 0;
-  const noPercent = denominator > 0 ? (noTotal / denominator) * 100 : 0;
-  const abstainPercent = total > 0 ? (abstainTotal / total) * 100 : 0;
+  let yesPercent = denominator > 0 ? (yesTotal / denominator) * 100 : 0;
+  let noPercent = denominator > 0 ? (noTotal / denominator) * 100 : 0;
+  const abstainPercent =
+    effectiveTotal > 0 ? (abstainTotal / effectiveTotal) * 100 : 0;
 
-  // Calculate notVoted for breakdown (raw value before action-type-specific adjustments)
-  const notVotedBreakdown = total - yes - no - abstain - alwaysAbstain - alwaysNoConfidence;
+  // Safety net: cap individual percentages at 100%
+  yesPercent = Math.min(100, yesPercent);
+  noPercent = Math.min(100, noPercent);
+
+  // Safety net: normalize if combined yes + no exceeds 100%
+  const combinedPercent = yesPercent + noPercent;
+  if (combinedPercent > 100) {
+    const scale = 100 / combinedPercent;
+    yesPercent = yesPercent * scale;
+    noPercent = noPercent * scale;
+  }
 
   // Build breakdown for pie chart display
+  // Use notVotedFromKoios for accurate "not voted" display
   const breakdown: VoteBreakdown = {
     activeYes: Math.round(yes).toString(),
     activeNo: Math.round(no).toString(),
@@ -418,7 +465,7 @@ const buildSpoVoteInfo = (
     alwaysAbstain: Math.round(alwaysAbstain).toString(),
     alwaysNoConfidence: Math.round(alwaysNoConfidence).toString(),
     inactive: null, // SPO doesn't have inactive concept
-    notVoted: Math.round(Math.max(0, notVotedBreakdown)).toString(),
+    notVoted: Math.round(Math.max(0, notVotedFromKoios)).toString(),
   };
 
   // Return lovelace values as strings
@@ -946,6 +993,29 @@ export const mapProposalToGovernanceAction = (
   // Determine if proposal is passing overall
   const passing = isProposalPassing(votingStatus);
 
+  // Calculate SPO effective total (same logic as buildSpoVoteInfo)
+  // Uses Koios pool_no_vote_power when available for consistent data
+  const spoTotal = toNumber(proposal.spoTotalVotePower);
+  const spoKoiosNoVotePower = toNumber(proposal.spoNoVotePower);
+  let spoEffectiveTotal: number;
+
+  if (proposal.spoNoVotePower !== null && proposal.spoNoVotePower !== undefined) {
+    // Use Koios data for consistent effective total
+    const yes = toNumber(proposal.spoActiveYesVotePower);
+    const abstain = toNumber(proposal.spoActiveAbstainVotePower);
+    const alwaysAbstain = toNumber(proposal.spoAlwaysAbstainVotePower);
+    spoEffectiveTotal = yes + spoKoiosNoVotePower + abstain + alwaysAbstain;
+  } else {
+    // Fallback to old logic
+    const spoBreakdownSum =
+      toNumber(proposal.spoActiveYesVotePower) +
+      toNumber(proposal.spoActiveNoVotePower) +
+      toNumber(proposal.spoActiveAbstainVotePower) +
+      toNumber(proposal.spoAlwaysAbstainVotePower) +
+      toNumber(proposal.spoAlwaysNoConfidencePower);
+    spoEffectiveTotal = Math.max(spoTotal, spoBreakdownSum);
+  }
+
   const rawVotingPowerValues: RawVotingPowerValues = {
     drep_total_vote_power: proposal.drepTotalVotePower?.toString() ?? null,
     drep_active_yes_vote_power:
@@ -961,6 +1031,9 @@ export const mapProposalToGovernanceAction = (
     drep_inactive_vote_power:
       proposal.drepInactiveVotePower?.toString() ?? null,
     spo_total_vote_power: proposal.spoTotalVotePower?.toString() ?? null,
+    spo_effective_total_vote_power:
+      proposal.spoTotalVotePower !== null ? spoEffectiveTotal.toString() : null,
+    spo_no_vote_power: proposal.spoNoVotePower?.toString() ?? null,
     spo_active_yes_vote_power:
       proposal.spoActiveYesVotePower?.toString() ?? null,
     spo_active_no_vote_power:
