@@ -150,6 +150,7 @@ model Proposal {
   spoActiveAbstainVotePower   BigInt?          @map("spo_active_abstain_vote_power")
   spoAlwaysAbstainVotePower   BigInt?          @map("spo_always_abstain_vote_power")
   spoAlwaysNoConfidencePower  BigInt?          @map("spo_always_no_confidence_power")
+  spoNoVotePower              BigInt?          @map("spo_no_vote_power") // Koios pool_no_vote_power (includes notVoted)
   metadata                    String?
   createdAt                   DateTime?        @default(now()) @map("created_at")
   updatedAt                   DateTime?        @map("updated_at")
