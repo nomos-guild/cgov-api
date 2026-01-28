@@ -17,7 +17,7 @@ import {
  */
 export const postIngestDrep = async (req: Request, res: Response) => {
   try {
-    const { drep_id } = req.params;
+    const drep_id = req.params.drep_id as string;
 
     if (!drep_id) {
       return res.status(400).json({
@@ -65,7 +65,7 @@ export const postIngestDrep = async (req: Request, res: Response) => {
  */
 export const postIngestSpo = async (req: Request, res: Response) => {
   try {
-    const { pool_id } = req.params;
+    const pool_id = req.params.pool_id as string;
 
     if (!pool_id) {
       return res.status(400).json({
@@ -113,7 +113,7 @@ export const postIngestSpo = async (req: Request, res: Response) => {
  */
 export const postIngestCc = async (req: Request, res: Response) => {
   try {
-    const { cc_id } = req.params;
+    const cc_id = req.params.cc_id as string;
 
     if (!cc_id) {
       return res.status(400).json({

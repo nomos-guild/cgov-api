@@ -15,7 +15,7 @@ import { ingestVoteByTxHash } from "../../services/ingestion/vote.service";
  */
 export const postIngestVote = async (req: Request, res: Response) => {
   try {
-    const { tx_hash } = req.params;
+    const tx_hash = req.params.tx_hash as string;
 
     if (!tx_hash) {
       return res.status(400).json({
