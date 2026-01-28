@@ -44,6 +44,8 @@ export interface RawVotingPowerValues {
   drep_always_no_confidence_power: string | null;
   drep_inactive_vote_power: string | null;
   spo_total_vote_power: string | null;
+  spo_effective_total_vote_power: string | null; // Consistent total from Koios data (used in calculations)
+  spo_no_vote_power: string | null; // Koios pool_no_vote_power (includes notVoted + alwaysNoConfidence + explicit no)
   spo_active_yes_vote_power: string | null;
   spo_active_no_vote_power: string | null;
   spo_active_abstain_vote_power: string | null;
