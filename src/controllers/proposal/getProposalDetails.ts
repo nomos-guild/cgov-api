@@ -76,10 +76,16 @@ export const getProposalDetails = async (req: Request, res: Response) => {
       });
     }
 
-    const proposal = await prisma.proposal.findFirst({
-      where: lookup,
-      select: proposalWithVotesSelect,
-    });
+    // Run proposal fetch and CC info fetch in parallel for better performance
+    const [proposal, ccInfo] = await Promise.all([
+      prisma.proposal.findFirst({
+        where: lookup,
+        select: proposalWithVotesSelect,
+      }),
+      // Fetch eligible CC members count (for CC vote calculations)
+      // Uses cached data from database, falls back to Koios API if cache is empty
+      getCachedEligibleCCInfo(prisma),
+    ]);
 
     if (!proposal) {
       return res.status(404).json({
@@ -88,9 +94,6 @@ export const getProposalDetails = async (req: Request, res: Response) => {
       });
     }
 
-    // Fetch eligible CC members count (for CC vote calculations)
-    // Uses cached data from database, falls back to Koios API if cache is empty
-    const ccInfo = await getCachedEligibleCCInfo(prisma);
     const eligibleCCMembers = ccInfo.eligibleMembers;
 
     const response: GetProposalInfoResponse =
