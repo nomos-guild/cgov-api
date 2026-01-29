@@ -8,6 +8,12 @@
 import type { Prisma } from "@prisma/client";
 import { koiosGet } from "../koios";
 import type { KoiosPoolGroup } from "../../types/koios.types";
+import { withRetry } from "./utils";
+import {
+  POOL_GROUPS_DB_UPDATE_CONCURRENCY,
+  chunkArray,
+} from "./sync-utils";
+import { processInParallel } from "./parallel";
 
 // ============================================================
 // Constants
@@ -41,9 +47,8 @@ async function fetchAllPoolGroups(): Promise<KoiosPoolGroup[]> {
   const groups: KoiosPoolGroup[] = [];
 
   while (hasMore) {
-    const page = await koiosGet<KoiosPoolGroup[]>(
-      "/pool_groups",
-      { limit: pageSize, offset }
+    const page = await withRetry(() =>
+      koiosGet<KoiosPoolGroup[]>("/pool_groups", { limit: pageSize, offset })
     );
 
     if (page && page.length > 0) {
@@ -104,13 +109,20 @@ export async function syncPoolGroups(
     // Track unique group IDs
     const uniqueGroupIds = new Set<string>();
 
-    // Get existing pool groups from database
-    const existingGroups = await poolGroupClient.poolGroup.findMany({
-      select: { poolId: true, groupId: true },
-    });
-    const existingMap = new Map(
-      existingGroups.map((g: { poolId: string; groupId: string }) => [g.poolId, g.groupId])
-    );
+    // Get existing pool groups only for pools we just fetched
+    const existingMap = new Map<string, string>();
+    const poolIds = poolGroups
+      .map((pg) => pg.pool_id_bech32)
+      .filter((poolId): poolId is string => !!poolId);
+    for (const chunk of chunkArray(poolIds, 5000)) {
+      const existingGroups = await poolGroupClient.poolGroup.findMany({
+        where: { poolId: { in: chunk } },
+        select: { poolId: true, groupId: true },
+      });
+      for (const group of existingGroups) {
+        existingMap.set(group.poolId, group.groupId);
+      }
+    }
 
     // Separate into creates and updates
     const toCreate: Array<{ groupId: string; poolId: string }> = [];
@@ -148,19 +160,26 @@ export async function syncPoolGroups(
       result.created = createResult.count;
     }
 
-    // Update changed pool groups
-    for (const update of toUpdate) {
-      try {
-        await poolGroupClient.poolGroup.update({
-          where: { poolId: update.poolId },
-          data: { groupId: update.groupId },
-        });
-        result.updated++;
-      } catch (error: any) {
+    // Update changed pool groups with bounded concurrency
+    if (toUpdate.length > 0) {
+      const updateResult = await processInParallel(
+        toUpdate,
+        (row) => row.poolId,
+        async (row) => {
+          await poolGroupClient.poolGroup.update({
+            where: { poolId: row.poolId },
+            data: { groupId: row.groupId },
+          });
+          return row;
+        },
+        POOL_GROUPS_DB_UPDATE_CONCURRENCY
+      );
+      result.updated = updateResult.successful.length;
+      result.failed = updateResult.failed.length;
+      if (updateResult.failed.length > 0) {
         console.warn(
-          `[Pool Groups] Failed to update pool ${update.poolId}: ${error?.message}`
+          `[Pool Groups] Failed updates: ${updateResult.failed.length}`
         );
-        result.failed++;
       }
     }
 

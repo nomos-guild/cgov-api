@@ -8,7 +8,12 @@
 import type { Prisma } from "@prisma/client";
 import { koiosGet } from "../koios";
 import type { KoiosDrepUpdate } from "../../types/koios.types";
-import { KOIOS_DREP_LIST_PAGE_SIZE } from "./sync-utils";
+import {
+  KOIOS_DREP_LIST_PAGE_SIZE,
+  DREP_LIFECYCLE_SYNC_CONCURRENCY,
+} from "./sync-utils";
+import { processInParallel } from "./parallel";
+import { withRetry } from "./utils";
 
 // ============================================================
 // Constants
@@ -79,9 +84,11 @@ async function fetchAllDrepIds(): Promise<string[]> {
   const ids: string[] = [];
 
   while (hasMore) {
-    const page = await koiosGet<Array<{ drep_id: string }>>(
-      "/drep_list",
-      { limit: pageSize, offset }
+    const page = await withRetry(() =>
+      koiosGet<Array<{ drep_id: string }>>("/drep_list", {
+        limit: pageSize,
+        offset,
+      })
     );
 
     if (page && page.length > 0) {
@@ -108,9 +115,12 @@ async function fetchDrepUpdates(drepId: string): Promise<KoiosDrepUpdate[]> {
   const updates: KoiosDrepUpdate[] = [];
 
   while (hasMore) {
-    const page = await koiosGet<KoiosDrepUpdate[]>(
-      "/drep_updates",
-      { _drep_id: drepId, limit: pageSize, offset }
+    const page = await withRetry(() =>
+      koiosGet<KoiosDrepUpdate[]>("/drep_updates", {
+        _drep_id: drepId,
+        limit: pageSize,
+        offset,
+      })
     );
 
     if (page && page.length > 0) {
@@ -163,14 +173,18 @@ export async function syncDrepLifecycleEvents(
     failed: [],
   };
 
-  // Process each DRep
-  for (const drepId of drepIds) {
-    try {
+  const parallelResult = await processInParallel(
+    drepIds,
+    (drepId) => drepId,
+    async (drepId) => {
       const updates = await fetchDrepUpdates(drepId);
 
       if (updates.length === 0) {
-        result.drepsProcessed++;
-        continue;
+        return {
+          drepsProcessed: 1,
+          eventsIngested: 0,
+          eventsByType: { registration: 0, deregistration: 0, update: 0 },
+        };
       }
 
       // Transform to event records
@@ -193,26 +207,36 @@ export async function syncDrepLifecycleEvents(
         skipDuplicates: true,
       });
 
-      result.eventsIngested += inserted.count;
-
-      // Count by type
+      const eventsByType = { registration: 0, deregistration: 0, update: 0 };
       for (const event of events) {
         if (event.action === "registration") {
-          result.eventsByType.registration++;
+          eventsByType.registration++;
         } else if (event.action === "deregistration") {
-          result.eventsByType.deregistration++;
+          eventsByType.deregistration++;
         } else {
-          result.eventsByType.update++;
+          eventsByType.update++;
         }
       }
 
-      result.drepsProcessed++;
-    } catch (error: any) {
-      result.failed.push({
-        drepId,
-        error: error?.message ?? String(error),
-      });
-    }
+      return {
+        drepsProcessed: 1,
+        eventsIngested: inserted.count,
+        eventsByType,
+      };
+    },
+    DREP_LIFECYCLE_SYNC_CONCURRENCY
+  );
+
+  for (const entry of parallelResult.successful) {
+    result.drepsProcessed += entry.drepsProcessed;
+    result.eventsIngested += entry.eventsIngested;
+    result.eventsByType.registration += entry.eventsByType.registration;
+    result.eventsByType.deregistration += entry.eventsByType.deregistration;
+    result.eventsByType.update += entry.eventsByType.update;
+  }
+
+  for (const failed of parallelResult.failed) {
+    result.failed.push({ drepId: failed.id, error: failed.error });
   }
 
   console.log(
@@ -257,8 +281,10 @@ export async function syncDrepLifecycleEventsForEpochRange(
     failed: [],
   };
 
-  for (const drepId of drepIds) {
-    try {
+  const parallelResult = await processInParallel(
+    drepIds,
+    (drepId) => drepId,
+    async (drepId) => {
       const updates = await fetchDrepUpdates(drepId);
 
       // Filter to epoch range
@@ -278,8 +304,11 @@ export async function syncDrepLifecycleEventsForEpochRange(
         .filter((event) => event.epochNo >= startEpoch && event.epochNo <= endEpoch);
 
       if (filteredEvents.length === 0) {
-        result.drepsProcessed++;
-        continue;
+        return {
+          drepsProcessed: 1,
+          eventsIngested: 0,
+          eventsByType: { registration: 0, deregistration: 0, update: 0 },
+        };
       }
 
       const inserted = await lifecycleClient.drepLifecycleEvent.createMany({
@@ -287,25 +316,36 @@ export async function syncDrepLifecycleEventsForEpochRange(
         skipDuplicates: true,
       });
 
-      result.eventsIngested += inserted.count;
-
+      const eventsByType = { registration: 0, deregistration: 0, update: 0 };
       for (const event of filteredEvents) {
         if (event.action === "registration") {
-          result.eventsByType.registration++;
+          eventsByType.registration++;
         } else if (event.action === "deregistration") {
-          result.eventsByType.deregistration++;
+          eventsByType.deregistration++;
         } else {
-          result.eventsByType.update++;
+          eventsByType.update++;
         }
       }
 
-      result.drepsProcessed++;
-    } catch (error: any) {
-      result.failed.push({
-        drepId,
-        error: error?.message ?? String(error),
-      });
-    }
+      return {
+        drepsProcessed: 1,
+        eventsIngested: inserted.count,
+        eventsByType,
+      };
+    },
+    DREP_LIFECYCLE_SYNC_CONCURRENCY
+  );
+
+  for (const entry of parallelResult.successful) {
+    result.drepsProcessed += entry.drepsProcessed;
+    result.eventsIngested += entry.eventsIngested;
+    result.eventsByType.registration += entry.eventsByType.registration;
+    result.eventsByType.deregistration += entry.eventsByType.deregistration;
+    result.eventsByType.update += entry.eventsByType.update;
+  }
+
+  for (const failed of parallelResult.failed) {
+    result.failed.push({ drepId: failed.id, error: failed.error });
   }
 
   console.log(

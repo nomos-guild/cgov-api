@@ -4,6 +4,7 @@
 
 import { koiosGet } from "../koios";
 import type { KoiosTip } from "../../types/koios.types";
+import { withRetry } from "./utils";
 
 // ============================================================
 // Constants
@@ -17,6 +18,11 @@ export const KOIOS_ACCOUNT_LIST_PAGE_SIZE = 1000;
 export const KOIOS_ACCOUNT_UPDATE_HISTORY_BATCH_SIZE = 10;
 export const DREP_DELEGATOR_MIN_VOTING_POWER = BigInt(0);
 export const DREP_DELEGATION_SYNC_CONCURRENCY = 2;
+export const DREP_DELEGATION_DB_UPDATE_CONCURRENCY = 10;
+export const DREP_INFO_SYNC_CONCURRENCY = 5;
+export const DREP_LIFECYCLE_SYNC_CONCURRENCY = 5;
+export const POOL_GROUPS_DB_UPDATE_CONCURRENCY = 10;
+export const EPOCH_TOTALS_BACKFILL_CONCURRENCY = 2;
 export const STAKE_DELEGATION_SYNC_STATE_ID = "current";
 export const DREP_DELEGATION_BACKFILL_JOB_NAME = "drep-delegation-backfill";
 export const DREP_DELEGATION_PHASE3_JOB_NAME = "drep-delegation-phase3";
@@ -91,7 +97,7 @@ export function chunkArray<T>(items: T[], chunkSize: number): T[][] {
  * Gets the current epoch number from Koios.
  */
 export async function getKoiosCurrentEpoch(): Promise<number> {
-  const tip = await koiosGet<KoiosTip[]>("/tip");
+  const tip = await withRetry(() => koiosGet<KoiosTip[]>("/tip"));
   return tip?.[0]?.epoch_no ?? 0;
 }
 

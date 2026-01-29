@@ -16,7 +16,10 @@ import {
   KOIOS_POOL_VP_PAGE_SIZE,
   toBigIntOrNull,
   getKoiosCurrentEpoch,
+  EPOCH_TOTALS_BACKFILL_CONCURRENCY,
 } from "./sync-utils";
+import { withRetry } from "./utils";
+import { processInParallel } from "./parallel";
 
 // ============================================================
 // Result Types
@@ -65,13 +68,15 @@ async function sumPoolVotingPowerForEpoch(epochNo: number): Promise<bigint> {
   let total = BigInt(0);
 
   while (hasMore) {
-    const page = await koiosGet<
-      Array<{ pool_id_bech32: string; epoch_no: number; amount: string }>
-    >("/pool_voting_power_history", {
-      _epoch_no: epochNo,
-      limit: pageSize,
-      offset,
-    });
+    const page = await withRetry(() =>
+      koiosGet<
+        Array<{ pool_id_bech32: string; epoch_no: number; amount: string }>
+      >("/pool_voting_power_history", {
+        _epoch_no: epochNo,
+        limit: pageSize,
+        offset,
+      })
+    );
 
     if (page && page.length > 0) {
       for (const row of page) {
@@ -121,12 +126,19 @@ export async function syncEpochTotals(
   prisma: Prisma.TransactionClient,
   epochNo: number
 ): Promise<SyncEpochTotalsResult> {
-  const [totalsArr, drepSummaryArr, epochInfoArr, totalPoolVotePower] = await Promise.all([
-    koiosGet<KoiosTotals[]>("/totals", { _epoch_no: epochNo }),
-    koiosGet<KoiosDrepEpochSummary[]>("/drep_epoch_summary", { _epoch_no: epochNo }),
-    koiosGet<KoiosEpochInfo[]>("/epoch_info", { _epoch_no: epochNo }),
-    sumPoolVotingPowerForEpoch(epochNo),
-  ]);
+  const [totalsArr, drepSummaryArr, epochInfoArr, totalPoolVotePower] =
+    await Promise.all([
+      withRetry(() => koiosGet<KoiosTotals[]>("/totals", { _epoch_no: epochNo })),
+      withRetry(() =>
+        koiosGet<KoiosDrepEpochSummary[]>("/drep_epoch_summary", {
+          _epoch_no: epochNo,
+        })
+      ),
+      withRetry(() =>
+        koiosGet<KoiosEpochInfo[]>("/epoch_info", { _epoch_no: epochNo })
+      ),
+      sumPoolVotingPowerForEpoch(epochNo),
+    ]);
 
   const totals = totalsArr?.[0] ?? null;
   const drepSummary = drepSummaryArr?.[0] ?? null;
@@ -247,8 +259,10 @@ export async function syncMissingEpochAnalytics(
   const totalsSynced: number[] = [];
   const totalsFailed: Array<{ epoch: number; error: string }> = [];
 
-  for (const epoch of totalsToSync) {
-    try {
+  const syncResult = await processInParallel(
+    totalsToSync,
+    (epoch) => `${epoch}`,
+    async (epoch) => {
       await prisma.epochAnalyticsSync.upsert({
         where: { epoch },
         update: {},
@@ -259,10 +273,17 @@ export async function syncMissingEpochAnalytics(
         where: { epoch },
         data: { totalsSyncedAt: new Date() },
       });
-      totalsSynced.push(epoch);
-    } catch (error: any) {
-      totalsFailed.push({ epoch, error: error?.message ?? String(error) });
-    }
+      return epoch;
+    },
+    EPOCH_TOTALS_BACKFILL_CONCURRENCY
+  );
+
+  totalsSynced.push(...syncResult.successful);
+  for (const failed of syncResult.failed) {
+    totalsFailed.push({
+      epoch: Number.parseInt(failed.id, 10),
+      error: failed.error,
+    });
   }
 
   return {

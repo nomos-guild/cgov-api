@@ -14,12 +14,14 @@ import type {
   KoiosAccountUpdateHistoryEntry,
 } from "../../types/koios.types";
 import { processInParallel } from "./parallel";
+import { withRetry } from "./utils";
 import {
   KOIOS_DREP_DELEGATORS_PAGE_SIZE,
   KOIOS_ACCOUNT_LIST_PAGE_SIZE,
   KOIOS_ACCOUNT_UPDATE_HISTORY_BATCH_SIZE,
   DREP_DELEGATOR_MIN_VOTING_POWER,
   DREP_DELEGATION_SYNC_CONCURRENCY,
+  DREP_DELEGATION_DB_UPDATE_CONCURRENCY,
   STAKE_DELEGATION_SYNC_STATE_ID,
   DREP_DELEGATION_BACKFILL_JOB_NAME,
   DREP_DELEGATION_PHASE3_JOB_NAME,
@@ -60,11 +62,13 @@ async function fetchDelegatorsForDrep(drepId: string): Promise<KoiosDrepDelegato
   const rows: KoiosDrepDelegator[] = [];
 
   while (hasMore) {
-    const page = await koiosGet<KoiosDrepDelegator[]>("/drep_delegators", {
-      _drep_id: drepId,
-      limit: pageSize,
-      offset,
-    });
+    const page = await withRetry(() =>
+      koiosGet<KoiosDrepDelegator[]>("/drep_delegators", {
+        _drep_id: drepId,
+        limit: pageSize,
+        offset,
+      })
+    );
 
     if (page && page.length > 0) {
       rows.push(...page);
@@ -160,9 +164,10 @@ async function fetchAccountUpdateHistory(
   stakeAddresses: string[]
 ): Promise<KoiosAccountUpdateHistoryEntry[]> {
   if (stakeAddresses.length === 0) return [];
-  const response = await koiosPost<KoiosAccountUpdateHistoryEntry[]>(
-    "/account_update_history",
-    { _stake_addresses: stakeAddresses }
+  const response = await withRetry(() =>
+    koiosPost<KoiosAccountUpdateHistoryEntry[]>("/account_update_history", {
+      _stake_addresses: stakeAddresses,
+    })
   );
   return Array.isArray(response) ? response : [];
 }
@@ -191,6 +196,7 @@ async function backfillStakeDelegationHistory(
   let processed = 0;
   let remainingAddresses = [...stakeAddresses].sort();
   const now = new Date();
+  const STATUS_UPDATE_INTERVAL = 100;
 
   if (options?.jobName) {
     const status = await statusClient.syncStatus.upsert({
@@ -221,6 +227,7 @@ async function backfillStakeDelegationHistory(
   }
 
   let backfillError: string | null = null;
+  let lastCursorUpdate: string | null = null;
   try {
     const batches = chunkArray(
       remainingAddresses,
@@ -261,15 +268,29 @@ async function backfillStakeDelegationHistory(
 
         if (options?.jobName) {
           processed += 1;
-          await statusClient.syncStatus.update({
-            where: { jobName: options.jobName },
-            data: {
-              backfillCursor: stakeAddress,
-              backfillItemsProcessed: processed,
-            },
-          });
+          lastCursorUpdate = stakeAddress;
+          if (processed % STATUS_UPDATE_INTERVAL === 0) {
+            await statusClient.syncStatus.update({
+              where: { jobName: options.jobName },
+              data: {
+                backfillCursor: lastCursorUpdate,
+                backfillItemsProcessed: processed,
+              },
+            });
+            lastCursorUpdate = null;
+          }
         }
       }
+    }
+    if (options?.jobName && lastCursorUpdate) {
+      await statusClient.syncStatus.update({
+        where: { jobName: options.jobName },
+        data: {
+          backfillCursor: lastCursorUpdate,
+          backfillItemsProcessed: processed,
+        },
+      });
+      lastCursorUpdate = null;
     }
   } catch (error: any) {
     backfillError = error?.message ?? String(error);
@@ -318,10 +339,12 @@ export async function syncStakeAddressInventory(
   let created = 0;
 
   while (hasMore) {
-    const page = await koiosGet<KoiosAccountListEntry[]>("/account_list", {
-      limit: pageSize,
-      offset,
-    });
+    const page = await withRetry(() =>
+      koiosGet<KoiosAccountListEntry[]>("/account_list", {
+        limit: pageSize,
+        offset,
+      })
+    );
 
     if (page && page.length > 0) {
       totalFetched += page.length;
@@ -482,15 +505,19 @@ export async function syncDrepDelegationChanges(
     { drepId: string; epochNo: number | null }
   >();
 
-  const existingStakeAddressRows: Array<{ stakeAddress: string }> =
-    await delegationClient.stakeAddress.findMany({
-      select: { stakeAddress: true },
-    });
-  const existingStakeAddressSet = new Set<string>(
-    existingStakeAddressRows.map((row) => row.stakeAddress)
-  );
-
   const allStakeAddressArray = Array.from(allStakeAddresses);
+  const existingStakeAddressSet = new Set<string>();
+  const existingStakeAddressChunks = chunkArray(allStakeAddressArray, 5000);
+  for (const chunk of existingStakeAddressChunks) {
+    const existingStakeAddressRows: Array<{ stakeAddress: string }> =
+      await delegationClient.stakeAddress.findMany({
+        where: { stakeAddress: { in: chunk } },
+        select: { stakeAddress: true },
+      });
+    for (const row of existingStakeAddressRows) {
+      existingStakeAddressSet.add(row.stakeAddress);
+    }
+  }
   const newStakeAddresses = allStakeAddressArray.filter(
     (addr) => !existingStakeAddressSet.has(addr)
   );
@@ -572,23 +599,35 @@ export async function syncDrepDelegationChanges(
   // ============================================================
   console.log(`[DRep Delegation Sync] Phase 3: Processing delegator state updates...`);
 
-  const existingStates: Array<{
-    stakeAddress: string;
-    drepId: string | null;
-    amount: bigint | null;
-    delegatedEpoch: number | null;
-  }> = await delegationClient.stakeDelegationState.findMany({
-    where: { stakeAddress: { in: allStakeAddressArray } },
-    select: {
-      stakeAddress: true,
-      drepId: true,
-      amount: true,
-      delegatedEpoch: true,
-    },
-  });
-  const existingStateMap = new Map(
-    existingStates.map((row) => [row.stakeAddress, row])
-  );
+  const existingStateMap = new Map<
+    string,
+    {
+      stakeAddress: string;
+      drepId: string | null;
+      amount: bigint | null;
+      delegatedEpoch: number | null;
+    }
+  >();
+  const existingStateChunks = chunkArray(allStakeAddressArray, 5000);
+  for (const chunk of existingStateChunks) {
+    const existingStates: Array<{
+      stakeAddress: string;
+      drepId: string | null;
+      amount: bigint | null;
+      delegatedEpoch: number | null;
+    }> = await delegationClient.stakeDelegationState.findMany({
+      where: { stakeAddress: { in: chunk } },
+      select: {
+        stakeAddress: true,
+        drepId: true,
+        amount: true,
+        delegatedEpoch: true,
+      },
+    });
+    for (const row of existingStates) {
+      existingStateMap.set(row.stakeAddress, row);
+    }
+  }
 
   const toCreate: Array<{
     stakeAddress: string;
@@ -657,6 +696,9 @@ export async function syncDrepDelegationChanges(
 
   // Initialize or load Phase 3 checkpoint
   const syncStatusClient = delegationClient as Prisma.TransactionClient & { syncStatus: any };
+  const transactionClient = prisma as Prisma.TransactionClient & {
+    $transaction?: (args: any) => Promise<any>;
+  };
   let checkpoint: Phase3Checkpoint = {
     epoch: currentEpoch,
     createsComplete: false,
@@ -692,21 +734,36 @@ export async function syncDrepDelegationChanges(
     update: {},
   });
 
-  const updateCheckpoint = async (updates: Partial<Phase3Checkpoint>) => {
-    checkpoint = { ...checkpoint, ...updates };
-    await syncStatusClient.syncStatus.update({
-      where: { jobName: DREP_DELEGATION_PHASE3_JOB_NAME },
-      data: { backfillCursor: JSON.stringify(checkpoint) },
-    });
+  const buildCheckpointData = (updates: Partial<Phase3Checkpoint>) => {
+    const next = { ...checkpoint, ...updates };
+    return { next, data: { backfillCursor: JSON.stringify(next) } };
   };
 
   // Batch create new states (with checkpoint)
   if (toCreate.length > 0 && !checkpoint.createsComplete) {
-    await delegationClient.stakeDelegationState.createMany({
-      data: toCreate,
-      skipDuplicates: true,
-    });
-    await updateCheckpoint({ createsComplete: true });
+    const { next, data: checkpointData } = buildCheckpointData({ createsComplete: true });
+    if (transactionClient.$transaction) {
+      await transactionClient.$transaction([
+        delegationClient.stakeDelegationState.createMany({
+          data: toCreate,
+          skipDuplicates: true,
+        }),
+        syncStatusClient.syncStatus.update({
+          where: { jobName: DREP_DELEGATION_PHASE3_JOB_NAME },
+          data: checkpointData,
+        }),
+      ]);
+    } else {
+      await delegationClient.stakeDelegationState.createMany({
+        data: toCreate,
+        skipDuplicates: true,
+      });
+      await syncStatusClient.syncStatus.update({
+        where: { jobName: DREP_DELEGATION_PHASE3_JOB_NAME },
+        data: checkpointData,
+      });
+    }
+    checkpoint = next;
   }
 
   // Batch update existing states (with per-chunk checkpoint)
@@ -716,8 +773,9 @@ export async function syncDrepDelegationChanges(
     for (let i = startChunkIndex * updateChunkSize; i < toUpdate.length; i += updateChunkSize) {
       const chunkIndex = Math.floor(i / updateChunkSize);
       const chunk = toUpdate.slice(i, i + updateChunkSize);
-      await Promise.all(
-        chunk.map((row) =>
+      const { next, data: checkpointData } = buildCheckpointData({ updateChunkIndex: chunkIndex + 1 });
+      if (transactionClient.$transaction) {
+        const updateOps = chunk.map((row) =>
           delegationClient.stakeDelegationState.update({
             where: { stakeAddress: row.stakeAddress },
             data: {
@@ -726,9 +784,42 @@ export async function syncDrepDelegationChanges(
               delegatedEpoch: row.delegatedEpoch,
             },
           })
-        )
-      );
-      await updateCheckpoint({ updateChunkIndex: chunkIndex + 1 });
+        );
+        await transactionClient.$transaction([
+          ...updateOps,
+          syncStatusClient.syncStatus.update({
+            where: { jobName: DREP_DELEGATION_PHASE3_JOB_NAME },
+            data: checkpointData,
+          }),
+        ]);
+      } else {
+        const updateResult = await processInParallel(
+          chunk,
+          (row) => row.stakeAddress,
+          async (row) => {
+            await delegationClient.stakeDelegationState.update({
+              where: { stakeAddress: row.stakeAddress },
+              data: {
+                drepId: row.drepId,
+                amount: row.amount,
+                delegatedEpoch: row.delegatedEpoch,
+              },
+            });
+            return row;
+          },
+          DREP_DELEGATION_DB_UPDATE_CONCURRENCY
+        );
+        if (updateResult.failed.length > 0) {
+          throw new Error(
+            `[DRep Delegation Sync] Phase 3 update failures: ${updateResult.failed.length}`
+          );
+        }
+        await syncStatusClient.syncStatus.update({
+          where: { jobName: DREP_DELEGATION_PHASE3_JOB_NAME },
+          data: checkpointData,
+        });
+      }
+      checkpoint = next;
     }
   }
 
@@ -739,11 +830,29 @@ export async function syncDrepDelegationChanges(
     for (let i = startChunkIndex * changesChunkSize; i < changeLog.length; i += changesChunkSize) {
       const chunkIndex = Math.floor(i / changesChunkSize);
       const chunk = changeLog.slice(i, i + changesChunkSize);
-      await delegationClient.stakeDelegationChange.createMany({
-        data: chunk,
-        skipDuplicates: true,
-      });
-      await updateCheckpoint({ changesChunkIndex: chunkIndex + 1 });
+      const { next, data: checkpointData } = buildCheckpointData({ changesChunkIndex: chunkIndex + 1 });
+      if (transactionClient.$transaction) {
+        await transactionClient.$transaction([
+          delegationClient.stakeDelegationChange.createMany({
+            data: chunk,
+            skipDuplicates: true,
+          }),
+          syncStatusClient.syncStatus.update({
+            where: { jobName: DREP_DELEGATION_PHASE3_JOB_NAME },
+            data: checkpointData,
+          }),
+        ]);
+      } else {
+        await delegationClient.stakeDelegationChange.createMany({
+          data: chunk,
+          skipDuplicates: true,
+        });
+        await syncStatusClient.syncStatus.update({
+          where: { jobName: DREP_DELEGATION_PHASE3_JOB_NAME },
+          data: checkpointData,
+        });
+      }
+      checkpoint = next;
     }
   }
 

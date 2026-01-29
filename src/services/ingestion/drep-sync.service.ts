@@ -12,10 +12,13 @@ import type { KoiosDrepInfo, KoiosDrepListEntry } from "../../types/koios.types"
 import {
   KOIOS_DREP_LIST_PAGE_SIZE,
   KOIOS_DREP_INFO_BATCH_SIZE,
+  DREP_INFO_SYNC_CONCURRENCY,
   toBigIntOrNull,
   extractStringField,
   extractBooleanField,
 } from "./sync-utils";
+import { processInParallel } from "./parallel";
+import { withRetry } from "./utils";
 
 // ============================================================
 // Result Types
@@ -49,10 +52,12 @@ async function fetchAllKoiosDrepIds(): Promise<string[]> {
   const ids: string[] = [];
 
   while (hasMore) {
-    const page = await koiosGet<KoiosDrepListEntry[]>("/drep_list", {
-      limit: pageSize,
-      offset,
-    });
+    const page = await withRetry(() =>
+      koiosGet<KoiosDrepListEntry[]>("/drep_list", {
+        limit: pageSize,
+        offset,
+      })
+    );
 
     if (page && page.length > 0) {
       for (const row of page) {
@@ -78,20 +83,22 @@ async function fetchDrepMetadata(drepId: string): Promise<{
   doNotList?: boolean;
 }> {
   try {
-    const drepUpdates = await koiosGet<
-      Array<{
-        meta_json?: {
-          body?: {
-            givenName?: unknown;
-            paymentAddress?: unknown;
-            doNotList?: unknown;
-            image?: {
-              contentUrl?: unknown;
+    const drepUpdates = await withRetry(() =>
+      koiosGet<
+        Array<{
+          meta_json?: {
+            body?: {
+              givenName?: unknown;
+              paymentAddress?: unknown;
+              doNotList?: unknown;
+              image?: {
+                contentUrl?: unknown;
+              };
             };
-          };
-        } | null;
-      }>
-    >("/drep_updates", { _drep_id: drepId });
+          } | null;
+        }>
+      >("/drep_updates", { _drep_id: drepId })
+    );
 
     let name: string | undefined;
     let paymentAddr: string | undefined;
@@ -165,9 +172,11 @@ export async function syncAllDrepsInventory(
   for (let i = 0; i < missing.length; i += batchSize) {
     const batch = missing.slice(i, i + batchSize);
     try {
-      const infos = await koiosPost<KoiosDrepInfo[]>("/drep_info", {
-        _drep_ids: batch,
-      });
+      const infos = await withRetry(() =>
+        koiosPost<KoiosDrepInfo[]>("/drep_info", {
+          _drep_ids: batch,
+        })
+      );
 
       if (!Array.isArray(infos)) {
         failedInfoBatches++;
@@ -227,38 +236,54 @@ export async function syncAllDrepsInfo(
   for (let i = 0; i < drepIds.length; i += batchSize) {
     const batch = drepIds.slice(i, i + batchSize);
     try {
-      const infos = await koiosPost<KoiosDrepInfo[]>("/drep_info", {
-        _drep_ids: batch,
-      });
+      const infos = await withRetry(() =>
+        koiosPost<KoiosDrepInfo[]>("/drep_info", {
+          _drep_ids: batch,
+        })
+      );
 
       if (!Array.isArray(infos)) {
         failedBatches++;
         continue;
       }
 
-      for (const info of infos) {
-        if (!info?.drep_id) continue;
+      const updateResult = await processInParallel(
+        infos,
+        (info) => info?.drep_id ?? "",
+        async (info) => {
+          if (!info?.drep_id) return null;
 
-        // Fetch metadata from /drep_updates (name, paymentAddr, iconUrl, doNotList)
-        const metadata = await fetchDrepMetadata(info.drep_id);
+          // Fetch metadata from /drep_updates (name, paymentAddr, iconUrl, doNotList)
+          const metadata = await fetchDrepMetadata(info.drep_id);
 
-        await prisma.drep.update({
-          where: { drepId: info.drep_id },
-          data: {
-            votingPower: toBigIntOrNull(info.amount) ?? BigInt(0),
-            registered: info.registered ?? undefined,
-            active: info.active ?? undefined,
-            expiresEpoch: info.expires_epoch_no ?? undefined,
-            metaUrl: info.meta_url ?? undefined,
-            metaHash: info.meta_hash ?? undefined,
-            // Metadata from /drep_updates
-            ...(metadata.name && { name: metadata.name }),
-            ...(metadata.paymentAddr && { paymentAddr: metadata.paymentAddr }),
-            ...(metadata.iconUrl && { iconUrl: metadata.iconUrl }),
-            ...(typeof metadata.doNotList === "boolean" && { doNotList: metadata.doNotList }),
-          },
-        });
-        updated++;
+          await prisma.drep.update({
+            where: { drepId: info.drep_id },
+            data: {
+              votingPower: toBigIntOrNull(info.amount) ?? BigInt(0),
+              registered: info.registered ?? undefined,
+              active: info.active ?? undefined,
+              expiresEpoch: info.expires_epoch_no ?? undefined,
+              metaUrl: info.meta_url ?? undefined,
+              metaHash: info.meta_hash ?? undefined,
+              // Metadata from /drep_updates
+              ...(metadata.name && { name: metadata.name }),
+              ...(metadata.paymentAddr && { paymentAddr: metadata.paymentAddr }),
+              ...(metadata.iconUrl && { iconUrl: metadata.iconUrl }),
+              ...(typeof metadata.doNotList === "boolean" && {
+                doNotList: metadata.doNotList,
+              }),
+            },
+          });
+          return info;
+        },
+        DREP_INFO_SYNC_CONCURRENCY
+      );
+      updated += updateResult.successful.length;
+      if (updateResult.failed.length > 0) {
+        failedBatches++;
+        console.warn(
+          `[DRep Sync] Failed updates in batch: ${updateResult.failed.length}`
+        );
       }
     } catch {
       failedBatches++;
