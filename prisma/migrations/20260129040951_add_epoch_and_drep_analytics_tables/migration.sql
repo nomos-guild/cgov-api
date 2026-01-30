@@ -110,8 +110,10 @@ CREATE TABLE "drep_lifecycle_event" (
 -- CreateTable
 CREATE TABLE "pool_group" (
     "pool_id" TEXT NOT NULL,
-    "group_id" TEXT NOT NULL,
-    "group_name" TEXT,
+    "pool_group" TEXT NOT NULL,
+    "ticker" TEXT,
+    "adastat_group" TEXT,
+    "balanceanalytics_group" TEXT,
     "created_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updated_at" TIMESTAMP(3) NOT NULL,
 
@@ -143,7 +145,7 @@ CREATE INDEX "drep_lifecycle_event_action_idx" ON "drep_lifecycle_event"("action
 CREATE UNIQUE INDEX "drep_lifecycle_event_drep_id_action_epoch_no_tx_hash_key" ON "drep_lifecycle_event"("drep_id", "action", "epoch_no", COALESCE("tx_hash", '__NULL__'));
 
 -- CreateIndex
-CREATE INDEX "pool_group_group_id_idx" ON "pool_group"("group_id");
+CREATE INDEX "pool_group_pool_group_idx" ON "pool_group"("pool_group");
 
 -- CreateIndex
 CREATE INDEX "proposal_tx_hash_idx" ON "proposal"("tx_hash");

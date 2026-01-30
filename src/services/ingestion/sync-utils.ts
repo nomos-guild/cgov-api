@@ -16,6 +16,10 @@ export const KOIOS_POOL_VP_PAGE_SIZE = 1000;
 export const KOIOS_DREP_DELEGATORS_PAGE_SIZE = 1000;
 export const KOIOS_ACCOUNT_LIST_PAGE_SIZE = 1000;
 export const KOIOS_ACCOUNT_UPDATE_HISTORY_BATCH_SIZE = 10;
+// PostgREST endpoints cap responses to max 1000 rows; use explicit paging for history backfills.
+export const KOIOS_ACCOUNT_UPDATE_HISTORY_PAGE_SIZE = 1000;
+// Keep tx_info batches small to respect Koios payload limits on public/free tiers.
+export const KOIOS_TX_INFO_BATCH_SIZE = 10;
 export const DREP_DELEGATOR_MIN_VOTING_POWER = BigInt(0);
 export const DREP_DELEGATION_SYNC_CONCURRENCY = 2;
 export const DREP_DELEGATION_DB_UPDATE_CONCURRENCY = 10;
@@ -25,6 +29,7 @@ export const POOL_GROUPS_DB_UPDATE_CONCURRENCY = 10;
 export const EPOCH_TOTALS_BACKFILL_CONCURRENCY = 2;
 export const STAKE_DELEGATION_SYNC_STATE_ID = "current";
 export const DREP_DELEGATION_BACKFILL_JOB_NAME = "drep-delegation-backfill";
+export const FORCE_DREP_DELEGATION_BACKFILL_JOB_NAME = "drep-delegation-backfill-force";
 export const DREP_DELEGATION_PHASE3_JOB_NAME = "drep-delegation-phase3";
 
 // ============================================================

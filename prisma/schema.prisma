@@ -230,13 +230,15 @@ model DrepLifecycleEvent {
 // Each pool belongs to exactly one group; multiple pools can share a group
 // Enables SPO Entity Voting Power Concentration KPI
 model PoolGroup {
-  poolId    String   @id @map("pool_id") // Pool bech32 ID - each pool can only belong to one group
-  groupId   String   @map("group_id") // Koios group identifier (stake key) - can be shared by multiple pools
-  groupName String?  @map("group_name") // Human-readable entity name if available
-  createdAt DateTime @default(now()) @map("created_at")
-  updatedAt DateTime @updatedAt @map("updated_at")
+  poolId                String   @id @map("pool_id") // Pool bech32 ID - each pool can only belong to one group
+  poolGroup             String   @map("pool_group") // Koios pool group identifier (shared by multiple pools)
+  ticker                String?  @map("ticker") // Koios-reported ticker for the pool
+  adastatGroup          String?  @map("adastat_group") // Koios adastat entity/group
+  balanceanalyticsGroup String?  @map("balanceanalytics_group") // Koios balanceanalytics entity/group
+  createdAt             DateTime @default(now()) @map("created_at")
+  updatedAt             DateTime @updatedAt @map("updated_at")
 
-  @@index([groupId])
+  @@index([poolGroup])
   @@map("pool_group")
 }
 

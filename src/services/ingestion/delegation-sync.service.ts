@@ -12,19 +12,22 @@ import type {
   KoiosAccountListEntry,
   KoiosDrepDelegator,
   KoiosAccountUpdateHistoryEntry,
+  KoiosTxInfo,
 } from "../../types/koios.types";
 import { processInParallel } from "./parallel";
 import { withRetry } from "./utils";
 import {
   KOIOS_DREP_DELEGATORS_PAGE_SIZE,
   KOIOS_ACCOUNT_LIST_PAGE_SIZE,
-  KOIOS_ACCOUNT_UPDATE_HISTORY_BATCH_SIZE,
   DREP_DELEGATOR_MIN_VOTING_POWER,
   DREP_DELEGATION_SYNC_CONCURRENCY,
   DREP_DELEGATION_DB_UPDATE_CONCURRENCY,
   STAKE_DELEGATION_SYNC_STATE_ID,
   DREP_DELEGATION_BACKFILL_JOB_NAME,
+  FORCE_DREP_DELEGATION_BACKFILL_JOB_NAME,
   DREP_DELEGATION_PHASE3_JOB_NAME,
+  KOIOS_ACCOUNT_UPDATE_HISTORY_PAGE_SIZE,
+  KOIOS_TX_INFO_BATCH_SIZE,
   chunkArray,
   getKoiosCurrentEpoch,
   Phase3Checkpoint,
@@ -115,7 +118,8 @@ function sortAccountUpdates(
 
 function buildDrepChangeLogForStake(
   stakeAddress: string,
-  stakeEntries: KoiosAccountUpdateHistoryEntry[]
+  stakeEntries: KoiosAccountUpdateHistoryEntry[],
+  options?: { txHashToDrepId?: Map<string, string> }
 ): {
   changes: Array<{
     stakeAddress: string;
@@ -137,9 +141,12 @@ function buildDrepChangeLogForStake(
   let lastDrepId: string | null = null;
   let lastEpoch: number | null = null;
   const sorted = sortAccountUpdates(stakeEntries);
+  const txHashToDrepId = options?.txHashToDrepId ?? new Map<string, string>();
   for (const entry of sorted) {
     if (!entry?.action_type?.includes("delegation_drep")) continue;
-    const drepId = extractDelegatedDrepId(entry);
+    const drepId =
+      extractDelegatedDrepId(entry) ??
+      (entry.tx_hash ? txHashToDrepId.get(entry.tx_hash) ?? null : null);
     if (!drepId || drepId === lastDrepId) continue;
     const delegatedEpoch =
       typeof entry.epoch_no === "number" ? entry.epoch_no : -1;
@@ -160,16 +167,101 @@ function buildDrepChangeLogForStake(
   };
 }
 
-async function fetchAccountUpdateHistory(
-  stakeAddresses: string[]
+async function fetchAccountUpdateHistoryForStake(
+  stakeAddress: string
 ): Promise<KoiosAccountUpdateHistoryEntry[]> {
-  if (stakeAddresses.length === 0) return [];
-  const response = await withRetry(() =>
-    koiosPost<KoiosAccountUpdateHistoryEntry[]>("/account_update_history", {
-      _stake_addresses: stakeAddresses,
-    })
-  );
-  return Array.isArray(response) ? response : [];
+  const pageSize = KOIOS_ACCOUNT_UPDATE_HISTORY_PAGE_SIZE;
+  let offset = 0;
+  let hasMore = true;
+  const rows: KoiosAccountUpdateHistoryEntry[] = [];
+
+  // Koios (PostgREST) endpoints cap responses to max 1000; we page explicitly.
+  while (hasMore) {
+    const page = await withRetry(() =>
+      koiosPost<KoiosAccountUpdateHistoryEntry[]>(
+        `/account_update_history?offset=${offset}&limit=${pageSize}`,
+        { _stake_addresses: [stakeAddress] }
+      )
+    );
+
+    if (Array.isArray(page) && page.length > 0) {
+      rows.push(...page);
+      offset += page.length;
+      hasMore = page.length === pageSize;
+    } else {
+      hasMore = false;
+    }
+  }
+
+  return rows;
+}
+
+function extractVoteDelegationDrepIdFromTxInfo(
+  tx: KoiosTxInfo,
+  stakeAddress: string
+): string | null {
+  const certs = tx?.certificates ?? [];
+  if (!Array.isArray(certs) || certs.length === 0) return null;
+
+  for (const cert of certs) {
+    const type = (cert as any)?.type as unknown;
+    if (typeof type !== "string") continue;
+    if (!type.toLowerCase().includes("vote_delegation")) continue;
+
+    const info = (cert as any)?.info as any;
+    if (!info || typeof info !== "object") continue;
+
+    // Koios uses `stake_address` in certificate info for vote delegation.
+    const certStake =
+      (info.stake_address as unknown) ?? (info.stake_addr as unknown);
+    if (typeof certStake === "string" && certStake && certStake !== stakeAddress) {
+      continue;
+    }
+
+    const direct =
+      (info.drep_id as unknown) ??
+      (info.delegated_drep as unknown) ??
+      (info.drep as unknown);
+    if (typeof direct === "string" && direct) return direct;
+
+    // Fallback: search all string fields for a plausible DRep identifier.
+    for (const value of Object.values(info)) {
+      if (typeof value === "string" && value) {
+        if (value.startsWith("drep")) return value;
+      }
+    }
+  }
+
+  return null;
+}
+
+async function fetchTxInfoByHashes(txHashes: string[]): Promise<KoiosTxInfo[]> {
+  if (txHashes.length === 0) return [];
+
+  // Keep request bodies small to avoid Koios payload limits.
+  const unique = Array.from(new Set(txHashes));
+  const batches = chunkArray(unique, KOIOS_TX_INFO_BATCH_SIZE);
+  const results: KoiosTxInfo[] = [];
+
+  for (const batch of batches) {
+    const page = await withRetry(() =>
+      koiosPost<KoiosTxInfo[]>("/tx_info", {
+        _tx_hashes: batch,
+        _inputs: false,
+        _metadata: false,
+        _assets: false,
+        _withdrawals: false,
+        _certs: true,
+        _scripts: false,
+        _bytecode: false,
+      })
+    );
+    if (Array.isArray(page) && page.length > 0) {
+      results.push(...page);
+    }
+  }
+
+  return results;
 }
 
 async function backfillStakeDelegationHistory(
@@ -197,6 +289,9 @@ async function backfillStakeDelegationHistory(
   let remainingAddresses = [...stakeAddresses].sort();
   const now = new Date();
   const STATUS_UPDATE_INTERVAL = 100;
+  // Cache (stakeAddress, tx_hash) -> resolved drep_id for this backfill run to reduce /tx_info calls.
+  // Note: a single tx_hash can (rarely) include multiple vote_delegation certs for different stake keys.
+  const txStakeDrepCache = new Map<string, string | null>();
 
   if (options?.jobName) {
     const status = await statusClient.syncStatus.upsert({
@@ -229,56 +324,78 @@ async function backfillStakeDelegationHistory(
   let backfillError: string | null = null;
   let lastCursorUpdate: string | null = null;
   try {
-    const batches = chunkArray(
-      remainingAddresses,
-      KOIOS_ACCOUNT_UPDATE_HISTORY_BATCH_SIZE
-    );
-    for (const batch of batches) {
-      const entries = await fetchAccountUpdateHistory(batch);
-      const entriesByStake = new Map<string, KoiosAccountUpdateHistoryEntry[]>();
-      for (const entry of entries) {
-        if (!entry?.stake_address) continue;
-        const list = entriesByStake.get(entry.stake_address) ?? [];
-        list.push(entry);
-        entriesByStake.set(entry.stake_address, list);
+    for (const stakeAddress of remainingAddresses) {
+      const stakeEntries = await fetchAccountUpdateHistoryForStake(stakeAddress);
+
+      // Resolve missing DRep IDs for delegation_drep entries via tx_info certificates.
+      const txHashesNeedingResolution = Array.from(
+        new Set(
+          (stakeEntries ?? [])
+            .filter((e) => e?.action_type?.includes("delegation_drep"))
+            .filter((e) => !extractDelegatedDrepId(e))
+            .map((e) => e?.tx_hash)
+            .filter((h): h is string => typeof h === "string" && h.length > 0)
+        )
+      );
+
+      const missingTxHashes = txHashesNeedingResolution.filter(
+        (h) => !txStakeDrepCache.has(`${stakeAddress}:${h}`)
+      );
+
+      if (missingTxHashes.length > 0) {
+        const txInfos = await fetchTxInfoByHashes(missingTxHashes);
+        for (const tx of txInfos) {
+          if (!tx?.tx_hash) continue;
+          const drepId = extractVoteDelegationDrepIdFromTxInfo(tx, stakeAddress);
+          txStakeDrepCache.set(`${stakeAddress}:${tx.tx_hash}`, drepId);
+        }
+        // Ensure every requested hash is cached (even if null) to prevent re-fetching.
+        for (const h of missingTxHashes) {
+          const key = `${stakeAddress}:${h}`;
+          if (!txStakeDrepCache.has(key)) txStakeDrepCache.set(key, null);
+        }
       }
 
-      for (const stakeAddress of batch) {
-        const stakeEntries = entriesByStake.get(stakeAddress) ?? [];
-        const { changes, latest } = buildDrepChangeLogForStake(
-          stakeAddress,
-          stakeEntries
-        );
-
-        if (changes.length > 0) {
-          const chunkSize = 1000;
-          for (let i = 0; i < changes.length; i += chunkSize) {
-            const chunk = changes.slice(i, i + chunkSize);
-            const result = await statusClient.stakeDelegationChange.createMany({
-              data: chunk,
-              skipDuplicates: true,
-            });
-            changesInserted += result.count;
-          }
+      const txHashToDrepId = new Map<string, string>();
+      for (const h of txHashesNeedingResolution) {
+        const resolved = txStakeDrepCache.get(`${stakeAddress}:${h}`) ?? null;
+        if (typeof resolved === "string" && resolved) {
+          txHashToDrepId.set(h, resolved);
         }
+      }
 
-        if (latest) {
-          latestByStake.set(stakeAddress, latest);
+      const { changes, latest } = buildDrepChangeLogForStake(stakeAddress, stakeEntries, {
+        txHashToDrepId,
+      });
+
+      if (changes.length > 0) {
+        const chunkSize = 1000;
+        for (let i = 0; i < changes.length; i += chunkSize) {
+          const chunk = changes.slice(i, i + chunkSize);
+          const result = await statusClient.stakeDelegationChange.createMany({
+            data: chunk,
+            skipDuplicates: true,
+          });
+          changesInserted += result.count;
         }
+      }
 
-        if (options?.jobName) {
-          processed += 1;
-          lastCursorUpdate = stakeAddress;
-          if (processed % STATUS_UPDATE_INTERVAL === 0) {
-            await statusClient.syncStatus.update({
-              where: { jobName: options.jobName },
-              data: {
-                backfillCursor: lastCursorUpdate,
-                backfillItemsProcessed: processed,
-              },
-            });
-            lastCursorUpdate = null;
-          }
+      if (latest) {
+        latestByStake.set(stakeAddress, latest);
+      }
+
+      if (options?.jobName) {
+        processed += 1;
+        lastCursorUpdate = stakeAddress;
+        if (processed % STATUS_UPDATE_INTERVAL === 0) {
+          await statusClient.syncStatus.update({
+            where: { jobName: options.jobName },
+            data: {
+              backfillCursor: lastCursorUpdate,
+              backfillItemsProcessed: processed,
+            },
+          });
+          lastCursorUpdate = null;
         }
       }
     }
@@ -396,6 +513,17 @@ export async function syncDrepDelegationChanges(
     create: { id: STAKE_DELEGATION_SYNC_STATE_ID },
   });
   const lastProcessedEpoch = syncState.lastProcessedEpoch ?? 0;
+
+  // Force full history backfill (via env var). This is designed to be enabled temporarily.
+  // When enabled, it uses a separate SyncStatus row so the force-backfill runs once and can be resumed.
+  const forceBackfillEnabled = process.env.FORCE_DREP_DELEGATION_BACKFILL === "true";
+  const forceBackfillStatus = forceBackfillEnabled
+    ? await (prisma as any).syncStatus.findUnique({
+        where: { jobName: FORCE_DREP_DELEGATION_BACKFILL_JOB_NAME },
+      })
+    : null;
+  const shouldForceBackfill =
+    forceBackfillEnabled && !forceBackfillStatus?.backfillCompletedAt;
 
   // Check backfill status first to determine if this is an initial backfill
   const backfillStatus = (await (prisma as any).syncStatus.findUnique({
@@ -534,7 +662,26 @@ export async function syncDrepDelegationChanges(
   }
 
   // Handle initial backfill vs incremental sync
-  if (shouldBackfill && existingStakeAddressSet.size === 0) {
+  if (shouldForceBackfill) {
+    console.log(
+      `[DRep Delegation Sync] FORCE backfill enabled: fetching history for all ${allStakeAddressArray.length} stake addresses...`
+    );
+    const backfill = await backfillStakeDelegationHistory(
+      delegationClient,
+      allStakeAddressArray,
+      {
+        jobName: FORCE_DREP_DELEGATION_BACKFILL_JOB_NAME,
+        displayName: "DRep Delegation Backfill (Force)",
+      }
+    );
+    for (const [stakeAddress, latest] of backfill.latestByStake.entries()) {
+      latestHistoryByStake.set(stakeAddress, latest);
+      backfilledStakeAddresses.add(stakeAddress);
+    }
+    console.log(
+      `[DRep Delegation Sync] FORCE backfill complete: changesInserted=${backfill.changesInserted}`
+    );
+  } else if (shouldBackfill && existingStakeAddressSet.size === 0) {
     console.log(
       `[DRep Delegation Sync] Initial backfill: fetching history for all ${allStakeAddressArray.length} stake addresses...`
     );

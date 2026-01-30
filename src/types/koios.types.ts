@@ -304,6 +304,27 @@ export interface KoiosAccountUpdateHistoryEntry {
 }
 
 /**
+ * Transaction Info from Koios API
+ * Endpoint: POST /tx_info
+ *
+ * We only model the fields we need for delegation backfills.
+ */
+export interface KoiosTxInfoCertificate {
+  type: string;
+  index?: number | null;
+  info?: Record<string, unknown> | null;
+}
+
+export interface KoiosTxInfo {
+  tx_hash: string;
+  epoch_no?: number | null;
+  epoch_slot?: number | null;
+  absolute_slot?: number | null;
+  tx_timestamp?: number | null;
+  certificates?: KoiosTxInfoCertificate[] | null;
+}
+
+/**
  * DRep Updates from Koios API
  * Endpoint: GET /drep_updates?_drep_id=<drepId>
  * Used for DRep lifecycle events (registration, deregistration, updates)
@@ -339,7 +360,10 @@ export interface KoiosDrepUpdate {
 export interface KoiosPoolGroup {
   pool_id_bech32: string; // Pool ID in bech32 format
   pool_id_hex?: string | null;
-  group_id: string; // Entity/group identifier (usually stake key)
+  pool_group?: string | null; // Shared group identifier (e.g. multi-pool operator tag)
+  ticker?: string | null; // Pool ticker
+  adastat_group?: string | null; // AdaStat entity/group label
+  balanceanalytics_group?: string | null; // BalanceAnalytics entity/group label
 }
 
 /**

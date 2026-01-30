@@ -110,43 +110,91 @@ export async function syncPoolGroups(
     const uniqueGroupIds = new Set<string>();
 
     // Get existing pool groups only for pools we just fetched
-    const existingMap = new Map<string, string>();
+    const existingMap = new Map<
+      string,
+      {
+        poolGroup: string;
+        ticker: string | null;
+        adastatGroup: string | null;
+        balanceanalyticsGroup: string | null;
+      }
+    >();
     const poolIds = poolGroups
       .map((pg) => pg.pool_id_bech32)
       .filter((poolId): poolId is string => !!poolId);
     for (const chunk of chunkArray(poolIds, 5000)) {
       const existingGroups = await poolGroupClient.poolGroup.findMany({
         where: { poolId: { in: chunk } },
-        select: { poolId: true, groupId: true },
+        select: {
+          poolId: true,
+          poolGroup: true,
+          ticker: true,
+          adastatGroup: true,
+          balanceanalyticsGroup: true,
+        },
       });
       for (const group of existingGroups) {
-        existingMap.set(group.poolId, group.groupId);
+        existingMap.set(group.poolId, {
+          poolGroup: group.poolGroup,
+          ticker: group.ticker ?? null,
+          adastatGroup: group.adastatGroup ?? null,
+          balanceanalyticsGroup: group.balanceanalyticsGroup ?? null,
+        });
       }
     }
 
     // Separate into creates and updates
-    const toCreate: Array<{ groupId: string; poolId: string }> = [];
-    const toUpdate: Array<{ poolId: string; groupId: string }> = [];
+    const toCreate: Array<{
+      poolId: string;
+      poolGroup: string;
+      ticker?: string | null;
+      adastatGroup?: string | null;
+      balanceanalyticsGroup?: string | null;
+    }> = [];
+    const toUpdate: Array<{
+      poolId: string;
+      poolGroup: string;
+      ticker: string | null;
+      adastatGroup: string | null;
+      balanceanalyticsGroup: string | null;
+    }> = [];
 
     for (const pg of poolGroups) {
-      if (!pg.pool_id_bech32 || !pg.group_id) continue;
+      const poolId = pg.pool_id_bech32;
+      const poolGroup = pg.pool_group ?? null;
+      if (!poolId || !poolGroup) continue;
 
-      uniqueGroupIds.add(pg.group_id);
+      uniqueGroupIds.add(poolGroup);
 
-      const existing = existingMap.get(pg.pool_id_bech32);
+      const existing = existingMap.get(poolId);
+      const ticker = pg.ticker ?? null;
+      const adastatGroup = pg.adastat_group ?? null;
+      const balanceanalyticsGroup = pg.balanceanalytics_group ?? null;
+
       if (!existing) {
         toCreate.push({
-          groupId: pg.group_id,
-          poolId: pg.pool_id_bech32,
+          poolId,
+          poolGroup,
+          ticker,
+          adastatGroup,
+          balanceanalyticsGroup,
         });
-      } else if (existing !== pg.group_id) {
-        // Group changed - need to update
+      } else if (
+        existing.poolGroup !== poolGroup ||
+        existing.ticker !== ticker ||
+        existing.adastatGroup !== adastatGroup ||
+        existing.balanceanalyticsGroup !== balanceanalyticsGroup
+      ) {
+        // Any field changed - need to update
         toUpdate.push({
-          poolId: pg.pool_id_bech32,
-          groupId: pg.group_id,
+          poolId,
+          poolGroup,
+          ticker,
+          adastatGroup,
+          balanceanalyticsGroup,
         });
       }
-      // If existing === pg.group_id, no action needed
+      // If unchanged, no action needed
     }
 
     result.uniqueGroups = uniqueGroupIds.size;
@@ -168,7 +216,12 @@ export async function syncPoolGroups(
         async (row) => {
           await poolGroupClient.poolGroup.update({
             where: { poolId: row.poolId },
-            data: { groupId: row.groupId },
+            data: {
+              poolGroup: row.poolGroup,
+              ticker: row.ticker,
+              adastatGroup: row.adastatGroup,
+              balanceanalyticsGroup: row.balanceanalyticsGroup,
+            },
           });
           return row;
         },
@@ -216,15 +269,15 @@ export async function getPoolGroupStats(
   };
 
   // Get all pool groups
-  const allGroups: Array<{ groupId: string; poolId: string }> =
+  const allGroups: Array<{ poolGroup: string; poolId: string }> =
     await poolGroupClient.poolGroup.findMany({
-      select: { groupId: true, poolId: true },
+      select: { poolGroup: true, poolId: true },
     });
 
   // Count pools per group
   const groupSizes = new Map<string, number>();
   for (const pg of allGroups) {
-    groupSizes.set(pg.groupId, (groupSizes.get(pg.groupId) ?? 0) + 1);
+    groupSizes.set(pg.poolGroup, (groupSizes.get(pg.poolGroup) ?? 0) + 1);
   }
 
   // Calculate statistics
