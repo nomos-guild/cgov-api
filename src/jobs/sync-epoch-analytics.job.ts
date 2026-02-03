@@ -83,8 +83,18 @@ function startEpochAnalyticsSyncJobWithSchedule(schedule: string) {
       // Log DRep lifecycle sync results
       if (result.drepLifecycle) {
         console.log(
-          `  DRep Lifecycle: dreps=${result.drepLifecycle.drepsProcessed}, events=${result.drepLifecycle.eventsIngested} (reg=${result.drepLifecycle.eventsByType.registration}, dereg=${result.drepLifecycle.eventsByType.deregistration}, update=${result.drepLifecycle.eventsByType.update}), failed=${result.drepLifecycle.failed.length}`
+          `  DRep Lifecycle: attempted=${result.drepLifecycle.drepsAttempted}, processed=${result.drepLifecycle.drepsProcessed}, ` +
+            `noUpdates=${result.drepLifecycle.drepsWithNoUpdates}, updatesFetched=${result.drepLifecycle.totalUpdatesFetched}, ` +
+            `events=${result.drepLifecycle.eventsIngested} (reg=${result.drepLifecycle.eventsByType.registration}, ` +
+            `dereg=${result.drepLifecycle.eventsByType.deregistration}, update=${result.drepLifecycle.eventsByType.update}), ` +
+            `failed=${result.drepLifecycle.failed.length}`
         );
+        if (result.drepLifecycle.failed.length > 0) {
+          console.error(
+            `  DRep Lifecycle: first failures:`,
+            result.drepLifecycle.failed.slice(0, 10)
+          );
+        }
       } else {
         console.log(`  DRep Lifecycle: skipped=${result.skipped.drepLifecycle}`);
       }

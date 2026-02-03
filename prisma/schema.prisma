@@ -61,24 +61,29 @@ model Drep {
 // This is designed to let the client compute KPIs DB-first without hitting Koios at read time.
 // Also includes epoch timestamps for wall-clock calculations (Time-to-Enactment KPI).
 model EpochTotals {
-  epoch              Int       @id @map("epoch_no")
-  circulation        BigInt?   @map("circulation")
-  treasury           BigInt?   @map("treasury")
-  reward             BigInt?   @map("reward")
-  supply             BigInt?   @map("supply")
-  reserves           BigInt?   @map("reserves")
+  epoch                                Int       @id @map("epoch_no")
+  circulation                          BigInt?   @map("circulation")
+  treasury                             BigInt?   @map("treasury")
+  reward                               BigInt?   @map("reward")
+  supply                               BigInt?   @map("supply")
+  reserves                             BigInt?   @map("reserves")
   // Cached denominators used in governance analytics:
-  delegatedDrepPower BigInt?   @map("delegated_drep_power")
-  totalPoolVotePower BigInt?   @map("total_pool_vote_power")
+  delegatedDrepPower                   BigInt?   @map("delegated_drep_power")
+  totalPoolVotePower                   BigInt?   @map("total_pool_vote_power")
+  // Special DReps (aggregated per-epoch; we do NOT store stake addresses for these)
+  drepAlwaysNoConfidenceDelegatorCount Int?      @map("drep_always_no_confidence_delegator_count")
+  drepAlwaysNoConfidenceVotingPower    BigInt?   @map("drep_always_no_confidence_voting_power")
+  drepAlwaysAbstainDelegatorCount      Int?      @map("drep_always_abstain_delegator_count")
+  drepAlwaysAbstainVotingPower         BigInt?   @map("drep_always_abstain_voting_power")
   // Epoch timestamps from /epoch_info for wall-clock calculations:
-  startTime          DateTime? @map("start_time")
-  endTime            DateTime? @map("end_time")
-  firstBlockTime     Int?      @map("first_block_time") // Unix timestamp
-  lastBlockTime      Int?      @map("last_block_time") // Unix timestamp
-  blockCount         Int?      @map("block_count")
-  txCount            Int?      @map("tx_count")
-  createdAt          DateTime  @default(now()) @map("created_at")
-  updatedAt          DateTime  @updatedAt @map("updated_at")
+  startTime                            DateTime? @map("start_time")
+  endTime                              DateTime? @map("end_time")
+  firstBlockTime                       Int?      @map("first_block_time") // Unix timestamp
+  lastBlockTime                        Int?      @map("last_block_time") // Unix timestamp
+  blockCount                           Int?      @map("block_count")
+  txCount                              Int?      @map("tx_count")
+  createdAt                            DateTime  @default(now()) @map("created_at")
+  updatedAt                            DateTime  @updatedAt @map("updated_at")
 
   @@map("epoch_totals")
 }

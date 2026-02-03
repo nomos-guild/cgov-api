@@ -142,9 +142,6 @@ CREATE INDEX "drep_lifecycle_event_epoch_no_idx" ON "drep_lifecycle_event"("epoc
 CREATE INDEX "drep_lifecycle_event_action_idx" ON "drep_lifecycle_event"("action");
 
 -- CreateIndex
-CREATE UNIQUE INDEX "drep_lifecycle_event_drep_id_action_epoch_no_tx_hash_key" ON "drep_lifecycle_event"("drep_id", "action", "epoch_no", COALESCE("tx_hash", '__NULL__'));
-
--- CreateIndex
 CREATE INDEX "pool_group_pool_group_idx" ON "pool_group"("pool_group");
 
 -- CreateIndex

@@ -11,8 +11,15 @@
 
 import type { Prisma } from "@prisma/client";
 import { koiosGet } from "../koios";
-import type { KoiosDrepEpochSummary, KoiosTotals, KoiosEpochInfo } from "../../types/koios.types";
+import type {
+  KoiosDrepDelegator,
+  KoiosDrepVotingPower,
+  KoiosDrepEpochSummary,
+  KoiosTotals,
+  KoiosEpochInfo,
+} from "../../types/koios.types";
 import {
+  KOIOS_DREP_DELEGATORS_PAGE_SIZE,
   KOIOS_POOL_VP_PAGE_SIZE,
   toBigIntOrNull,
   getKoiosCurrentEpoch,
@@ -35,6 +42,11 @@ export interface SyncEpochTotalsResult {
   reward: bigint | null;
   delegatedDrepPower: bigint | null;
   totalPoolVotePower: bigint | null;
+  // Special DReps (we compute these as per-epoch aggregates without storing stake addresses)
+  drepAlwaysNoConfidenceDelegatorCount: number | null;
+  drepAlwaysNoConfidenceVotingPower: bigint | null;
+  drepAlwaysAbstainDelegatorCount: number | null;
+  drepAlwaysAbstainVotingPower: bigint | null;
   // Epoch timestamps
   startTime: Date | null;
   endTime: Date | null;
@@ -98,6 +110,97 @@ async function sumPoolVotingPowerForEpoch(epochNo: number): Promise<bigint> {
   return total;
 }
 
+/**
+ * Computes delegator count + total voting power for a DRep for delegations
+ * that were made in a specific epoch, by paging through /drep_delegators.
+ *
+ * Important: we intentionally do NOT persist stake addresses for these special DReps,
+ * to avoid ballooning the stake address inventory.
+ */
+async function getDrepDelegatorAggregatesForEpoch(
+  epochNo: number,
+  drepId: string
+): Promise<{ delegatorCount: number; votingPower: bigint }> {
+  const pageSize = KOIOS_DREP_DELEGATORS_PAGE_SIZE;
+  let offset = 0;
+  let hasMore = true;
+
+  // We intentionally do not retain stake addresses in memory; we only aggregate.
+  // Koios /drep_delegators is expected to return one row per stake address.
+  // `epoch_no` here represents the epoch when the vote delegation was made
+  // (per Koios OpenAPI schema), so we filter on epoch_no=eq.<epoch>.
+  let delegatorCount = 0;
+
+  while (hasMore) {
+    const page = await withRetry(() =>
+      koiosGet<KoiosDrepDelegator[]>("/drep_delegators", {
+        _drep_id: drepId,
+        // IMPORTANT:
+        // Koios docs define /drep_delegators with required `_drep_id` only.
+        // Epoch filtering is supported via PostgREST horizontal filtering on `epoch_no`
+        // (e.g. epoch_no=eq.320). Passing `_epoch_no` causes Koios to return 404.
+        epoch_no: `eq.${epochNo}`,
+        limit: pageSize,
+        offset,
+      })
+    );
+
+    if (page && page.length > 0) {
+      for (const row of page) {
+        const stakeAddress = row?.stake_address;
+        if (typeof stakeAddress === "string" && stakeAddress) {
+          delegatorCount += 1;
+        }
+      }
+
+      offset += page.length;
+      hasMore = page.length === pageSize;
+    } else {
+      hasMore = false;
+    }
+  }
+
+  // Voting power should be sourced from /drep_voting_power_history, not summed here.
+  return { delegatorCount, votingPower: BigInt(0) };
+}
+
+async function getDrepVotingPowerForEpoch(
+  epochNo: number,
+  drepId: string
+): Promise<bigint> {
+  const history = await withRetry(() =>
+    koiosGet<KoiosDrepVotingPower[]>("/drep_voting_power_history", {
+      _epoch_no: epochNo,
+      _drep_id: drepId,
+    })
+  );
+  const lovelace = history?.[0]?.amount;
+  return lovelace ? BigInt(lovelace) : BigInt(0);
+}
+
+async function getSpecialDrepAggregatesForEpoch(
+  epochNo: number,
+  drepId: string
+): Promise<{ delegatorCount: number | null; votingPower: bigint | null }> {
+  try {
+    // Delegator count is "delegations made in epoch" (from /drep_delegators + epoch_no filter).
+    // Voting power is the DRep's epoch voting power snapshot (from /drep_voting_power_history).
+    const [delegatorAgg, votingPower] = await Promise.all([
+      getDrepDelegatorAggregatesForEpoch(epochNo, drepId),
+      getDrepVotingPowerForEpoch(epochNo, drepId),
+    ]);
+    return { delegatorCount: delegatorAgg.delegatorCount, votingPower };
+  } catch (error: any) {
+    const status = error?.response?.status as number | undefined;
+    // These aggregates are nice-to-have; we should not fail the entire epoch sync
+    // if Koios rejects the query (404) or times out (504).
+    console.warn(
+      `[Epoch Totals] Failed to fetch special DRep aggregates for drepId=${drepId} epoch=${epochNo} status=${status ?? "unknown"}: ${error?.message ?? String(error)}`
+    );
+    return { delegatorCount: null, votingPower: null };
+  }
+}
+
 // ============================================================
 // Private Helpers - Timestamp conversion
 // ============================================================
@@ -126,8 +229,14 @@ export async function syncEpochTotals(
   prisma: Prisma.TransactionClient,
   epochNo: number
 ): Promise<SyncEpochTotalsResult> {
-  const [totalsArr, drepSummaryArr, epochInfoArr, totalPoolVotePower] =
-    await Promise.all([
+  const [
+    totalsArr,
+    drepSummaryArr,
+    epochInfoArr,
+    totalPoolVotePower,
+    drepAlwaysAbstainAgg,
+    drepAlwaysNoConfidenceAgg,
+  ] = await Promise.all([
       withRetry(() => koiosGet<KoiosTotals[]>("/totals", { _epoch_no: epochNo })),
       withRetry(() =>
         koiosGet<KoiosDrepEpochSummary[]>("/drep_epoch_summary", {
@@ -138,6 +247,8 @@ export async function syncEpochTotals(
         koiosGet<KoiosEpochInfo[]>("/epoch_info", { _epoch_no: epochNo })
       ),
       sumPoolVotingPowerForEpoch(epochNo),
+      getSpecialDrepAggregatesForEpoch(epochNo, "drep_always_abstain"),
+      getSpecialDrepAggregatesForEpoch(epochNo, "drep_always_no_confidence"),
     ]);
 
   const totals = totalsArr?.[0] ?? null;
@@ -151,6 +262,13 @@ export async function syncEpochTotals(
   const supply = toBigIntOrNull(totals?.supply);
   const reserves = toBigIntOrNull(totals?.reserves);
   const delegatedDrepPower = toBigIntOrNull(drepSummary?.amount);
+
+  // Special DReps (aggregated)
+  const drepAlwaysAbstainDelegatorCount = drepAlwaysAbstainAgg.delegatorCount;
+  const drepAlwaysAbstainVotingPower = drepAlwaysAbstainAgg.votingPower;
+  const drepAlwaysNoConfidenceDelegatorCount =
+    drepAlwaysNoConfidenceAgg.delegatorCount;
+  const drepAlwaysNoConfidenceVotingPower = drepAlwaysNoConfidenceAgg.votingPower;
 
   // Epoch timestamps
   const startTime = unixToDate(epochInfo?.start_time);
@@ -170,6 +288,10 @@ export async function syncEpochTotals(
       reserves,
       delegatedDrepPower,
       totalPoolVotePower,
+      drepAlwaysNoConfidenceDelegatorCount,
+      drepAlwaysNoConfidenceVotingPower,
+      drepAlwaysAbstainDelegatorCount,
+      drepAlwaysAbstainVotingPower,
       startTime,
       endTime,
       firstBlockTime,
@@ -186,6 +308,10 @@ export async function syncEpochTotals(
       reserves,
       delegatedDrepPower,
       totalPoolVotePower,
+      drepAlwaysNoConfidenceDelegatorCount,
+      drepAlwaysNoConfidenceVotingPower,
+      drepAlwaysAbstainDelegatorCount,
+      drepAlwaysAbstainVotingPower,
       startTime,
       endTime,
       firstBlockTime,
@@ -205,6 +331,10 @@ export async function syncEpochTotals(
     reserves,
     delegatedDrepPower,
     totalPoolVotePower,
+    drepAlwaysNoConfidenceDelegatorCount,
+    drepAlwaysNoConfidenceVotingPower,
+    drepAlwaysAbstainDelegatorCount,
+    drepAlwaysAbstainVotingPower,
     startTime,
     endTime,
     blockCount,

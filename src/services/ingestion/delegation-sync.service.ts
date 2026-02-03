@@ -2,14 +2,12 @@
  * Delegation Sync Service
  *
  * Handles stake address delegation tracking and change log.
- * - syncStakeAddressInventory: Creates stake address records
  * - syncDrepDelegationChanges: Syncs delegation states and change log
  */
 
 import type { Prisma } from "@prisma/client";
 import { koiosGet, koiosPost } from "../koios";
 import type {
-  KoiosAccountListEntry,
   KoiosDrepDelegator,
   KoiosAccountUpdateHistoryEntry,
   KoiosTxInfo,
@@ -18,7 +16,6 @@ import { processInParallel } from "./parallel";
 import { withRetry } from "./utils";
 import {
   KOIOS_DREP_DELEGATORS_PAGE_SIZE,
-  KOIOS_ACCOUNT_LIST_PAGE_SIZE,
   DREP_DELEGATOR_MIN_VOTING_POWER,
   DREP_DELEGATION_SYNC_CONCURRENCY,
   DREP_DELEGATION_DB_UPDATE_CONCURRENCY,
@@ -26,6 +23,7 @@ import {
   DREP_DELEGATION_BACKFILL_JOB_NAME,
   FORCE_DREP_DELEGATION_BACKFILL_JOB_NAME,
   DREP_DELEGATION_PHASE3_JOB_NAME,
+  KOIOS_ACCOUNT_UPDATE_HISTORY_BATCH_SIZE,
   KOIOS_ACCOUNT_UPDATE_HISTORY_PAGE_SIZE,
   KOIOS_TX_INFO_BATCH_SIZE,
   chunkArray,
@@ -37,11 +35,6 @@ import { syncAllDrepsInventory } from "./drep-sync.service";
 // ============================================================
 // Result Types
 // ============================================================
-
-export interface SyncStakeAddressInventoryResult {
-  totalFetched: number;
-  created: number;
-}
 
 export interface SyncDrepDelegationChangesResult {
   currentEpoch: number;
@@ -167,25 +160,34 @@ function buildDrepChangeLogForStake(
   };
 }
 
-async function fetchAccountUpdateHistoryForStake(
-  stakeAddress: string
-): Promise<KoiosAccountUpdateHistoryEntry[]> {
+async function fetchAccountUpdateHistoryForStakes(
+  stakeAddresses: string[]
+): Promise<Map<string, KoiosAccountUpdateHistoryEntry[]>> {
+  const result = new Map<string, KoiosAccountUpdateHistoryEntry[]>();
+  if (stakeAddresses.length === 0) return result;
+
   const pageSize = KOIOS_ACCOUNT_UPDATE_HISTORY_PAGE_SIZE;
   let offset = 0;
   let hasMore = true;
-  const rows: KoiosAccountUpdateHistoryEntry[] = [];
 
   // Koios (PostgREST) endpoints cap responses to max 1000; we page explicitly.
+  // When batching stake addresses, paging applies to the combined result set.
   while (hasMore) {
     const page = await withRetry(() =>
       koiosPost<KoiosAccountUpdateHistoryEntry[]>(
         `/account_update_history?offset=${offset}&limit=${pageSize}`,
-        { _stake_addresses: [stakeAddress] }
+        { _stake_addresses: stakeAddresses }
       )
     );
 
     if (Array.isArray(page) && page.length > 0) {
-      rows.push(...page);
+      for (const row of page) {
+        const stakeAddress = row?.stake_address;
+        if (typeof stakeAddress !== "string" || !stakeAddress) continue;
+        const existing = result.get(stakeAddress);
+        if (existing) existing.push(row);
+        else result.set(stakeAddress, [row]);
+      }
       offset += page.length;
       hasMore = page.length === pageSize;
     } else {
@@ -193,7 +195,7 @@ async function fetchAccountUpdateHistoryForStake(
     }
   }
 
-  return rows;
+  return result;
 }
 
 function extractVoteDelegationDrepIdFromTxInfo(
@@ -324,78 +326,119 @@ async function backfillStakeDelegationHistory(
   let backfillError: string | null = null;
   let lastCursorUpdate: string | null = null;
   try {
-    for (const stakeAddress of remainingAddresses) {
-      const stakeEntries = await fetchAccountUpdateHistoryForStake(stakeAddress);
+    const stakeBatches = chunkArray(
+      remainingAddresses,
+      KOIOS_ACCOUNT_UPDATE_HISTORY_BATCH_SIZE
+    );
 
-      // Resolve missing DRep IDs for delegation_drep entries via tx_info certificates.
-      const txHashesNeedingResolution = Array.from(
-        new Set(
-          (stakeEntries ?? [])
-            .filter((e) => e?.action_type?.includes("delegation_drep"))
-            .filter((e) => !extractDelegatedDrepId(e))
-            .map((e) => e?.tx_hash)
-            .filter((h): h is string => typeof h === "string" && h.length > 0)
-        )
-      );
+    for (const stakeBatch of stakeBatches) {
+      // Batch-fetch history for multiple stake addresses to cut request overhead.
+      const historyByStake = await fetchAccountUpdateHistoryForStakes(stakeBatch);
 
-      const missingTxHashes = txHashesNeedingResolution.filter(
-        (h) => !txStakeDrepCache.has(`${stakeAddress}:${h}`)
-      );
+      // Build (tx_hash -> stakeAddresses needing resolution) for this batch.
+      const txHashToStakesNeeding = new Map<string, string[]>();
+      const txHashesNeedingResolutionByStake = new Map<string, string[]>();
+      for (const stakeAddress of stakeBatch) {
+        const stakeEntries = historyByStake.get(stakeAddress) ?? [];
+        const txHashesNeedingResolution = Array.from(
+          new Set(
+            (stakeEntries ?? [])
+              .filter((e) => e?.action_type?.includes("delegation_drep"))
+              .filter((e) => !extractDelegatedDrepId(e))
+              .map((e) => e?.tx_hash)
+              .filter((h): h is string => typeof h === "string" && h.length > 0)
+          )
+        );
+        txHashesNeedingResolutionByStake.set(stakeAddress, txHashesNeedingResolution);
 
+        for (const h of txHashesNeedingResolution) {
+          const cacheKey = `${stakeAddress}:${h}`;
+          if (txStakeDrepCache.has(cacheKey)) continue;
+          const existing = txHashToStakesNeeding.get(h);
+          if (existing) existing.push(stakeAddress);
+          else txHashToStakesNeeding.set(h, [stakeAddress]);
+        }
+      }
+
+      const missingTxHashes = Array.from(txHashToStakesNeeding.keys());
       if (missingTxHashes.length > 0) {
         const txInfos = await fetchTxInfoByHashes(missingTxHashes);
+        const txInfoByHash = new Map<string, KoiosTxInfo>();
         for (const tx of txInfos) {
-          if (!tx?.tx_hash) continue;
-          const drepId = extractVoteDelegationDrepIdFromTxInfo(tx, stakeAddress);
-          txStakeDrepCache.set(`${stakeAddress}:${tx.tx_hash}`, drepId);
+          if (tx?.tx_hash) txInfoByHash.set(tx.tx_hash, tx);
         }
-        // Ensure every requested hash is cached (even if null) to prevent re-fetching.
-        for (const h of missingTxHashes) {
-          const key = `${stakeAddress}:${h}`;
-          if (!txStakeDrepCache.has(key)) txStakeDrepCache.set(key, null);
-        }
-      }
 
-      const txHashToDrepId = new Map<string, string>();
-      for (const h of txHashesNeedingResolution) {
-        const resolved = txStakeDrepCache.get(`${stakeAddress}:${h}`) ?? null;
-        if (typeof resolved === "string" && resolved) {
-          txHashToDrepId.set(h, resolved);
+        // Resolve and cache (stakeAddress, tx_hash) -> drep_id for this batch.
+        for (const txHash of missingTxHashes) {
+          const tx = txInfoByHash.get(txHash);
+          const stakeList = txHashToStakesNeeding.get(txHash) ?? [];
+          for (const stakeAddress of stakeList) {
+            const cacheKey = `${stakeAddress}:${txHash}`;
+            if (txStakeDrepCache.has(cacheKey)) continue;
+            const drepId = tx ? extractVoteDelegationDrepIdFromTxInfo(tx, stakeAddress) : null;
+            txStakeDrepCache.set(cacheKey, drepId);
+          }
         }
       }
 
-      const { changes, latest } = buildDrepChangeLogForStake(stakeAddress, stakeEntries, {
-        txHashToDrepId,
-      });
-
-      if (changes.length > 0) {
-        const chunkSize = 1000;
-        for (let i = 0; i < changes.length; i += chunkSize) {
-          const chunk = changes.slice(i, i + chunkSize);
-          const result = await statusClient.stakeDelegationChange.createMany({
-            data: chunk,
-            skipDuplicates: true,
-          });
-          changesInserted += result.count;
+      // Ensure every requested hash is cached (even if null) to prevent re-fetching.
+      for (const [txHash, stakeList] of txHashToStakesNeeding.entries()) {
+        for (const stakeAddress of stakeList) {
+          const cacheKey = `${stakeAddress}:${txHash}`;
+          if (!txStakeDrepCache.has(cacheKey)) txStakeDrepCache.set(cacheKey, null);
         }
       }
 
-      if (latest) {
-        latestByStake.set(stakeAddress, latest);
-      }
+      // Process stake addresses in-order (preserves cursor semantics).
+      for (const stakeAddress of stakeBatch) {
+        const stakeEntries = historyByStake.get(stakeAddress) ?? [];
 
-      if (options?.jobName) {
-        processed += 1;
-        lastCursorUpdate = stakeAddress;
-        if (processed % STATUS_UPDATE_INTERVAL === 0) {
-          await statusClient.syncStatus.update({
-            where: { jobName: options.jobName },
-            data: {
-              backfillCursor: lastCursorUpdate,
-              backfillItemsProcessed: processed,
-            },
-          });
-          lastCursorUpdate = null;
+        const txHashesNeedingResolution =
+          txHashesNeedingResolutionByStake.get(stakeAddress) ?? [];
+
+        const txHashToDrepId = new Map<string, string>();
+        for (const h of txHashesNeedingResolution) {
+          const resolved = txStakeDrepCache.get(`${stakeAddress}:${h}`) ?? null;
+          if (typeof resolved === "string" && resolved) {
+            txHashToDrepId.set(h, resolved);
+          }
+        }
+
+        const { changes, latest } = buildDrepChangeLogForStake(
+          stakeAddress,
+          stakeEntries,
+          { txHashToDrepId }
+        );
+
+        if (changes.length > 0) {
+          const chunkSize = 1000;
+          for (let i = 0; i < changes.length; i += chunkSize) {
+            const chunk = changes.slice(i, i + chunkSize);
+            const result = await statusClient.stakeDelegationChange.createMany({
+              data: chunk,
+              skipDuplicates: true,
+            });
+            changesInserted += result.count;
+          }
+        }
+
+        if (latest) {
+          latestByStake.set(stakeAddress, latest);
+        }
+
+        if (options?.jobName) {
+          processed += 1;
+          lastCursorUpdate = stakeAddress;
+          if (processed % STATUS_UPDATE_INTERVAL === 0) {
+            await statusClient.syncStatus.update({
+              where: { jobName: options.jobName },
+              data: {
+                backfillCursor: lastCursorUpdate,
+                backfillItemsProcessed: processed,
+              },
+            });
+            lastCursorUpdate = null;
+          }
         }
       }
     }
@@ -439,54 +482,6 @@ async function backfillStakeDelegationHistory(
 // ============================================================
 // Public API
 // ============================================================
-
-/**
- * Inventory all stake addresses from Koios into the DB.
- */
-export async function syncStakeAddressInventory(
-  prisma: Prisma.TransactionClient
-): Promise<SyncStakeAddressInventoryResult> {
-  const delegationClient = prisma as Prisma.TransactionClient & {
-    stakeAddress: any;
-  };
-  const pageSize = KOIOS_ACCOUNT_LIST_PAGE_SIZE;
-  let offset = 0;
-  let hasMore = true;
-  let totalFetched = 0;
-  let created = 0;
-
-  while (hasMore) {
-    const page = await withRetry(() =>
-      koiosGet<KoiosAccountListEntry[]>("/account_list", {
-        limit: pageSize,
-        offset,
-      })
-    );
-
-    if (page && page.length > 0) {
-      totalFetched += page.length;
-      const data = page
-        .map((row) => row?.stake_address)
-        .filter((stakeAddress): stakeAddress is string => !!stakeAddress)
-        .map((stakeAddress) => ({ stakeAddress }));
-
-      if (data.length > 0) {
-        const result = await delegationClient.stakeAddress.createMany({
-          data,
-          skipDuplicates: true,
-        });
-        created += result.count;
-      }
-
-      offset += page.length;
-      hasMore = page.length === pageSize;
-    } else {
-      hasMore = false;
-    }
-  }
-
-  return { totalFetched, created };
-}
 
 /**
  * Sync stake address delegation changes based on current DRep delegators.
@@ -558,9 +553,13 @@ export async function syncDrepDelegationChanges(
   }
 
   const minVotingPower = DREP_DELEGATOR_MIN_VOTING_POWER;
+  // These "special" DRep options can have massive delegator sets.
+  // We intentionally exclude them from stake-address delegation tracking to avoid
+  // ballooning the stake address inventory; we ingest only per-epoch aggregates elsewhere.
+  const excludedDrepIds = ["drep_always_abstain", "drep_always_no_confidence"];
   let drepRows = await prisma.drep.findMany({
     select: { drepId: true },
-    where: { votingPower: { gt: minVotingPower } },
+    where: { votingPower: { gt: minVotingPower }, drepId: { notIn: excludedDrepIds } },
     orderBy: { drepId: "asc" },
   });
 
@@ -569,7 +568,7 @@ export async function syncDrepDelegationChanges(
     await syncAllDrepsInventory(prisma);
     drepRows = await prisma.drep.findMany({
       select: { drepId: true },
-      where: { votingPower: { gt: minVotingPower } },
+      where: { votingPower: { gt: minVotingPower }, drepId: { notIn: excludedDrepIds } },
       orderBy: { drepId: "asc" },
     });
   }

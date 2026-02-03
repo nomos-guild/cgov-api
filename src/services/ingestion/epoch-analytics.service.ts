@@ -36,9 +36,7 @@ export {
 
 // Re-export from delegation-sync.service
 export {
-  syncStakeAddressInventory,
   syncDrepDelegationChanges,
-  type SyncStakeAddressInventoryResult,
   type SyncDrepDelegationChangesResult,
 } from "./delegation-sync.service";
 
@@ -162,10 +160,26 @@ async function syncGovernanceAnalyticsForEpoch(
   // 4) DRep lifecycle events (registrations, deregistrations, updates)
   if (!state.drepLifecycleSyncedAt) {
     res.drepLifecycle = await syncDrepLifecycleEvents(prisma);
-    await prisma.epochAnalyticsSync.update({
-      where: { epoch: epochToSync },
-      data: { drepLifecycleSyncedAt: new Date() },
-    });
+    // Mark checkpoint if we successfully talked to Koios (i.e., fetched any updates)
+    // or if we actually ingested rows. This avoids "false success" where Koios calls
+    // systematically fail/return empty and we mark the epoch as done anyway.
+    const fetchedAnyUpdates = res.drepLifecycle.totalUpdatesFetched > 0;
+    const hadAnySuccess = res.drepLifecycle.drepsProcessed > 0;
+
+    if (hadAnySuccess && (res.drepLifecycle.eventsIngested > 0 || fetchedAnyUpdates)) {
+      await prisma.epochAnalyticsSync.update({
+        where: { epoch: epochToSync },
+        data: { drepLifecycleSyncedAt: new Date() },
+      });
+    } else {
+      console.error(
+        `[Epoch Analytics] DRep lifecycle sync appears to have fetched 0 updates total for epoch ${epochToSync}; ` +
+          `not marking drepLifecycleSyncedAt so it can retry next run. ` +
+          `(drepsAttempted=${res.drepLifecycle.drepsAttempted}, drepsProcessed=${res.drepLifecycle.drepsProcessed}, ` +
+          `drepsWithNoUpdates=${res.drepLifecycle.drepsWithNoUpdates}, updatesFetched=${res.drepLifecycle.totalUpdatesFetched}, ` +
+          `eventsIngested=${res.drepLifecycle.eventsIngested}, failed=${res.drepLifecycle.failed.length})`
+      );
+    }
   }
 
   // 5) Pool groups (multi-pool operator mappings)

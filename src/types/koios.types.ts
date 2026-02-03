@@ -336,7 +336,11 @@ export interface KoiosDrepUpdate {
   update_tx_hash: string;
   cert_index?: number | null;
   block_time: number; // Unix timestamp
-  action_type: string; // "registration", "deregistration", or certificate update type
+  /**
+   * Effective action for this DRep Update certificate.
+   * Koios docs: allowed values are "updated" | "registered" | "deregistered".
+   */
+  action?: "updated" | "registered" | "deregistered" | string;
   deposit?: string | null;
   meta_url?: string | null;
   meta_hash?: string | null;

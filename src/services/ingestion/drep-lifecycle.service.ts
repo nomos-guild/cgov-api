@@ -32,7 +32,10 @@ const SHELLEY_START_EPOCH = 208;
 // ============================================================
 
 export interface SyncDrepLifecycleResult {
+  drepsAttempted: number;
   drepsProcessed: number;
+  drepsWithNoUpdates: number;
+  totalUpdatesFetched: number;
   eventsIngested: number;
   eventsByType: {
     registration: number;
@@ -60,10 +63,22 @@ function blockTimeToEpoch(blockTime: number): number {
 }
 
 /**
- * Normalizes Koios action_type to our standard action names
+ * Normalizes Koios `/drep_updates` action fields to our standard action names
+ *
+ * Koios docs: `action` is one of "updated" | "registered" | "deregistered".
  */
-function normalizeActionType(actionType: string): string {
+function normalizeActionType(actionType: unknown): string {
+  if (typeof actionType !== "string" || actionType.trim().length === 0) {
+    return "update";
+  }
+
   const lower = actionType.toLowerCase();
+  // Koios documented actions
+  if (lower === "registered") return "registration";
+  if (lower === "deregistered") return "deregistration";
+  if (lower === "updated") return "update";
+
+  // Back-compat / alternate spellings
   if (lower.includes("registration") && !lower.includes("de")) {
     return "registration";
   }
@@ -152,7 +167,10 @@ async function fetchDrepUpdates(drepId: string): Promise<KoiosDrepUpdate[]> {
 export async function syncDrepLifecycleEvents(
   prisma: Prisma.TransactionClient
 ): Promise<SyncDrepLifecycleResult> {
-  console.log(`[DRep Lifecycle] Starting lifecycle event sync...`);
+  const startedAt = Date.now();
+  console.log(
+    `[DRep Lifecycle] Starting lifecycle event sync... (concurrency=${DREP_LIFECYCLE_SYNC_CONCURRENCY})`
+  );
 
   const lifecycleClient = prisma as Prisma.TransactionClient & {
     drepLifecycleEvent: any;
@@ -163,7 +181,10 @@ export async function syncDrepLifecycleEvents(
   console.log(`[DRep Lifecycle] Found ${drepIds.length} DReps to process`);
 
   const result: SyncDrepLifecycleResult = {
+    drepsAttempted: drepIds.length,
     drepsProcessed: 0,
+    drepsWithNoUpdates: 0,
+    totalUpdatesFetched: 0,
     eventsIngested: 0,
     eventsByType: {
       registration: 0,
@@ -173,13 +194,35 @@ export async function syncDrepLifecycleEvents(
     failed: [],
   };
 
+  // Progress counters (best-effort; used only for logging)
+  let processedSoFar = 0;
+  let drepsWithNoUpdates = 0;
+  let totalUpdatesFetched = 0;
+  let totalEventsPrepared = 0;
+  let sampleLogged = 0;
+  let updatesMissingAction = 0;
+  let updatesMissingBlockTime = 0;
+  let invalidUpdateSamplesLogged = 0;
+
   const parallelResult = await processInParallel(
     drepIds,
     (drepId) => drepId,
     async (drepId) => {
       const updates = await fetchDrepUpdates(drepId);
+      processedSoFar++;
+      totalUpdatesFetched += updates.length;
+
+      if (processedSoFar % 250 === 0) {
+        const elapsedSec = ((Date.now() - startedAt) / 1000).toFixed(1);
+        console.log(
+          `[DRep Lifecycle] Progress: processed=${processedSoFar}/${drepIds.length}, ` +
+            `noUpdates=${drepsWithNoUpdates}, updatesFetched=${totalUpdatesFetched}, ` +
+            `eventsPrepared=${totalEventsPrepared}, elapsedSec=${elapsedSec}`
+        );
+      }
 
       if (updates.length === 0) {
+        drepsWithNoUpdates++;
         return {
           drepsProcessed: 1,
           eventsIngested: 0,
@@ -188,18 +231,74 @@ export async function syncDrepLifecycleEvents(
       }
 
       // Transform to event records
-      const events = updates.map((update) => {
-        const action = normalizeActionType(update.action_type);
-        const epochNo = blockTimeToEpoch(update.block_time);
+      const events: Array<{
+        drepId: string;
+        action: string;
+        epochNo: number;
+        blockTime?: number;
+        txHash?: string;
+      }> = [];
 
-        return {
-          drepId: update.drep_id,
+      for (const update of updates) {
+        const rawActionType = update.action;
+        if (rawActionType === undefined || rawActionType === null) {
+          updatesMissingAction++;
+          if (invalidUpdateSamplesLogged < 5) {
+            invalidUpdateSamplesLogged++;
+            console.warn(
+              `[DRep Lifecycle] Update missing action. drepId=${drepId}, keys=${Object.keys(update as any).join(",")}`
+            );
+          }
+        }
+
+        const action = normalizeActionType(rawActionType);
+        const blockTime =
+          typeof (update as any)?.block_time === "number"
+            ? (update as any).block_time
+            : undefined;
+
+        if (blockTime === undefined) {
+          updatesMissingBlockTime++;
+          if (invalidUpdateSamplesLogged < 5) {
+            invalidUpdateSamplesLogged++;
+            console.warn(
+              `[DRep Lifecycle] Update missing block_time. drepId=${drepId}, actionType=${String(
+                rawActionType
+              )}, keys=${Object.keys(update as any).join(",")}`
+            );
+          }
+          // Without block_time we can't derive epoch reliably; skip this record.
+          continue;
+        }
+
+        const epochNo = blockTimeToEpoch(blockTime);
+
+        events.push({
+          drepId: (update as any)?.drep_id ?? drepId,
           action,
           epochNo,
-          blockTime: update.block_time,
-          txHash: update.update_tx_hash,
+          blockTime,
+          txHash: (update as any)?.update_tx_hash ?? undefined,
+        });
+      }
+      totalEventsPrepared += events.length;
+
+      if (sampleLogged < 3) {
+        sampleLogged++;
+        console.log(
+          `[DRep Lifecycle] Sample DRep updates: drepId=${drepId}, updates=${updates.length}, ` +
+            `firstAction=${String(updates[0]?.action ?? "null")}, firstBlockTime=${updates[0]?.block_time ?? "null"}`
+        );
+      }
+
+      if (events.length === 0) {
+        // We fetched updates, but none were usable (e.g., missing block_time).
+        return {
+          drepsProcessed: 1,
+          eventsIngested: 0,
+          eventsByType: { registration: 0, deregistration: 0, update: 0 },
         };
-      });
+      }
 
       // Batch insert with skipDuplicates for idempotency
       const inserted = await lifecycleClient.drepLifecycleEvent.createMany({
@@ -239,11 +338,32 @@ export async function syncDrepLifecycleEvents(
     result.failed.push({ drepId: failed.id, error: failed.error });
   }
 
+  // Populate final counters
+  result.drepsWithNoUpdates = drepsWithNoUpdates;
+  result.totalUpdatesFetched = totalUpdatesFetched;
+
+  if (updatesMissingAction > 0 || updatesMissingBlockTime > 0) {
+    console.warn(
+      `[DRep Lifecycle] Encountered invalid update records: ` +
+        `missingAction=${updatesMissingAction}, missingBlockTime=${updatesMissingBlockTime}`
+    );
+  }
+
+  if (result.failed.length > 0) {
+    console.error(
+      `[DRep Lifecycle] Failures: ${result.failed.length} DReps failed. First failures:`,
+      result.failed.slice(0, 10)
+    );
+  }
+
+  const durationSec = ((Date.now() - startedAt) / 1000).toFixed(1);
   console.log(
     `[DRep Lifecycle] Sync complete: ${result.drepsProcessed} DReps processed, ` +
     `${result.eventsIngested} events ingested ` +
     `(reg=${result.eventsByType.registration}, dereg=${result.eventsByType.deregistration}, update=${result.eventsByType.update}), ` +
-    `${result.failed.length} failed`
+      `${result.failed.length} failed, ` +
+      `drepsAttempted=${result.drepsAttempted}, drepsWithNoUpdates=${result.drepsWithNoUpdates}, ` +
+      `updatesFetched=${result.totalUpdatesFetched}, durationSec=${durationSec}`
   );
 
   return result;
@@ -271,7 +391,10 @@ export async function syncDrepLifecycleEventsForEpochRange(
   const drepIds = await fetchAllDrepIds();
 
   const result: SyncDrepLifecycleResult = {
+    drepsAttempted: drepIds.length,
     drepsProcessed: 0,
+    drepsWithNoUpdates: 0,
+    totalUpdatesFetched: 0,
     eventsIngested: 0,
     eventsByType: {
       registration: 0,
@@ -286,11 +409,12 @@ export async function syncDrepLifecycleEventsForEpochRange(
     (drepId) => drepId,
     async (drepId) => {
       const updates = await fetchDrepUpdates(drepId);
+      result.totalUpdatesFetched += updates.length;
 
       // Filter to epoch range
       const filteredEvents = updates
         .map((update) => {
-          const action = normalizeActionType(update.action_type);
+          const action = normalizeActionType(update.action);
           const epochNo = blockTimeToEpoch(update.block_time);
 
           return {
@@ -304,6 +428,11 @@ export async function syncDrepLifecycleEventsForEpochRange(
         .filter((event) => event.epochNo >= startEpoch && event.epochNo <= endEpoch);
 
       if (filteredEvents.length === 0) {
+        // If Koios returned no updates at all, count it as "no updates" for diagnostics.
+        // If Koios returned updates but none fall in the epoch range, we still treat as processed.
+        if (updates.length === 0) {
+          result.drepsWithNoUpdates++;
+        }
         return {
           drepsProcessed: 1,
           eventsIngested: 0,
