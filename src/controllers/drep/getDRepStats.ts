@@ -48,12 +48,15 @@ export const getDRepStats = async (_req: Request, res: Response) => {
         },
       }),
 
-      // Count of DReps who have cast at least one vote
+      // Count of DReps who have cast at least one vote (excluding doNotList)
       prisma.onchainVote.groupBy({
         by: ["drepId"],
         where: {
           voterType: VoterType.DREP,
           drepId: { not: null },
+          drep: {
+            OR: [{ doNotList: false }, { doNotList: null }],
+          },
         },
       }),
     ]);
