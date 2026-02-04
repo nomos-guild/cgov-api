@@ -1,0 +1,41 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm run:*)",
+      "Bash(npm install:*)",
+      "Bash(npm ci:*)",
+      "Bash(npm test:*)",
+      "Bash(npx:*)",
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(git branch:*)",
+      "Bash(git checkout:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git stash:*)",
+      "Bash(git show:*)",
+      "Bash(git ls-files:*)",
+      "Bash(ls:*)",
+      "Bash(mkdir:*)",
+      "Bash(rm:*)",
+      "Bash(find:*)",
+      "Bash(tree:*)",
+      "mcp__cgov-api-project__get_project_overview",
+      "mcp__cgov-api-project__get_file_structure",
+      "mcp__cgov-api-project__get_database_schema",
+      "mcp__cgov-api-project__get_enum_values",
+      "mcp__cgov-api-project__get_api_endpoints",
+      "mcp__cgov-api-project__get_data_ingestion_info",
+      "mcp__cgov-api-project__get_vote_calculation_rules",
+      "mcp__cgov-api-project__get_response_types",
+      "mcp__cgov-api-project__get_data_conventions",
+      "mcp__cgov-api-project__get_coding_conventions",
+      "mcp__cgov-api-project__get_task_guidance",
+      "mcp__cgov-api-project__get_environment_variables",
+      "mcp__cgov-api-project__get_deployment_info",
+      "mcp__cgov-api-project__search_project_knowledge"
+    ],
+    "deny": []
+  }
+}

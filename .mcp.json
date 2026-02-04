@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "cgov-api-project": {
+      "command": "node",
+      "args": [".claude/mcp/cgov-api-project/dist/index.js"]
+    }
+  }
+}
