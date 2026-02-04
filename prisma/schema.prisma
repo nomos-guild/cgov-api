@@ -33,26 +33,18 @@ model CrowdfundingCampaign {
 }
 
 model Drep {
-  drepId                String                 @id @map("drep_id")
-  userId                String?                @unique @map("user_id")
-  name                  String?
-  paymentAddr           String?                @map("payment_addr")
-  iconUrl               String?                @map("icon_url")
-  doNotList             Boolean?               @map("do_not_list")
-  // Voting power in lovelace. Default 0 so we can bulk-inventory DReps before
-  // we have their current voting power synced.
-  votingPower           BigInt                 @default(0) @map("voting_power")
-  // Koios /drep_info fields (optional; populated by background sync jobs)
-  registered            Boolean?               @map("registered")
-  active                Boolean?               @map("active")
-  expiresEpoch          Int?                   @map("expires_epoch")
-  metaUrl               String?                @map("meta_url")
-  metaHash              String?                @map("meta_hash")
-  createdAt             DateTime?              @default(now()) @map("created_at")
-  updatedAt             DateTime?              @map("updated_at")
-  user                  User?                  @relation(fields: [userId], references: [id])
-  onchainVotes          OnchainVote[]
-  stakeDelegationStates StakeDelegationState[]
+  drepId         String        @id @map("drep_id")
+  userId         String?       @unique @map("user_id")
+  name           String?
+  paymentAddr    String?       @map("payment_addr")
+  iconUrl        String?       @map("icon_url")
+  doNotList      Boolean?      @map("do_not_list")
+  votingPower    BigInt        @map("voting_power")
+  delegatorCount Int?          @map("delegator_count")
+  createdAt      DateTime?     @default(now()) @map("created_at")
+  updatedAt      DateTime?     @map("updated_at")
+  user           User?         @relation(fields: [userId], references: [id])
+  onchainVotes   OnchainVote[]
 
   @@map("drep")
 }

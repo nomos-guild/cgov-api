@@ -22,10 +22,15 @@ import {
   VoteBreakdown,
 } from "../models";
 
+// Partial types for vote relations - only the fields we select
+type PartialDrep = Pick<Drep, "drepId" | "name" | "paymentAddr">;
+type PartialSPO = Pick<SPO, "poolId" | "poolName" | "ticker">;
+type PartialCC = Pick<CC, "ccId" | "memberName">;
+
 type VoteWithRelations = OnchainVote & {
-  drep: Drep | null;
-  spo: SPO | null;
-  cc: CC | null;
+  drep: PartialDrep | null;
+  spo: PartialSPO | null;
+  cc: PartialCC | null;
 };
 
 export type ProposalWithVotes = Proposal & {
@@ -69,9 +74,10 @@ export const proposalWithVotesSelect = {
   updatedAt: true,
   onchainVotes: {
     include: {
-      drep: true,
-      spo: true,
-      cc: true,
+      // Only select fields actually used in vote mapping
+      drep: { select: { drepId: true, name: true, paymentAddr: true } },
+      spo: { select: { poolId: true, poolName: true, ticker: true } },
+      cc: { select: { ccId: true, memberName: true } },
     },
   },
 } satisfies Prisma.ProposalSelect;

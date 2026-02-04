@@ -10,6 +10,7 @@ import dataRouter from "./routes/data.route";
 import userRouter from "./routes/user.route";
 import overviewRouter from "./routes/overview.route";
 import proposalRouter from "./routes/proposal.route";
+import drepRouter from "./routes/drep.route";
 import { apiKeyAuth } from "./middleware/auth.middleware";
 import { startAllJobs } from "./jobs";
 
@@ -48,6 +49,7 @@ app.use("/data", apiKeyAuth, dataRouter);
 app.use("/user", apiKeyAuth, userRouter);
 app.use("/overview", apiKeyAuth, overviewRouter);
 app.use("/proposal", apiKeyAuth, proposalRouter);
+app.use("/dreps", apiKeyAuth, drepRouter);
 
 // Error handling middleware
 app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {

@@ -239,6 +239,7 @@ export interface KoiosDrepInfo {
   active?: boolean;
   expires_epoch_no?: number | null;
   amount?: string; // Voting power in lovelace
+  live_delegators?: number; // Number of delegators to this DRep
   meta_url?: string | null;
   meta_hash?: string | null;
 }
