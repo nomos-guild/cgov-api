@@ -31,13 +31,14 @@ export const getDRepStats = async (_req: Request, res: Response) => {
         },
       }),
 
-      // Sum of all voting power
+      // Sum of all voting power and delegator counts
       prisma.drep.aggregate({
         where: {
           OR: [{ doNotList: false }, { doNotList: null }],
         },
         _sum: {
           votingPower: true,
+          delegatorCount: true,
         },
       }),
 
@@ -62,6 +63,7 @@ export const getDRepStats = async (_req: Request, res: Response) => {
     ]);
 
     const totalDelegatedLovelace = aggregateResult._sum.votingPower ?? BigInt(0);
+    const totalDelegators = aggregateResult._sum.delegatorCount ?? 0;
 
     const response: GetDRepStatsResponse = {
       totalDReps,
@@ -69,6 +71,7 @@ export const getDRepStats = async (_req: Request, res: Response) => {
       totalDelegatedAda: lovelaceToAda(totalDelegatedLovelace),
       totalVotesCast: totalVotesResult,
       activeDReps: activeDRepsResult.length,
+      totalDelegators,
     };
 
     res.json(response);

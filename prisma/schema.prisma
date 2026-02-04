@@ -33,17 +33,18 @@ model CrowdfundingCampaign {
 }
 
 model Drep {
-  drepId       String        @id @map("drep_id")
-  userId       String?       @unique @map("user_id")
-  name         String?
-  paymentAddr  String?       @map("payment_addr")
-  iconUrl      String?       @map("icon_url")
-  doNotList    Boolean?      @map("do_not_list")
-  votingPower  BigInt        @map("voting_power")
-  createdAt    DateTime?     @default(now()) @map("created_at")
-  updatedAt    DateTime?     @map("updated_at")
-  user         User?         @relation(fields: [userId], references: [id])
-  onchainVotes OnchainVote[]
+  drepId         String        @id @map("drep_id")
+  userId         String?       @unique @map("user_id")
+  name           String?
+  paymentAddr    String?       @map("payment_addr")
+  iconUrl        String?       @map("icon_url")
+  doNotList      Boolean?      @map("do_not_list")
+  votingPower    BigInt        @map("voting_power")
+  delegatorCount Int?          @map("delegator_count")
+  createdAt      DateTime?     @default(now()) @map("created_at")
+  updatedAt      DateTime?     @map("updated_at")
+  user           User?         @relation(fields: [userId], references: [id])
+  onchainVotes   OnchainVote[]
 
   @@map("drep")
 }

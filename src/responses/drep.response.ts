@@ -15,6 +15,8 @@ export interface DRepSummary {
   votingPowerAda: string;
   /** Total number of votes cast by this DRep */
   totalVotesCast: number;
+  /** Number of delegators to this DRep */
+  delegatorCount: number | null;
 }
 
 /**
@@ -44,6 +46,8 @@ export interface GetDRepStatsResponse {
   totalVotesCast: number;
   /** Number of DReps who have cast at least one vote */
   activeDReps: number;
+  /** Total number of delegators across all DReps */
+  totalDelegators: number;
 }
 
 /**
@@ -75,6 +79,8 @@ export interface GetDRepDetailResponse {
   rationalesProvided: number;
   /** Percentage of proposals this DRep has voted on (0-100) */
   proposalParticipationPercent: number;
+  /** Number of delegators to this DRep */
+  delegatorCount: number | null;
 }
 
 /**

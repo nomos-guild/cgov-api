@@ -17,7 +17,7 @@ function lovelaceToAda(lovelace: bigint): string {
  *
  * Query params:
  * - page: Page number (default: 1)
- * - pageSize: Items per page (default: 20, max: 100)
+ * - pageSize: Items per page (default: 20, max: 1000)
  * - sortBy: Field to sort by (votingPower, name, totalVotes) (default: votingPower)
  * - sortOrder: Sort direction (asc, desc) (default: desc)
  * - search: Search by name or drepId (optional)
@@ -25,7 +25,7 @@ function lovelaceToAda(lovelace: bigint): string {
 export const getDReps = async (req: Request, res: Response) => {
   try {
     const page = Math.max(1, parseInt(req.query.page as string) || 1);
-    const pageSize = Math.min(100, Math.max(1, parseInt(req.query.pageSize as string) || 20));
+    const pageSize = Math.min(1000, Math.max(1, parseInt(req.query.pageSize as string) || 20));
     const sortBy = (req.query.sortBy as string) || "votingPower";
     const sortOrder = (req.query.sortOrder as string) === "asc" ? "asc" : "desc";
     const search = (req.query.search as string) || "";
@@ -73,6 +73,7 @@ export const getDReps = async (req: Request, res: Response) => {
         name: true,
         iconUrl: true,
         votingPower: true,
+        delegatorCount: true,
       },
     });
 
@@ -103,6 +104,7 @@ export const getDReps = async (req: Request, res: Response) => {
       votingPower: drep.votingPower.toString(),
       votingPowerAda: lovelaceToAda(drep.votingPower),
       totalVotesCast: voteCountMap.get(drep.drepId) || 0,
+      delegatorCount: drep.delegatorCount,
     }));
 
     // If sorting by totalVotes, we need to sort in memory after getting counts

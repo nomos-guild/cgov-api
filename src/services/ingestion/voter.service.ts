@@ -8,7 +8,7 @@ import axios from "axios";
 import type { Prisma } from "@prisma/client";
 import { koiosGet, koiosPost } from "../koios";
 import type {
-  KoiosDrep,
+  KoiosDrepInfo,
   KoiosDrepVotingPower,
   KoiosSpo,
   KoiosSpoVotingPower,
@@ -146,7 +146,7 @@ export async function ensureVoterExists(
 }
 
 // Cache for API responses to avoid duplicate calls within a transaction
-const drepInfoCache = new Map<string, KoiosDrep | undefined>();
+const drepInfoCache = new Map<string, KoiosDrepInfo | undefined>();
 const drepVotingPowerCache = new Map<string, bigint>();
 const spoInfoCache = new Map<string, KoiosSpo | undefined>();
 const spoVotingPowerCache = new Map<string, bigint>();
@@ -171,12 +171,15 @@ async function ensureDrepExists(
   // Check cache first, then fetch if not cached
   let koiosDrep = drepInfoCache.get(drepId);
   if (koiosDrep === undefined) {
-    const koiosDrepResponse = await koiosPost<KoiosDrep[]>("/drep_info", {
+    const koiosDrepResponse = await koiosPost<KoiosDrepInfo[]>("/drep_info", {
       _drep_ids: [drepId],
     });
     koiosDrep = koiosDrepResponse?.[0];
     drepInfoCache.set(drepId, koiosDrep);
   }
+
+  // Get delegator count from drep_info response
+  const delegatorCount = koiosDrep?.live_delegators ?? null;
 
   // Get current epoch for voting power history
   const currentEpoch = await getCurrentEpoch();
@@ -260,6 +263,7 @@ async function ensureDrepExists(
       ...(paymentAddress && { paymentAddr: paymentAddress }), // Only include if exists
       ...(iconUrl && { iconUrl: iconUrl }), // Only include if exists
       ...(typeof doNotList === "boolean" && { doNotList: doNotList }), // Only include if resolved
+      ...(delegatorCount !== null && { delegatorCount }), // Only include if available
     },
   });
 
@@ -752,8 +756,8 @@ export async function syncAllVoterVotingPower(
 }
 
 /**
- * Syncs voting power for all DReps in the database
- * Only fetches voting power for DReps that exist in the database
+ * Syncs voting power and delegator count for all DReps in the database
+ * Only fetches data for DReps that exist in the database
  * Uses parallel processing for improved performance
  */
 async function syncDrepVotingPower(
@@ -772,7 +776,7 @@ async function syncDrepVotingPower(
 
   const concurrency = getVoterSyncConcurrency();
   console.log(
-    `[Voter Service] Syncing voting power for ${dreps.length} DReps (concurrency: ${concurrency})...`
+    `[Voter Service] Syncing voting power and delegator count for ${dreps.length} DReps (concurrency: ${concurrency})...`
   );
 
   // Process DReps in parallel with controlled concurrency
@@ -780,25 +784,38 @@ async function syncDrepVotingPower(
     dreps,
     (drep) => drep.drepId,
     async (drep) => {
-      const votingPowerHistory = await koiosGet<KoiosDrepVotingPower[]>(
-        "/drep_voting_power_history",
-        {
+      // Fetch voting power and delegator count in parallel
+      const [votingPowerHistory, drepInfoResponse] = await Promise.all([
+        koiosGet<KoiosDrepVotingPower[]>("/drep_voting_power_history", {
           _epoch_no: epoch,
           _drep_id: drep.drepId,
-        }
-      );
+        }),
+        koiosPost<KoiosDrepInfo[]>("/drep_info", {
+          _drep_ids: [drep.drepId],
+        }),
+      ]);
 
       const votingPowerLovelace = votingPowerHistory?.[0]?.amount;
+      const delegatorCount = drepInfoResponse?.[0]?.live_delegators ?? null;
 
-      if (votingPowerLovelace) {
-        const newVotingPower = BigInt(votingPowerLovelace);
+      if (votingPowerLovelace || delegatorCount !== null) {
+        const updateData: { votingPower?: bigint; delegatorCount?: number } = {};
+
+        if (votingPowerLovelace) {
+          updateData.votingPower = BigInt(votingPowerLovelace);
+        }
+
+        if (delegatorCount !== null) {
+          updateData.delegatorCount = delegatorCount;
+        }
+
         await prisma.drep.update({
           where: { drepId: drep.drepId },
-          data: { votingPower: newVotingPower },
+          data: updateData,
         });
         return drep.drepId; // Return ID to count as updated
       }
-      // If no voting power found, the DRep might be inactive - skip update
+      // If no data found, the DRep might be inactive - skip update
       return null;
     },
     concurrency
