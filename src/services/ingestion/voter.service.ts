@@ -178,8 +178,8 @@ async function ensureDrepExists(
     drepInfoCache.set(drepId, koiosDrep);
   }
 
-  // Get delegator count from drep_info response
-  const delegatorCount = koiosDrep?.live_delegators ?? null;
+  // Delegator count is not from Koios; it is refreshed from StakeDelegationState
+  // in drep-sync (syncAllDrepsInfo) and delegation-sync (Phase 3).
 
   // Get current epoch for voting power history
   const currentEpoch = await getCurrentEpoch();
@@ -265,7 +265,6 @@ async function ensureDrepExists(
       ...(paymentAddress && { paymentAddr: paymentAddress }), // Only include if exists
       ...(iconUrl && { iconUrl: iconUrl }), // Only include if exists
       ...(typeof doNotList === "boolean" && { doNotList: doNotList }), // Only include if resolved
-      ...(delegatorCount !== null && { delegatorCount }), // Only include if available
     },
     update: {},
   });
@@ -787,34 +786,19 @@ async function syncDrepVotingPower(
     dreps,
     (drep) => drep.drepId,
     async (drep) => {
-      // Fetch voting power and delegator count in parallel
-      const [votingPowerHistory, drepInfoResponse] = await Promise.all([
-        koiosGet<KoiosDrepVotingPower[]>("/drep_voting_power_history", {
+      const votingPowerHistory = await koiosGet<KoiosDrepVotingPower[]>(
+        "/drep_voting_power_history",
+        {
           _epoch_no: epoch,
           _drep_id: drep.drepId,
-        }),
-        koiosPost<KoiosDrepInfo[]>("/drep_info", {
-          _drep_ids: [drep.drepId],
-        }),
-      ]);
+        }
+      );
 
       const votingPowerLovelace = votingPowerHistory?.[0]?.amount;
-      const delegatorCount = drepInfoResponse?.[0]?.live_delegators ?? null;
-
-      if (votingPowerLovelace || delegatorCount !== null) {
-        const updateData: { votingPower?: bigint; delegatorCount?: number } = {};
-
-        if (votingPowerLovelace) {
-          updateData.votingPower = BigInt(votingPowerLovelace);
-        }
-
-        if (delegatorCount !== null) {
-          updateData.delegatorCount = delegatorCount;
-        }
-
+      if (votingPowerLovelace) {
         await prisma.drep.update({
           where: { drepId: drep.drepId },
-          data: updateData,
+          data: { votingPower: BigInt(votingPowerLovelace) },
         });
         return drep.drepId; // Return ID to count as updated
       }

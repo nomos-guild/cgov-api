@@ -30,7 +30,11 @@ import {
   getKoiosCurrentEpoch,
   Phase3Checkpoint,
 } from "./sync-utils";
-import { syncAllDrepsInventory, ensureDrepsExist } from "./drep-sync.service";
+import {
+  syncAllDrepsInventory,
+  ensureDrepsExist,
+  refreshDrepDelegatorCountsFromDelegationState,
+} from "./drep-sync.service";
 
 // ============================================================
 // Result Types
@@ -1051,6 +1055,16 @@ export async function syncDrepDelegationChanges(
     where: { jobName: DREP_DELEGATION_PHASE3_JOB_NAME },
     data: { backfillCursor: null, backfillCompletedAt: new Date() },
   });
+
+  // Refresh DRep delegator_count from StakeDelegationState (Koios does not provide it)
+  const refreshResult = await refreshDrepDelegatorCountsFromDelegationState(
+    delegationClient as Prisma.TransactionClient
+  );
+  if (refreshResult.updated > 0) {
+    console.log(
+      `[DRep Delegation Sync] Refreshed delegator_count for ${refreshResult.updated} DRep(s)`
+    );
+  }
 
   console.log(
     `[DRep Delegation Sync] Phase 3 complete: created=${toCreate.length}, updated=${toUpdate.length}, changes=${changeLogToInsert.length}`
