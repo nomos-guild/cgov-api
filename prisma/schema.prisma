@@ -39,12 +39,18 @@ model Drep {
   paymentAddr    String?       @map("payment_addr")
   iconUrl        String?       @map("icon_url")
   doNotList      Boolean?      @map("do_not_list")
-  votingPower    BigInt        @map("voting_power")
+  votingPower           BigInt                 @default(0) @map("voting_power")
   delegatorCount Int?          @map("delegator_count")
-  createdAt      DateTime?     @default(now()) @map("created_at")
-  updatedAt      DateTime?     @map("updated_at")
-  user           User?         @relation(fields: [userId], references: [id])
-  onchainVotes   OnchainVote[]
+  registered            Boolean?               @map("registered")
+  active                Boolean?               @map("active")
+  expiresEpoch          Int?                   @map("expires_epoch")
+  metaUrl               String?                @map("meta_url")
+  metaHash              String?                @map("meta_hash")
+  createdAt             DateTime?              @default(now()) @map("created_at")
+  updatedAt             DateTime?              @map("updated_at")
+  user                  User?                  @relation(fields: [userId], references: [id])
+  onchainVotes          OnchainVote[]
+  stakeDelegationStates StakeDelegationState[]
 
   @@map("drep")
 }

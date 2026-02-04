@@ -267,6 +267,7 @@ async function ensureDrepExists(
       ...(typeof doNotList === "boolean" && { doNotList: doNotList }), // Only include if resolved
       ...(delegatorCount !== null && { delegatorCount }), // Only include if available
     },
+    update: {},
   });
 
   return { voterId: newDrep.drepId, created: true, updated: false };
