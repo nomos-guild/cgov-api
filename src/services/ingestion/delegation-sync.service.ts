@@ -30,7 +30,7 @@ import {
   getKoiosCurrentEpoch,
   Phase3Checkpoint,
 } from "./sync-utils";
-import { syncAllDrepsInventory } from "./drep-sync.service";
+import { syncAllDrepsInventory, ensureDrepsExist } from "./drep-sync.service";
 
 // ============================================================
 // Result Types
@@ -119,7 +119,6 @@ function buildDrepChangeLogForStake(
     fromDrepId: string;      // "" = no previous DRep (sentinel)
     toDrepId: string;
     delegatedEpoch: number;  // -1 = unknown epoch (sentinel)
-    amount: bigint | null;
   }>;
   latest: { drepId: string; epochNo: number | null } | null;
 } {
@@ -128,7 +127,6 @@ function buildDrepChangeLogForStake(
     fromDrepId: string;
     toDrepId: string;
     delegatedEpoch: number;
-    amount: bigint | null;
   }> = [];
 
   let lastDrepId: string | null = null;
@@ -148,7 +146,6 @@ function buildDrepChangeLogForStake(
       fromDrepId: lastDrepId ?? "",  // Sentinel for no previous DRep
       toDrepId: drepId,
       delegatedEpoch,
-      amount: null,
     });
     lastDrepId = drepId;
     lastEpoch = typeof entry.epoch_no === "number" ? entry.epoch_no : null;
@@ -792,7 +789,6 @@ export async function syncDrepDelegationChanges(
     fromDrepId: string;      // "" = no previous DRep (sentinel)
     toDrepId: string;
     delegatedEpoch: number;  // -1 = unknown epoch (sentinel)
-    amount: bigint;
   }> = [];
 
   let maxDelegationEpoch = lastProcessedEpoch;
@@ -827,7 +823,6 @@ export async function syncDrepDelegationChanges(
         fromDrepId: currentState?.drepId ?? "",  // Sentinel for no previous DRep
         toDrepId: drepId,
         delegatedEpoch: delegatedEpoch ?? -1,    // Sentinel for unknown epoch
-        amount,
       });
     }
 
@@ -838,6 +833,32 @@ export async function syncDrepDelegationChanges(
         toUpdate.push({ stakeAddress, drepId, amount, delegatedEpoch });
       }
     }
+  }
+
+  // Deduplicate: skip Phase 3 change log entries when a row for (stakeAddress, toDrepId, delegatedEpoch)
+  // already exists (e.g. from backfill), so we don't insert a second row with amount for the same delegation.
+  let changeLogToInsert = changeLog;
+  if (changeLog.length > 0) {
+    const stakeAddressesInChangeLog = [...new Set(changeLog.map((c) => c.stakeAddress))];
+    const existingChunks = chunkArray(stakeAddressesInChangeLog, 5000);
+    const existingRows: Array<{
+      stakeAddress: string;
+      toDrepId: string;
+      delegatedEpoch: number;
+    }> = [];
+    for (const sc of existingChunks) {
+      const rows = await delegationClient.stakeDelegationChange.findMany({
+        where: { stakeAddress: { in: sc } },
+        select: { stakeAddress: true, toDrepId: true, delegatedEpoch: true },
+      });
+      existingRows.push(...rows);
+    }
+    const existingKeySet = new Set(
+      existingRows.map((r) => `${r.stakeAddress}|${r.toDrepId}|${r.delegatedEpoch}`)
+    );
+    changeLogToInsert = changeLog.filter(
+      (c) => !existingKeySet.has(`${c.stakeAddress}|${c.toDrepId}|${c.delegatedEpoch}`)
+    );
   }
 
   // Initialize or load Phase 3 checkpoint
@@ -969,18 +990,41 @@ export async function syncDrepDelegationChanges(
     }
   }
 
-  // Batch insert change log entries (with per-chunk checkpoint)
-  if (changeLog.length > 0) {
+  // Ensure all from/to DReps referenced in the change log exist in the DRep table (e.g. retired "from" DReps).
+  if (changeLogToInsert.length > 0) {
+    const drepIdsFromChanges = new Set<string>();
+    for (const c of changeLogToInsert) {
+      if (c.fromDrepId?.trim()) drepIdsFromChanges.add(c.fromDrepId);
+      if (c.toDrepId?.trim()) drepIdsFromChanges.add(c.toDrepId);
+    }
+    if (drepIdsFromChanges.size > 0) {
+      const ensureResult = await ensureDrepsExist(prisma, [...drepIdsFromChanges]);
+      if (ensureResult.created > 0) {
+        console.log(
+          `[DRep Delegation Sync] Ensured ${ensureResult.created} DRep(s) in inventory for delegation change from/to refs`
+        );
+      }
+    }
+  }
+
+  // Batch insert change log entries (with per-chunk checkpoint).
+  if (changeLogToInsert.length > 0) {
     const changesChunkSize = 1000;
     const startChunkIndex = checkpoint.changesChunkIndex;
-    for (let i = startChunkIndex * changesChunkSize; i < changeLog.length; i += changesChunkSize) {
+    for (let i = startChunkIndex * changesChunkSize; i < changeLogToInsert.length; i += changesChunkSize) {
       const chunkIndex = Math.floor(i / changesChunkSize);
-      const chunk = changeLog.slice(i, i + changesChunkSize);
+      const chunk = changeLogToInsert.slice(i, i + changesChunkSize);
+      const changeData = chunk.map((c) => ({
+        stakeAddress: c.stakeAddress,
+        fromDrepId: c.fromDrepId,
+        toDrepId: c.toDrepId,
+        delegatedEpoch: c.delegatedEpoch,
+      }));
       const { next, data: checkpointData } = buildCheckpointData({ changesChunkIndex: chunkIndex + 1 });
       if (transactionClient.$transaction) {
         await transactionClient.$transaction([
           delegationClient.stakeDelegationChange.createMany({
-            data: chunk,
+            data: changeData,
             skipDuplicates: true,
           }),
           syncStatusClient.syncStatus.update({
@@ -990,7 +1034,7 @@ export async function syncDrepDelegationChanges(
         ]);
       } else {
         await delegationClient.stakeDelegationChange.createMany({
-          data: chunk,
+          data: changeData,
           skipDuplicates: true,
         });
         await syncStatusClient.syncStatus.update({
@@ -1009,7 +1053,7 @@ export async function syncDrepDelegationChanges(
   });
 
   console.log(
-    `[DRep Delegation Sync] Phase 3 complete: created=${toCreate.length}, updated=${toUpdate.length}, changes=${changeLog.length}`
+    `[DRep Delegation Sync] Phase 3 complete: created=${toCreate.length}, updated=${toUpdate.length}, changes=${changeLogToInsert.length}`
   );
 
   // Update sync state
@@ -1032,7 +1076,7 @@ export async function syncDrepDelegationChanges(
     drepsProcessed: delegatorFetchResult.successful.length,
     delegatorsProcessed: allDelegatorsByStake.size,
     statesUpdated: toCreate.length + toUpdate.length,
-    changesInserted: changeLog.length,
+    changesInserted: changeLogToInsert.length,
     failed,
   };
 }

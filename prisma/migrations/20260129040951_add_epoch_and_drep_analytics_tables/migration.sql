@@ -65,7 +65,6 @@ CREATE TABLE "stake_delegation_change" (
     "from_drep_id" TEXT NOT NULL DEFAULT '',
     "to_drep_id" TEXT NOT NULL DEFAULT '',
     "delegated_epoch_no" INTEGER NOT NULL DEFAULT -1,
-    "amount" BIGINT,
     "observed_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
     CONSTRAINT "stake_delegation_change_pkey" PRIMARY KEY ("id")

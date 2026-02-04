@@ -137,6 +137,41 @@ async function fetchDrepMetadata(drepId: string): Promise<{
 // Public API
 // ============================================================
 
+/** Special DRep IDs we do not ensure exist in the DRep table (e.g. system/sentinel DReps). */
+const DREP_IDS_EXCLUDED_FROM_ENSURE = new Set([
+  "drep_always_abstain",
+  "drep_always_no_confidence",
+]);
+
+/**
+ * Ensures the given DRep IDs exist in the DRep table (creates missing rows with votingPower 0).
+ * Use when recording delegation changes so that both "from" and "to" DReps are in inventory
+ * (e.g. retired DReps that are no longer returned by /drep_list).
+ * Excludes special DReps (drep_always_abstain, drep_always_no_confidence).
+ */
+export async function ensureDrepsExist(
+  prisma: Prisma.TransactionClient,
+  drepIds: string[]
+): Promise<{ created: number }> {
+  const uniqueIds = [...new Set(drepIds)]
+    .filter((id) => id && id.trim() !== "" && !DREP_IDS_EXCLUDED_FROM_ENSURE.has(id));
+  if (uniqueIds.length === 0) return { created: 0 };
+
+  const existing = await prisma.drep.findMany({
+    where: { drepId: { in: uniqueIds } },
+    select: { drepId: true },
+  });
+  const existingSet = new Set(existing.map((d) => d.drepId));
+  const missing = uniqueIds.filter((id) => !existingSet.has(id));
+  if (missing.length === 0) return { created: 0 };
+
+  const createManyResult = await prisma.drep.createMany({
+    data: missing.map((drepId) => ({ drepId, votingPower: BigInt(0) })),
+    skipDuplicates: true,
+  });
+  return { created: createManyResult.count };
+}
+
 /**
  * Inventory all DReps from Koios into the DB (creates missing rows).
  * Then bulk-refreshes DRep fields from Koios POST /drep_info for the new IDs.

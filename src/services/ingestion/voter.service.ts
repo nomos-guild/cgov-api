@@ -251,16 +251,19 @@ async function ensureDrepExists(
     console.warn(`[Voter Service] Failed to fetch metadata for DRep ${drepId}`);
   }
 
-  // Create new DRep
-  const newDrep = await tx.drep.create({
-    data: {
+  // Upsert so we never fail with unique constraint when drep-sync or another
+  // vote ingestion created the same DRep concurrently (race-safe for DReps only).
+  const newDrep = await tx.drep.upsert({
+    where: { drepId },
+    create: {
       drepId: drepId,
       votingPower: votingPower,
-      ...(name && { name }), // Only include if exists
-      ...(paymentAddress && { paymentAddr: paymentAddress }), // Only include if exists
-      ...(iconUrl && { iconUrl: iconUrl }), // Only include if exists
-      ...(typeof doNotList === "boolean" && { doNotList: doNotList }), // Only include if resolved
+      ...(name && { name }),
+      ...(paymentAddress && { paymentAddr: paymentAddress }),
+      ...(iconUrl && { iconUrl: iconUrl }),
+      ...(typeof doNotList === "boolean" && { doNotList: doNotList }),
     },
+    update: {},
   });
 
   return { voterId: newDrep.drepId, created: true, updated: false };
