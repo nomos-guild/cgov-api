@@ -15,9 +15,9 @@ export interface ProposalTurnout {
   governanceActionType: string | null;
   submissionEpoch: number | null;
   status: string;
-  /** DRep turnout percentage (0-100) */
+  /** DRep turnout percentage (0-100) - active votes only */
   drepTurnoutPct: number | null;
-  /** SPO turnout percentage (0-100) */
+  /** SPO turnout percentage (0-100) - active votes only */
   spoTurnoutPct: number | null;
   /** DRep active yes vote power (lovelace as string) */
   drepActiveYesVotePower: string | null;
@@ -35,14 +35,38 @@ export interface ProposalTurnout {
   spoActiveAbstainVotePower: string | null;
   /** SPO total vote power (lovelace as string) */
   spoTotalVotePower: string | null;
+  // --- NEW: DRep breakdown fields ---
+  /** DRep always abstain vote power (lovelace as string) */
+  drepAlwaysAbstainVotePower: string | null;
+  /** DRep always no confidence vote power (lovelace as string) */
+  drepAlwaysNoConfidencePower: string | null;
+  /** DRep inactive vote power (lovelace as string) */
+  drepInactiveVotePower: string | null;
+  /** DRep not voted power (lovelace as string) - stake that didn't participate */
+  drepNotVotedPower: string | null;
+  /** DRep participating percentage (0-100) - includes active + default stance */
+  drepParticipatingPct: number | null;
+  // --- NEW: SPO breakdown fields ---
+  /** SPO always abstain vote power (lovelace as string) */
+  spoAlwaysAbstainVotePower: string | null;
+  /** SPO always no confidence vote power (lovelace as string) */
+  spoAlwaysNoConfidencePower: string | null;
+  /** SPO not voted power (lovelace as string) - pure non-voters */
+  spoNotVotedPower: string | null;
+  /** SPO participating percentage (0-100) - includes active + default stance */
+  spoParticipatingPct: number | null;
 }
 
 export interface GetVotingTurnoutResponse {
   proposals: ProposalTurnout[];
   /** Aggregate DRep turnout across all proposals (weighted average) */
   aggregateDrepTurnoutPct: number | null;
+  /** Aggregate DRep participating across all proposals (weighted average; active + default stance) */
+  aggregateDrepParticipatingPct: number | null;
   /** Aggregate SPO turnout across all proposals (weighted average) */
   aggregateSpoTurnoutPct: number | null;
+  /** Aggregate SPO participating across all proposals (weighted average; active + default stance) */
+  aggregateSpoParticipatingPct: number | null;
   pagination: {
     page: number;
     pageSize: number;
@@ -323,12 +347,29 @@ export interface GetSpoVotingTurnoutResponse {
 export interface ProposalSilentStake {
   proposalId: string;
   title: string;
-  /** SPO no vote power (stake that did not vote) - lovelace as string */
+  /** Governance action type - needed for epoch formula */
+  governanceActionType: string | null;
+  /** Submission epoch - needed for epoch formula */
+  submissionEpoch: number | null;
+  /** SPO no vote power (total silent stake) - lovelace as string (backward compat) */
   spoNoVotePower: string | null;
   /** SPO total vote power - lovelace as string */
   spoTotalVotePower: string | null;
-  /** Silent stake percentage (0-100) */
+  /** Total silent stake percentage (0-100) - backward compat */
   silentPct: number | null;
+  // --- NEW: Split breakdown ---
+  /** Pure not voted power (true non-voters) - lovelace as string */
+  pureNotVotedPower: string | null;
+  /** Default stance power (alwaysAbstain + alwaysNoConfidence) - lovelace as string */
+  defaultStancePower: string | null;
+  /** Always abstain power - lovelace as string */
+  alwaysAbstainPower: string | null;
+  /** Always no confidence power - lovelace as string */
+  alwaysNoConfidencePower: string | null;
+  /** Pure not voted percentage (0-100) */
+  pureNotVotedPct: number | null;
+  /** Default stance percentage (0-100) */
+  defaultStancePct: number | null;
 }
 
 export interface GetSpoSilentStakeResponse {
@@ -457,18 +498,38 @@ export interface ProposalContention {
   proposalId: string;
   title: string;
   governanceActionType: string | null;
-  /** DRep yes percentage */
+  /** Submission epoch - needed for epoch formula */
+  submissionEpoch: number | null;
+  /** DRep yes percentage (simple: activeYes / total) - backward compat */
   drepYesPct: number | null;
-  /** DRep no percentage */
+  /** DRep no percentage (simple: activeNo / total) - backward compat */
   drepNoPct: number | null;
-  /** SPO yes percentage */
+  /** SPO yes percentage (simple: activeYes / total) - backward compat */
   spoYesPct: number | null;
-  /** SPO no percentage */
+  /** SPO no percentage (simple: activeNo / total) - backward compat */
   spoNoPct: number | null;
   /** Is this proposal contentious (close vote)? */
   isContentious: boolean;
   /** Contention score (0-100, higher = more contentious) */
   contentionScore: number | null;
+  // --- NEW: Ratification formula results ---
+  /** DRep yes percentage using ratification formula */
+  drepRatificationYesPct: number | null;
+  /** DRep no percentage using ratification formula */
+  drepRatificationNoPct: number | null;
+  /** SPO yes percentage using ratification formula (epoch-aware) */
+  spoRatificationYesPct: number | null;
+  /** SPO no percentage using ratification formula (epoch-aware) */
+  spoRatificationNoPct: number | null;
+  // --- NEW: Threshold info ---
+  /** DRep threshold for this governance action type (0-1) */
+  drepThreshold: number | null;
+  /** SPO threshold for this governance action type (0-1, null if SPO doesn't vote) */
+  spoThreshold: number | null;
+  /** DRep distance from threshold (positive = passing, negative = failing) */
+  drepDistanceFromThreshold: number | null;
+  /** SPO distance from threshold (positive = passing, negative = failing) */
+  spoDistanceFromThreshold: number | null;
 }
 
 export interface GetContentionRateResponse {

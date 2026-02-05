@@ -4,6 +4,7 @@ import {
   GetSpoSilentStakeResponse,
   ProposalSilentStake,
 } from "../../responses/analytics.response";
+import { computeSpoLedgerBuckets } from "../../libs/ledgerVoteMath";
 
 /**
  * GET /analytics/spo-silent-stake
@@ -54,11 +55,15 @@ export const getSpoSilentStake = async (req: Request, res: Response) => {
         select: {
           proposalId: true,
           title: true,
+          governanceActionType: true,
+          submissionEpoch: true,
           spoNoVotePower: true,
           spoTotalVotePower: true,
           spoActiveYesVotePower: true,
           spoActiveNoVotePower: true,
           spoActiveAbstainVotePower: true,
+          spoAlwaysAbstainVotePower: true,
+          spoAlwaysNoConfidencePower: true,
         },
       }),
     ]);
@@ -66,30 +71,33 @@ export const getSpoSilentStake = async (req: Request, res: Response) => {
     // Calculate silent stake for each proposal
     const proposals: ProposalSilentStake[] = dbProposals.map((p) => {
       const spoTotal = p.spoTotalVotePower ?? 0n;
-      let silentPower: bigint;
+      const buckets = computeSpoLedgerBuckets(p);
 
-      // Prefer spoNoVotePower if available, otherwise calculate from active votes
-      if (p.spoNoVotePower !== null) {
-        silentPower = p.spoNoVotePower;
-      } else {
-        const activeVoted =
-          (p.spoActiveYesVotePower ?? 0n) +
-          (p.spoActiveNoVotePower ?? 0n) +
-          (p.spoActiveAbstainVotePower ?? 0n);
-        silentPower = spoTotal > activeVoted ? spoTotal - activeVoted : 0n;
-      }
+      const alwaysAbstain = p.spoAlwaysAbstainVotePower ?? 0n;
+      const alwaysNoConfidence = p.spoAlwaysNoConfidencePower ?? 0n;
+      const defaultStancePower = alwaysAbstain + alwaysNoConfidence;
+      const pureNotVotedPower = buckets.notVoted;
+      const totalSilentPower = pureNotVotedPower + defaultStancePower;
 
-      const silentPct =
-        spoTotal > 0n
-          ? Number((silentPower * 10000n) / spoTotal) / 100
-          : null;
+      const silentPct = spoTotal > 0n ? Number((totalSilentPower * 10000n) / spoTotal) / 100 : null;
+      const pureNotVotedPct = spoTotal > 0n ? Number((pureNotVotedPower * 10000n) / spoTotal) / 100 : null;
+      const defaultStancePct = spoTotal > 0n ? Number((defaultStancePower * 10000n) / spoTotal) / 100 : null;
 
       return {
         proposalId: p.proposalId,
         title: p.title,
-        spoNoVotePower: silentPower.toString(),
+        governanceActionType: p.governanceActionType,
+        submissionEpoch: p.submissionEpoch,
+        // Backward compat: "silent stake" (non-explicit voting) = pureNotVoted + default stance
+        spoNoVotePower: totalSilentPower.toString(),
         spoTotalVotePower: spoTotal.toString(),
         silentPct,
+        pureNotVotedPower: pureNotVotedPower.toString(),
+        defaultStancePower: defaultStancePower.toString(),
+        alwaysAbstainPower: alwaysAbstain.toString(),
+        alwaysNoConfidencePower: alwaysNoConfidence.toString(),
+        pureNotVotedPct,
+        defaultStancePct,
       };
     });
 
@@ -99,17 +107,14 @@ export const getSpoSilentStake = async (req: Request, res: Response) => {
     for (const p of dbProposals) {
       const spoTotal = p.spoTotalVotePower ?? 0n;
       if (spoTotal > 0n) {
-        let silentPower: bigint;
-        if (p.spoNoVotePower !== null) {
-          silentPower = p.spoNoVotePower;
-        } else {
-          const activeVoted =
-            (p.spoActiveYesVotePower ?? 0n) +
-            (p.spoActiveNoVotePower ?? 0n) +
-            (p.spoActiveAbstainVotePower ?? 0n);
-          silentPower = spoTotal > activeVoted ? spoTotal - activeVoted : 0n;
-        }
-        totalSilent += silentPower;
+        const buckets = computeSpoLedgerBuckets(p);
+        const alwaysAbstain = p.spoAlwaysAbstainVotePower ?? 0n;
+        const alwaysNoConfidence = p.spoAlwaysNoConfidencePower ?? 0n;
+        const defaultStancePower = alwaysAbstain + alwaysNoConfidence;
+        const pureNotVotedPower = buckets.notVoted;
+        const totalSilentPower = pureNotVotedPower + defaultStancePower;
+
+        totalSilent += totalSilentPower;
         totalPower += spoTotal;
       }
     }

@@ -4,6 +4,10 @@ import {
   GetVoteDivergenceResponse,
   ProposalVoteDivergence,
 } from "../../responses/analytics.response";
+import {
+  computeDrepLedgerBuckets,
+  computeSpoLedgerBuckets,
+} from "../../libs/ledgerVoteMath";
 
 /**
  * GET /analytics/vote-divergence
@@ -56,13 +60,21 @@ export const getVoteDivergence = async (req: Request, res: Response) => {
         select: {
           proposalId: true,
           title: true,
+          governanceActionType: true,
+          submissionEpoch: true,
           drepActiveYesVotePower: true,
           drepActiveNoVotePower: true,
           drepActiveAbstainVotePower: true,
+          drepAlwaysAbstainVotePower: true,
+          drepAlwaysNoConfidencePower: true,
+          drepInactiveVotePower: true,
           drepTotalVotePower: true,
           spoActiveYesVotePower: true,
           spoActiveNoVotePower: true,
           spoActiveAbstainVotePower: true,
+          spoAlwaysAbstainVotePower: true,
+          spoAlwaysNoConfidencePower: true,
+          spoNoVotePower: true,
           spoTotalVotePower: true,
         },
       }),
@@ -70,35 +82,18 @@ export const getVoteDivergence = async (req: Request, res: Response) => {
 
     // Calculate divergence for each proposal
     const proposals: ProposalVoteDivergence[] = dbProposals.map((p) => {
-      const drepTotal = p.drepTotalVotePower ?? 0n;
-      const spoTotal = p.spoTotalVotePower ?? 0n;
+      const drepBuckets = computeDrepLedgerBuckets(p);
+      const spoBuckets = computeSpoLedgerBuckets(p);
 
-      // Calculate percentages
-      const drepYesPct =
-        drepTotal > 0n
-          ? Number(((p.drepActiveYesVotePower ?? 0n) * 10000n) / drepTotal) / 100
-          : null;
-      const drepNoPct =
-        drepTotal > 0n
-          ? Number(((p.drepActiveNoVotePower ?? 0n) * 10000n) / drepTotal) / 100
-          : null;
-      const drepAbstainPct =
-        drepTotal > 0n
-          ? Number(((p.drepActiveAbstainVotePower ?? 0n) * 10000n) / drepTotal) / 100
-          : null;
+      // Use ledger-consistent distributions for divergence.
+      // DRep denominator excludes inactive; SPO denominator follows ledger era.
+      const drepYesPct = drepBuckets.yesDistPct;
+      const drepNoPct = drepBuckets.noDistPct;
+      const drepAbstainPct = drepBuckets.abstainDistPct;
 
-      const spoYesPct =
-        spoTotal > 0n
-          ? Number(((p.spoActiveYesVotePower ?? 0n) * 10000n) / spoTotal) / 100
-          : null;
-      const spoNoPct =
-        spoTotal > 0n
-          ? Number(((p.spoActiveNoVotePower ?? 0n) * 10000n) / spoTotal) / 100
-          : null;
-      const spoAbstainPct =
-        spoTotal > 0n
-          ? Number(((p.spoActiveAbstainVotePower ?? 0n) * 10000n) / spoTotal) / 100
-          : null;
+      const spoYesPct = spoBuckets.yesDistPct;
+      const spoNoPct = spoBuckets.noDistPct;
+      const spoAbstainPct = spoBuckets.abstainDistPct;
 
       // Calculate divergence score as sum of absolute differences
       // Max divergence = 200 (all vote one way vs all vote opposite)

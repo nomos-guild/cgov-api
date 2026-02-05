@@ -64,7 +64,7 @@ router.get("/voting-turnout", analyticsController.getVotingTurnout);
  * /analytics/stake-participation:
  *   get:
  *     summary: Get active stake address participation
- *     description: Returns statistics on delegator participation based on their DRep voting activity
+ *     description: Returns statistics on delegator participation based on their DRep voting activity. Counts distinct stake addresses whose DRep voted on proposals.
  *     tags:
  *       - Governance Analytics
  *     parameters:
@@ -73,6 +73,31 @@ router.get("/voting-turnout", analyticsController.getVotingTurnout);
  *         description: Filter by specific proposal
  *         schema:
  *           type: string
+ *       - name: epochStart
+ *         in: query
+ *         description: Start epoch for filtering
+ *         schema:
+ *           type: integer
+ *       - name: epochEnd
+ *         in: query
+ *         description: End epoch for filtering
+ *         schema:
+ *           type: integer
+ *       - name: page
+ *         in: query
+ *         description: Page number (starts at 1)
+ *         schema:
+ *           type: integer
+ *           minimum: 1
+ *           default: 1
+ *       - name: pageSize
+ *         in: query
+ *         description: Number of items per page (max 100)
+ *         schema:
+ *           type: integer
+ *           minimum: 1
+ *           maximum: 100
+ *           default: 20
  *     responses:
  *       200:
  *         description: Successfully retrieved stake participation data
@@ -119,15 +144,20 @@ router.get("/delegation-rate", analyticsController.getDelegationRate);
  * /analytics/delegation-distribution:
  *   get:
  *     summary: Get delegation distribution by wallet size
- *     description: Returns delegation distribution bucketed by wallet size bands
+ *     description: Returns delegation distribution bucketed by wallet size bands (0-1k ADA, 1k-10k, 10k-100k, 100k-1M, 1M+). Each band includes count of stake addresses and sum of delegated amount.
  *     tags:
  *       - Governance Analytics
  *     parameters:
  *       - name: drepId
  *         in: query
- *         description: Filter by specific DRep
+ *         description: Filter by specific DRep for per-DRep distribution
  *         schema:
  *           type: string
+ *       - name: epoch
+ *         in: query
+ *         description: Epoch for historical snapshot (defaults to current)
+ *         schema:
+ *           type: integer
  *     responses:
  *       200:
  *         description: Successfully retrieved delegation distribution data
@@ -298,7 +328,7 @@ router.get("/drep-activity-rate", analyticsController.getDRepActivityRate);
  * /analytics/drep-rationale-rate:
  *   get:
  *     summary: Get DRep rationale rate
- *     description: Returns DRep rationale rate (votes with rationale / total votes)
+ *     description: Returns DRep rationale rate (votes with rationale / total votes). A vote has rationale if anchorUrl or rationale field is non-empty.
  *     tags:
  *       - Governance Analytics
  *     parameters:
@@ -312,6 +342,21 @@ router.get("/drep-activity-rate", analyticsController.getDRepActivityRate);
  *         schema:
  *           type: integer
  *           default: 20
+ *       - name: epochStart
+ *         in: query
+ *         description: Start epoch for filtering votes
+ *         schema:
+ *           type: integer
+ *       - name: epochEnd
+ *         in: query
+ *         description: End epoch for filtering votes
+ *         schema:
+ *           type: integer
+ *       - name: proposalId
+ *         in: query
+ *         description: Filter by specific proposal
+ *         schema:
+ *           type: string
  *       - name: sortBy
  *         in: query
  *         schema:
@@ -490,16 +535,22 @@ router.get("/spo-default-stance", analyticsController.getSpoDefaultStance);
  * /analytics/entity-concentration:
  *   get:
  *     summary: Get SPO entity voting power concentration
- *     description: Returns multi-pool operator concentration metrics (HHI, top-N share)
+ *     description: Returns multi-pool operator concentration metrics including Herfindahl-Hirschman Index (HHI) and top-N entity share of total voting power
  *     tags:
  *       - Governance Analytics
  *     parameters:
  *       - name: limit
  *         in: query
- *         description: Max number of entities to return
+ *         description: Max number of entities to return in detail list
  *         schema:
  *           type: integer
  *           default: 50
+ *       - name: topN
+ *         in: query
+ *         description: Number of top entities for concentration share calculation
+ *         schema:
+ *           type: integer
+ *           default: 10
  *     responses:
  *       200:
  *         description: Successfully retrieved entity concentration data
@@ -556,20 +607,33 @@ router.get("/vote-divergence", analyticsController.getVoteDivergence);
  * /analytics/action-volume:
  *   get:
  *     summary: Get governance action volume
- *     description: Returns governance action volume by epoch and type
+ *     description: Returns governance action volume by epoch and type. Volume counts proposals by submissionEpoch with breakdown by governanceActionType.
  *     tags:
  *       - Governance Analytics
  *     parameters:
  *       - name: epochStart
  *         in: query
+ *         description: Start epoch for filtering
  *         schema:
  *           type: integer
  *       - name: epochEnd
  *         in: query
+ *         description: End epoch for filtering
  *         schema:
  *           type: integer
+ *       - name: governanceActionType
+ *         in: query
+ *         description: Filter by governance action type (comma-separated)
+ *         schema:
+ *           type: string
+ *       - name: status
+ *         in: query
+ *         description: Filter by proposal status (comma-separated)
+ *         schema:
+ *           type: string
  *       - name: limit
  *         in: query
+ *         description: Max number of epochs to return
  *         schema:
  *           type: integer
  *           default: 50
@@ -772,15 +836,40 @@ router.get("/cc-time-to-decision", analyticsController.getCCTimeToDecision);
  * /analytics/cc-participation:
  *   get:
  *     summary: Get CC member participation rate
- *     description: Returns participation rate per CC member
+ *     description: Returns participation rate per CC member. Rate = (CCs who voted / eligibleMembers) * 100. Only the latest vote per CC member is counted.
  *     tags:
  *       - Governance Analytics
  *     parameters:
+ *       - name: page
+ *         in: query
+ *         description: Page number (starts at 1)
+ *         schema:
+ *           type: integer
+ *           minimum: 1
+ *           default: 1
+ *       - name: pageSize
+ *         in: query
+ *         description: Number of items per page (max 100)
+ *         schema:
+ *           type: integer
+ *           minimum: 1
+ *           maximum: 100
+ *           default: 20
  *       - name: status
  *         in: query
  *         description: Filter proposals by status (comma-separated)
  *         schema:
  *           type: string
+ *       - name: epochStart
+ *         in: query
+ *         description: Start epoch for filtering
+ *         schema:
+ *           type: integer
+ *       - name: epochEnd
+ *         in: query
+ *         description: End epoch for filtering
+ *         schema:
+ *           type: integer
  *     responses:
  *       200:
  *         description: Successfully retrieved CC participation data
@@ -794,7 +883,7 @@ router.get("/cc-participation", analyticsController.getCCParticipation);
  * /analytics/cc-abstain-rate:
  *   get:
  *     summary: Get CC abstain rate
- *     description: Returns CC abstain rate per proposal
+ *     description: Returns CC abstain rate per proposal. Rate = (CC votes where vote = ABSTAIN / total CC votes) * 100.
  *     tags:
  *       - Governance Analytics
  *     parameters:
@@ -810,8 +899,19 @@ router.get("/cc-participation", analyticsController.getCCParticipation);
  *           default: 20
  *       - name: status
  *         in: query
+ *         description: Filter proposals by status (comma-separated)
  *         schema:
  *           type: string
+ *       - name: epochStart
+ *         in: query
+ *         description: Start epoch for filtering
+ *         schema:
+ *           type: integer
+ *       - name: epochEnd
+ *         in: query
+ *         description: End epoch for filtering
+ *         schema:
+ *           type: integer
  *     responses:
  *       200:
  *         description: Successfully retrieved CC abstain rate data
@@ -825,7 +925,7 @@ router.get("/cc-abstain-rate", analyticsController.getCCAbstainRate);
  * /analytics/cc-agreement-rate:
  *   get:
  *     summary: Get CC vote agreement rate
- *     description: Returns CC vote agreement rate (votes matching majority) per proposal
+ *     description: Returns CC vote agreement rate (votes matching majority) per proposal. Uses latest vote per CC member only. Denominator for Yes/No = eligibleMembers - abstainCount.
  *     tags:
  *       - Governance Analytics
  *     parameters:
@@ -841,8 +941,19 @@ router.get("/cc-abstain-rate", analyticsController.getCCAbstainRate);
  *           default: 20
  *       - name: status
  *         in: query
+ *         description: Filter proposals by status (comma-separated)
  *         schema:
  *           type: string
+ *       - name: epochStart
+ *         in: query
+ *         description: Start epoch for filtering
+ *         schema:
+ *           type: integer
+ *       - name: epochEnd
+ *         in: query
+ *         description: End epoch for filtering
+ *         schema:
+ *           type: integer
  *     responses:
  *       200:
  *         description: Successfully retrieved CC agreement rate data

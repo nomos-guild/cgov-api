@@ -4,6 +4,11 @@ import {
   GetContentionRateResponse,
   ProposalContention,
 } from "../../responses/analytics.response";
+import {
+  computeDrepLedgerBuckets,
+  computeSpoLedgerBuckets,
+} from "../../libs/ledgerVoteMath";
+import { getVotingThreshold } from "../../libs/proposalMapper";
 
 /**
  * Determines if a proposal is contentious based on vote split
@@ -84,20 +89,38 @@ export const getContentionRate = async (req: Request, res: Response) => {
         proposalId: true,
         title: true,
         governanceActionType: true,
+        submissionEpoch: true,
         drepActiveYesVotePower: true,
         drepActiveNoVotePower: true,
+        drepActiveAbstainVotePower: true,
+        drepAlwaysAbstainVotePower: true,
+        drepAlwaysNoConfidencePower: true,
+        drepInactiveVotePower: true,
         drepTotalVotePower: true,
         spoActiveYesVotePower: true,
         spoActiveNoVotePower: true,
+        spoActiveAbstainVotePower: true,
+        spoAlwaysAbstainVotePower: true,
+        spoAlwaysNoConfidencePower: true,
+        spoNoVotePower: true,
         spoTotalVotePower: true,
       },
     });
 
     // Calculate contention for each proposal
     let allContentions: ProposalContention[] = allProposals.map((p) => {
+      const drepBuckets = computeDrepLedgerBuckets(p);
+      const spoBuckets = computeSpoLedgerBuckets(p);
+
+      // Use ledger outcome percentages (yes/no) so contention reflects ratification math
+      const drepRatificationYesPct = drepBuckets.yesOutcomePct;
+      const drepRatificationNoPct = drepBuckets.noOutcomePct;
+      const spoRatificationYesPct = spoBuckets.yesOutcomePct;
+      const spoRatificationNoPct = spoBuckets.noOutcomePct;
+
+      // Backward compat: simple active/total percentages
       const drepTotal = p.drepTotalVotePower ?? 0n;
       const spoTotal = p.spoTotalVotePower ?? 0n;
-
       const drepYesPct =
         drepTotal > 0n
           ? Number(((p.drepActiveYesVotePower ?? 0n) * 10000n) / drepTotal) / 100
@@ -115,22 +138,50 @@ export const getContentionRate = async (req: Request, res: Response) => {
           ? Number(((p.spoActiveNoVotePower ?? 0n) * 10000n) / spoTotal) / 100
           : null;
 
-      // Use DRep contention as primary, fallback to SPO
-      let contention = calculateContention(drepYesPct, drepNoPct);
+      // Use DRep contention as primary, fallback to SPO (ratification math)
+      let contention = calculateContention(
+        drepRatificationYesPct,
+        drepRatificationNoPct
+      );
       if (contention.contentionScore === null) {
-        contention = calculateContention(spoYesPct, spoNoPct);
+        contention = calculateContention(
+          spoRatificationYesPct,
+          spoRatificationNoPct
+        );
       }
+
+      const thresholds = getVotingThreshold(p.governanceActionType);
+      const drepThreshold = thresholds.drepThreshold ?? null;
+      const spoThreshold = thresholds.spoThreshold ?? null;
+
+      const drepDistanceFromThreshold =
+        drepRatificationYesPct !== null && drepThreshold !== null
+          ? Number((drepRatificationYesPct - drepThreshold * 100).toFixed(2))
+          : null;
+      const spoDistanceFromThreshold =
+        spoRatificationYesPct !== null && spoThreshold !== null
+          ? Number((spoRatificationYesPct - spoThreshold * 100).toFixed(2))
+          : null;
 
       return {
         proposalId: p.proposalId,
         title: p.title,
         governanceActionType: p.governanceActionType,
+        submissionEpoch: p.submissionEpoch,
         drepYesPct,
         drepNoPct,
         spoYesPct,
         spoNoPct,
         isContentious: contention.isContentious,
         contentionScore: contention.contentionScore,
+        drepRatificationYesPct,
+        drepRatificationNoPct,
+        spoRatificationYesPct,
+        spoRatificationNoPct,
+        drepThreshold,
+        spoThreshold,
+        drepDistanceFromThreshold,
+        spoDistanceFromThreshold,
       };
     });
 
