@@ -187,7 +187,7 @@ router.get("/delegation-distribution", analyticsController.getDelegationDistribu
  *           type: integer
  *       - name: limit
  *         in: query
- *         description: Max number of epochs to return
+ *         description: Max number of epochs to return. If no query params are provided, returns all epoch buckets.
  *         schema:
  *           type: integer
  *           default: 50
@@ -204,7 +204,7 @@ router.get("/new-delegation-rate", analyticsController.getNewDelegationRate);
  * /analytics/inactive-ada:
  *   get:
  *     summary: Get inactive delegated ADA statistics
- *     description: Returns inactive DRep vote power per proposal and special DRep stats per epoch
+ *     description: Returns inactive DRep vote power per proposal. If no query params are provided, returns all proposals.
  *     tags:
  *       - Governance Analytics
  *     parameters:
@@ -213,8 +213,8 @@ router.get("/new-delegation-rate", analyticsController.getNewDelegationRate);
  *         description: Data view type
  *         schema:
  *           type: string
- *           enum: [proposals, epochs, both]
- *           default: both
+ *           enum: [proposals]
+ *           default: proposals
  *       - name: proposalId
  *         in: query
  *         description: Filter by specific proposal
@@ -276,7 +276,7 @@ router.get("/gini", analyticsController.getGiniCoefficient);
  * /analytics/drep-activity-rate:
  *   get:
  *     summary: Get DRep activity rate
- *     description: Returns DRep activity rate (proposals voted / proposals in scope)
+ *     description: Returns DRep activity rate (unique proposals voted / proposals in scope since each DRep's registration epoch) and includes registrationEpoch, totalProposals (all in-scope), totalProposalsSinceRegistration, activityRateAllTimePct, totalVotesCast (raw vote rows), aggregateActivityRatePct, and aggregateActivityRateAllTimePct. If no query parameters are provided, returns all active DReps (no pagination).
  *     tags:
  *       - Governance Analytics
  *     parameters:
@@ -303,6 +303,12 @@ router.get("/gini", analyticsController.getGiniCoefficient);
  *         description: Filter proposals by status (comma-separated)
  *         schema:
  *           type: string
+ *       - name: activeOnly
+ *         in: query
+ *         description: If true, only return active DReps (pass false to include inactive)
+ *         schema:
+ *           type: boolean
+ *           default: true
  *       - name: sortBy
  *         in: query
  *         schema:

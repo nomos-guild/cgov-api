@@ -194,6 +194,7 @@ export interface GetNewDelegationRateResponse {
 export interface ProposalInactiveAda {
   proposalId: string;
   title: string;
+  submissionEpoch: number | null;
   /** Inactive DRep vote power (lovelace as string) */
   drepInactiveVotePower: string | null;
   /** Total DRep vote power (lovelace as string) */
@@ -206,23 +207,9 @@ export interface ProposalInactiveAda {
   drepAlwaysNoConfidencePower: string | null;
 }
 
-export interface EpochInactiveAda {
-  epoch: number;
-  /** Always abstain voting power (lovelace as string) */
-  drepAlwaysAbstainVotingPower: string | null;
-  /** Always no confidence voting power (lovelace as string) */
-  drepAlwaysNoConfidenceVotingPower: string | null;
-  /** Always abstain delegator count */
-  drepAlwaysAbstainDelegatorCount: number | null;
-  /** Always no confidence delegator count */
-  drepAlwaysNoConfidenceDelegatorCount: number | null;
-}
-
 export interface GetInactiveAdaResponse {
   /** Per-proposal inactive data (if requested) */
   proposals?: ProposalInactiveAda[];
-  /** Per-epoch inactive data (special DReps) */
-  epochs?: EpochInactiveAda[];
 }
 
 // ============================================
@@ -253,23 +240,34 @@ export interface GetGiniCoefficientResponse {
 export interface DRepActivitySummary {
   drepId: string;
   name: string | null;
-  /** Number of proposals voted on */
+  /** Earliest registration epoch for this DRep (from DrepLifecycleEvent); null if unknown */
+  registrationEpoch: number | null;
+  /** Number of UNIQUE proposals voted on */
   proposalsVoted: number;
-  /** Total proposals in scope */
+  /** Total number of onchain vote rows (includes re-votes) */
+  totalVotesCast: number;
+  /** Total proposals in scope (regardless of registration epoch) */
   totalProposals: number;
+  /** Total proposals in scope submitted at/after this DRep's registration epoch (null epoch proposals excluded) */
+  totalProposalsSinceRegistration: number;
   /** Activity rate percentage (0-100) */
   activityRatePct: number;
+  /** Activity rate percentage vs all in-scope proposals (0-100) */
+  activityRateAllTimePct: number;
 }
 
 export interface GetDRepActivityRateResponse {
   dreps: DRepActivitySummary[];
   /** Aggregate activity rate across all DReps */
   aggregateActivityRatePct: number;
+  /** Aggregate activity rate across all DReps vs all in-scope proposals */
+  aggregateActivityRateAllTimePct: number;
   /** Filter criteria used */
   filter: {
     epochStart: number | null;
     epochEnd: number | null;
     statuses: string[];
+    activeOnly: boolean;
   };
   pagination: {
     page: number;

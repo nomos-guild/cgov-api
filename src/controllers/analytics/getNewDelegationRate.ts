@@ -14,67 +14,134 @@ import {
  * Query params:
  * - epochStart: Start epoch (optional)
  * - epochEnd: End epoch (optional)
- * - limit: Max number of epochs to return (default: 50)
+ * - limit: Max number of epochs to return (default: 50). If no query params are provided,
+ *   the endpoint returns all available epoch buckets.
  */
 export const getNewDelegationRate = async (req: Request, res: Response) => {
   try {
-    const epochStart = req.query.epochStart
-      ? parseInt(req.query.epochStart as string)
-      : null;
-    const epochEnd = req.query.epochEnd
-      ? parseInt(req.query.epochEnd as string)
-      : null;
-    const limit = Math.min(
-      500,
-      Math.max(1, parseInt(req.query.limit as string) || 50)
-    );
-
-    // Build where clause for delegation changes
-    const whereClause: any = {
-      toDrepId: { not: "" }, // Has a new DRep (not undelegation)
+    const parseOptionalInt = (value: unknown): number | null => {
+      if (value == null) return null;
+      const n = parseInt(String(value), 10);
+      return Number.isFinite(n) ? n : null;
     };
-    if (epochStart !== null) {
-      whereClause.delegatedEpoch = { ...whereClause.delegatedEpoch, gte: epochStart };
-    }
-    if (epochEnd !== null) {
-      whereClause.delegatedEpoch = { ...whereClause.delegatedEpoch, lte: epochEnd };
-    }
 
-    // Find first delegation per stake address using raw SQL for better performance
-    // We need to find the earliest epoch for each stake address where toDrepId != ""
-    const firstDelegations = await prisma.$queryRaw<
-      Array<{ delegated_epoch_no: number; stake_address: string }>
+    const epochStartRaw = req.query.epochStart;
+    const epochEndRaw = req.query.epochEnd;
+    const limitRaw = req.query.limit;
+
+    const epochStart = parseOptionalInt(epochStartRaw);
+    const epochEnd = parseOptionalInt(epochEndRaw);
+
+    const noParamsProvided =
+      epochStartRaw === undefined &&
+      epochEndRaw === undefined &&
+      limitRaw === undefined;
+
+    const limit = noParamsProvided
+      ? null
+      : Math.min(500, Math.max(1, parseOptionalInt(limitRaw) ?? 50));
+
+    // Define a "new delegator" as a stake address whose FIRST-EVER delegation
+    // to a *non-special* (real) DRep is observed.
+    //
+    // This intentionally treats special DReps as "not yet delegated to a real DRep".
+    // As a result, a stake address switching from a special DRep
+    // (drep_always_abstain / drep_always_no_confidence) to a real DRep is counted
+    // as a new delegator *if it has no prior real-DRep delegation*.
+    //
+    // Data quality: the change log can contain delegated_epoch_no = -1 (unknown). In that case,
+    // we can't place the event into an epoch bucket. To avoid undercounting addresses that are
+    // present in StakeDelegationState but missing usable history, we fall back to
+    // stake_delegation_state.delegated_epoch_no (which reflects the epoch of the CURRENT delegation).
+    // This fallback is best-effort and is only used when we have no first-delegation record.
+
+    const epochStartValue = epochStart ?? null;
+    const epochEndValue = epochEnd ?? null;
+
+    const perEpochNewCounts = await prisma.$queryRaw<
+      Array<{ epoch: number; new_delegators: number }>
     >`
-      SELECT MIN(delegated_epoch_no) as delegated_epoch_no, stake_address
-      FROM stake_delegation_change
-      WHERE to_drep_id != ''
-      ${epochStart !== null ? prisma.$queryRaw`AND delegated_epoch_no >= ${epochStart}` : prisma.$queryRaw``}
-      ${epochEnd !== null ? prisma.$queryRaw`AND delegated_epoch_no <= ${epochEnd}` : prisma.$queryRaw``}
-      GROUP BY stake_address
+      WITH firsts_change AS (
+        SELECT stake_address, MIN(delegated_epoch_no) AS first_epoch
+        FROM stake_delegation_change
+        WHERE to_drep_id != ''
+          AND to_drep_id NOT IN ('drep_always_abstain', 'drep_always_no_confidence')
+          AND delegated_epoch_no != -1
+        GROUP BY stake_address
+      ),
+      firsts_state_missing AS (
+        SELECT s.stake_address, s.delegated_epoch_no AS first_epoch
+        FROM stake_delegation_state s
+        WHERE s.drep_id IS NOT NULL
+          AND s.drep_id NOT IN ('drep_always_abstain', 'drep_always_no_confidence')
+          AND s.delegated_epoch_no IS NOT NULL
+          AND NOT EXISTS (
+            SELECT 1 FROM firsts_change c WHERE c.stake_address = s.stake_address
+          )
+      ),
+      firsts AS (
+        SELECT stake_address, first_epoch FROM firsts_change
+        UNION ALL
+        SELECT stake_address, first_epoch FROM firsts_state_missing
+      )
+      SELECT
+        first_epoch AS epoch,
+        COUNT(*)::int AS new_delegators
+      FROM firsts
+      WHERE (${epochStartValue}::int IS NULL OR first_epoch >= ${epochStartValue}::int)
+        AND (${epochEndValue}::int IS NULL OR first_epoch <= ${epochEndValue}::int)
+      GROUP BY first_epoch
+      ORDER BY first_epoch ASC
     `;
 
-    // Count new delegators per epoch
-    const epochCounts = new Map<number, number>();
-    for (const fd of firstDelegations) {
-      const epoch = fd.delegated_epoch_no;
-      if (epoch !== null && epoch !== -1) {
-        epochCounts.set(epoch, (epochCounts.get(epoch) ?? 0) + 1);
-      }
-    }
+    // Apply limit (most recent buckets) unless no query params were provided.
+    const limited = limit == null ? perEpochNewCounts : perEpochNewCounts.slice(-limit);
+    const minReturnedEpoch = limited.length > 0 ? limited[0].epoch : null;
 
-    // Build epoch array sorted by epoch
-    const sortedEpochs = Array.from(epochCounts.entries())
-      .sort((a, b) => a[0] - b[0])
-      .slice(-limit);
+    // Baseline: number of delegators whose first delegation happened before the returned window.
+    // This makes totalDelegators reflect global cumulative totals even when epochStart/limit is used.
+    const baselineRow =
+      minReturnedEpoch == null
+        ? null
+        : await prisma.$queryRaw<Array<{ baseline: number }>>`
+            WITH firsts_change AS (
+              SELECT stake_address, MIN(delegated_epoch_no) AS first_epoch
+              FROM stake_delegation_change
+              WHERE to_drep_id != ''
+                AND to_drep_id NOT IN ('drep_always_abstain', 'drep_always_no_confidence')
+                AND delegated_epoch_no != -1
+              GROUP BY stake_address
+            ),
+            firsts_state_missing AS (
+              SELECT s.stake_address, s.delegated_epoch_no AS first_epoch
+              FROM stake_delegation_state s
+              WHERE s.drep_id IS NOT NULL
+                AND s.drep_id NOT IN ('drep_always_abstain', 'drep_always_no_confidence')
+                AND s.delegated_epoch_no IS NOT NULL
+                AND NOT EXISTS (
+                  SELECT 1 FROM firsts_change c WHERE c.stake_address = s.stake_address
+                )
+            ),
+            firsts AS (
+              SELECT stake_address, first_epoch FROM firsts_change
+              UNION ALL
+              SELECT stake_address, first_epoch FROM firsts_state_missing
+            )
+            SELECT COUNT(*)::int AS baseline
+            FROM firsts
+            WHERE first_epoch < ${minReturnedEpoch}::int
+          `;
 
-    // Calculate cumulative total for rate calculation
-    let cumulativeTotal = 0;
-    const epochs: EpochNewDelegationRate[] = sortedEpochs.map(([epoch, newCount]) => {
+    const baseline = baselineRow?.[0]?.baseline ?? 0;
+
+    let cumulativeTotal = baseline;
+    const epochs: EpochNewDelegationRate[] = limited.map((row) => {
+      const newCount = row.new_delegators;
       cumulativeTotal += newCount;
       return {
-        epoch,
+        epoch: row.epoch,
         newDelegators: newCount,
-        totalDelegators: cumulativeTotal, // Cumulative new delegators up to this epoch
+        totalDelegators: cumulativeTotal,
         newDelegationRatePct:
           cumulativeTotal > 0
             ? Number(((newCount * 10000) / cumulativeTotal) / 100)
