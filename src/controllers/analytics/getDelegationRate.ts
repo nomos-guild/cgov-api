@@ -44,6 +44,7 @@ export const getDelegationRate = async (req: Request, res: Response) => {
       select: {
         epoch: true,
         delegatedDrepPower: true,
+        totalPoolVotePower: true,
         circulation: true,
         startTime: true,
         endTime: true,
@@ -53,6 +54,7 @@ export const getDelegationRate = async (req: Request, res: Response) => {
     // Calculate delegation rate for each epoch
     const epochs: EpochDelegationRate[] = epochTotals.map((e) => {
       const delegatedDrepPower = e.delegatedDrepPower ?? 0n;
+      const totalPoolVotePower = e.totalPoolVotePower ?? 0n;
       const circulation = e.circulation ?? 0n;
 
       const delegationRatePct =
@@ -60,11 +62,18 @@ export const getDelegationRate = async (req: Request, res: Response) => {
           ? Number((delegatedDrepPower * 10000n) / circulation) / 100
           : null;
 
+      const spoDelegationRatePct =
+        circulation > 0n
+          ? Number((totalPoolVotePower * 10000n) / circulation) / 100
+          : null;
+
       return {
         epoch: e.epoch,
         delegatedDrepPower: e.delegatedDrepPower?.toString() ?? null,
+        totalPoolVotePower: e.totalPoolVotePower?.toString() ?? null,
         circulation: e.circulation?.toString() ?? null,
         delegationRatePct,
+        spoDelegationRatePct,
         startTime: e.startTime?.toISOString() ?? null,
         endTime: e.endTime?.toISOString() ?? null,
       };

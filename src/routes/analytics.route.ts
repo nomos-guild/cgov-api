@@ -110,8 +110,8 @@ router.get("/stake-participation", analyticsController.getStakeParticipation);
  * @openapi
  * /analytics/delegation-rate:
  *   get:
- *     summary: Get delegation rate (% ada) per epoch
- *     description: Returns delegation rate as percentage of circulation per epoch
+ *     summary: Get delegation rate (% ada) per epoch (DRep + SPO)
+ *     description: Returns DRep delegation rate and SPO (pool vote power) delegation rate as percentage of circulation per epoch
  *     tags:
  *       - Governance Analytics
  *     parameters:

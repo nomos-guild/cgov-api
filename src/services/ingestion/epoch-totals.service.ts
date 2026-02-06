@@ -79,19 +79,80 @@ async function sumPoolVotingPowerForEpoch(epochNo: number): Promise<bigint> {
   let hasMore = true;
   let total = BigInt(0);
 
-  while (hasMore) {
-    const page = await withRetry(() =>
-      koiosGet<
+  // Defensive: if Koios paging isn't deterministic (no ORDER BY), offset-based paging
+  // can return duplicates between pages. Deduping by pool_id_bech32 prevents
+  // accidental double-counting.
+  const seenPoolIds = new Set<string>();
+
+  async function fetchPage(): Promise<
+    Array<{ pool_id_bech32: string; epoch_no: number; amount: string }>
+  > {
+    const attempts: Array<
+      () => Promise<
         Array<{ pool_id_bech32: string; epoch_no: number; amount: string }>
-      >("/pool_voting_power_history", {
-        _epoch_no: epochNo,
-        limit: pageSize,
-        offset,
-      })
-    );
+      >
+    > = [
+      // Prefer PostgREST horizontal filtering when available.
+      () =>
+        koiosGet("/pool_voting_power_history", {
+          epoch_no: `eq.${epochNo}`,
+          order: "pool_id_bech32.asc",
+          limit: pageSize,
+          offset,
+        }),
+      () =>
+        koiosGet("/pool_voting_power_history", {
+          epoch_no: `eq.${epochNo}`,
+          limit: pageSize,
+          offset,
+        }),
+      // Fallback to Koios function-style filtering.
+      () =>
+        koiosGet("/pool_voting_power_history", {
+          _epoch_no: epochNo,
+          order: "pool_id_bech32.asc",
+          limit: pageSize,
+          offset,
+        }),
+      () =>
+        koiosGet("/pool_voting_power_history", {
+          _epoch_no: epochNo,
+          limit: pageSize,
+          offset,
+        }),
+    ];
+
+    let lastError: any;
+    for (const attempt of attempts) {
+      try {
+        // koiosGet already has retry; keep this helper simple.
+        return await withRetry(() => attempt());
+      } catch (error: any) {
+        lastError = error;
+        // Try next attempt (some Koios deployments reject certain filter params with 404/400).
+        continue;
+      }
+    }
+
+    throw lastError;
+  }
+
+  while (hasMore) {
+    const page = await fetchPage();
 
     if (page && page.length > 0) {
       for (const row of page) {
+        // Defensive: if the epoch filter is ignored/unsupported, only sum the target epoch.
+        if (row?.epoch_no !== epochNo) continue;
+
+        const poolId = row?.pool_id_bech32;
+        if (typeof poolId === "string" && poolId) {
+          if (seenPoolIds.has(poolId)) {
+            continue;
+          }
+          seenPoolIds.add(poolId);
+        }
+
         if (row?.amount) {
           try {
             total += BigInt(row.amount);

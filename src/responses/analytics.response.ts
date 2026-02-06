@@ -126,10 +126,14 @@ export interface EpochDelegationRate {
   epoch: number;
   /** Delegated DRep power (lovelace as string) */
   delegatedDrepPower: string | null;
+  /** Total pool vote power (lovelace as string) */
+  totalPoolVotePower: string | null;
   /** Circulation (lovelace as string) */
   circulation: string | null;
-  /** Delegation rate percentage (0-100) */
+  /** DRep delegation rate percentage (0-100) */
   delegationRatePct: number | null;
+  /** SPO delegation rate percentage (0-100) */
+  spoDelegationRatePct: number | null;
   startTime: string | null;
   endTime: string | null;
 }
