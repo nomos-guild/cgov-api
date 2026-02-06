@@ -64,7 +64,7 @@ router.get("/voting-turnout", analyticsController.getVotingTurnout);
  * /analytics/stake-participation:
  *   get:
  *     summary: Get active stake address participation
- *     description: Returns statistics on delegator participation based on their DRep voting activity. Counts distinct stake addresses whose DRep voted on proposals.
+ *     description: Returns statistics on delegator participation based on their DRep voting activity. Counts distinct stake addresses whose DRep voted on proposals, and includes breakdown buckets (with percentages) for drep_always_abstain and drep_always_no_confidence.
  *     tags:
  *       - Governance Analytics
  *     parameters:

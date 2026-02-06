@@ -4,7 +4,112 @@ import {
   GetVotingTurnoutResponse,
   ProposalTurnout,
 } from "../../responses/analytics.response";
-import { toNumber } from "../../libs/proposalMapper";
+import {
+  SPO_FORMULA_TRANSITION_EPOCH,
+  SPO_FORMULA_TRANSITION_GOV_ACTION,
+  VOTING_THRESHOLDS,
+  getVotingThreshold,
+  toNumber,
+} from "../../libs/proposalMapper";
+import { GovernanceType } from "@prisma/client";
+
+const isKnownGovernanceType = (
+  value: string | null
+): value is GovernanceType => {
+  if (!value) return false;
+  return Object.prototype.hasOwnProperty.call(VOTING_THRESHOLDS, value);
+};
+
+const shouldComputeSpoTurnout = (governanceActionType: string | null): boolean => {
+  if (!isKnownGovernanceType(governanceActionType)) return false;
+  return getVotingThreshold(governanceActionType).spoThreshold !== null;
+};
+
+const shouldUseNewSpoFormulaFromRow = (row: {
+  proposalId: string;
+  submissionEpoch: number | null;
+}): boolean => {
+  if (row.proposalId === SPO_FORMULA_TRANSITION_GOV_ACTION) {
+    return true;
+  }
+  return (
+    row.submissionEpoch !== null &&
+    row.submissionEpoch !== undefined &&
+    row.submissionEpoch >= SPO_FORMULA_TRANSITION_EPOCH
+  );
+};
+
+const computeSpoTurnoutMetrics = (row: any) => {
+  const spoActiveYes = toNumber(row.spoActiveYesVotePower);
+  const spoActiveNo = toNumber(row.spoActiveNoVotePower);
+  const spoActiveAbstain = toNumber(row.spoActiveAbstainVotePower);
+  const spoAlwaysAbstain = toNumber(row.spoAlwaysAbstainVotePower);
+  const spoAlwaysNoConfidence = toNumber(row.spoAlwaysNoConfidencePower);
+
+  const spoActiveVotes = spoActiveYes + spoActiveNo + spoActiveAbstain;
+  const spoDefaultStance = spoAlwaysAbstain + spoAlwaysNoConfidence;
+
+  const storedTotal = toNumber(row.spoTotalVotePower);
+  const koiosNoVotePowerRaw =
+    row.spoNoVotePower === null || row.spoNoVotePower === undefined
+      ? null
+      : toNumber(row.spoNoVotePower);
+
+  const useNewFormula = shouldUseNewSpoFormulaFromRow(row);
+  const isHardForkInitiation =
+    row.governanceActionType === GovernanceType.HARD_FORK_INITIATION;
+
+  let effectiveTotal = storedTotal;
+  let notVotedPower: number;
+
+  // Prefer Koios pool_no_vote_power (consistent snapshot) when available.
+  // This mirrors the approach in proposalMapper's SPO vote calculations.
+  if (koiosNoVotePowerRaw !== null) {
+    // effectiveTotal = yes + abstain + pool_no_vote_power
+    // (pool_no_vote_power includes explicit no + alwaysNoConfidence + notVoted, and
+    // for hard-fork initiation it can also include alwaysAbstain)
+    effectiveTotal = spoActiveYes + spoActiveAbstain + koiosNoVotePowerRaw;
+
+    notVotedPower =
+      useNewFormula && isHardForkInitiation
+        ? koiosNoVotePowerRaw -
+          spoActiveNo -
+          spoAlwaysNoConfidence -
+          spoAlwaysAbstain
+        : koiosNoVotePowerRaw - spoActiveNo - spoAlwaysNoConfidence;
+  } else {
+    notVotedPower =
+      useNewFormula && isHardForkInitiation
+        ? effectiveTotal - spoActiveYes - spoActiveNo - spoActiveAbstain
+        : effectiveTotal -
+          spoActiveYes -
+          spoActiveNo -
+          spoActiveAbstain -
+          spoAlwaysAbstain -
+          spoAlwaysNoConfidence;
+  }
+
+  const turnoutPct =
+    effectiveTotal > 0
+      ? Number(((spoActiveVotes / effectiveTotal) * 100).toFixed(2))
+      : null;
+
+  // Participating = active + default stance (aligned with API contract)
+  const participating = spoActiveVotes + spoDefaultStance;
+  const participatingPct =
+    effectiveTotal > 0
+      ? Number(((participating / effectiveTotal) * 100).toFixed(2))
+      : null;
+
+  return {
+    effectiveTotal,
+    turnoutPct,
+    participatingPct,
+    notVotedPower: Math.max(0, notVotedPower),
+    participating,
+    active: spoActiveVotes,
+  };
+};
 
 /**
  * GET /analytics/voting-turnout
@@ -114,30 +219,15 @@ export const getVotingTurnout = async (req: Request, res: Response) => {
         : null;
 
       // SPO calculations
-      const spoActiveVotes = toNumber(p.spoActiveYesVotePower) +
-        toNumber(p.spoActiveNoVotePower) +
-        toNumber(p.spoActiveAbstainVotePower);
-      const spoAlwaysAbstain = toNumber(p.spoAlwaysAbstainVotePower);
-      const spoAlwaysNoConfidence = toNumber(p.spoAlwaysNoConfidencePower);
-      const spoTotal = toNumber(p.spoTotalVotePower);
-      const spoKoiosNoVote = toNumber(p.spoNoVotePower);
+      const spoEligible = shouldComputeSpoTurnout(p.governanceActionType);
 
-      // Default stance = alwaysAbstain + alwaysNoConfidence
-      const spoDefaultStance = spoAlwaysAbstain + spoAlwaysNoConfidence;
+      const spoMetrics =
+        spoEligible && p.spoTotalVotePower !== null && p.spoTotalVotePower !== undefined
+          ? computeSpoTurnoutMetrics(p)
+          : null;
 
-      // Derive pure notVoted from Koios: pool_no_vote_power - explicit_no - alwaysNoConfidence
-      const spoNotVoted = spoKoiosNoVote - toNumber(p.spoActiveNoVotePower) - spoAlwaysNoConfidence;
-
-      // Turnout (active only) - backward compatible
-      const spoTurnoutPct = spoTotal > 0
-        ? Number(((spoActiveVotes / spoTotal) * 100).toFixed(2))
-        : null;
-
-      // Participating = active + default stance
-      const spoParticipating = spoActiveVotes + spoDefaultStance;
-      const spoParticipatingPct = spoTotal > 0
-        ? Number(((spoParticipating / spoTotal) * 100).toFixed(2))
-        : null;
+      const spoTurnoutPct = spoMetrics?.turnoutPct ?? null;
+      const spoParticipatingPct = spoMetrics?.participatingPct ?? null;
 
       return {
         proposalId: p.proposalId,
@@ -165,7 +255,7 @@ export const getVotingTurnout = async (req: Request, res: Response) => {
         // NEW: SPO breakdown fields
         spoAlwaysAbstainVotePower: p.spoAlwaysAbstainVotePower?.toString() ?? null,
         spoAlwaysNoConfidencePower: p.spoAlwaysNoConfidencePower?.toString() ?? null,
-        spoNotVotedPower: Math.max(0, spoNotVoted).toString(),
+        spoNotVotedPower: spoMetrics ? spoMetrics.notVotedPower.toString() : null,
         spoParticipatingPct,
       };
     });
@@ -192,18 +282,12 @@ export const getVotingTurnout = async (req: Request, res: Response) => {
         totalDrepParticipating += drepActive + drepDefaultStance;
         totalDrepPower += toNumber(p.drepTotalVotePower);
       }
-      if (p.spoTotalVotePower) {
-        const spoActive =
-          toNumber(p.spoActiveYesVotePower) +
-          toNumber(p.spoActiveNoVotePower) +
-          toNumber(p.spoActiveAbstainVotePower);
-        const spoDefaultStance =
-          toNumber(p.spoAlwaysAbstainVotePower) +
-          toNumber(p.spoAlwaysNoConfidencePower);
-
-        totalSpoActive += spoActive;
-        totalSpoParticipating += spoActive + spoDefaultStance;
-        totalSpoPower += toNumber(p.spoTotalVotePower);
+      const spoEligible = shouldComputeSpoTurnout(p.governanceActionType);
+      if (spoEligible && p.spoTotalVotePower) {
+        const metrics = computeSpoTurnoutMetrics(p);
+        totalSpoActive += metrics.active;
+        totalSpoParticipating += metrics.participating;
+        totalSpoPower += metrics.effectiveTotal;
       }
     }
 

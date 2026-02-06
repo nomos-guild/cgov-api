@@ -229,31 +229,48 @@ export async function syncEpochTotals(
   prisma: Prisma.TransactionClient,
   epochNo: number
 ): Promise<SyncEpochTotalsResult> {
+  async function fetchRowForEpoch<T extends { epoch_no: number }>(
+    endpoint: string
+  ): Promise<T | null> {
+    const attempts: Array<() => Promise<T[]>> = [
+      () => withRetry(() => koiosGet<T[]>(endpoint, { _epoch_no: epochNo })),
+      () =>
+        withRetry(() =>
+          koiosGet<T[]>(endpoint, { epoch_no: `eq.${epochNo}` })
+        ),
+    ];
+
+    for (const attempt of attempts) {
+      try {
+        const rows = await attempt();
+        const row = rows?.find((r) => r?.epoch_no === epochNo) ?? rows?.[0];
+        if (row && row.epoch_no === epochNo) return row;
+      } catch {
+        // fall through to next attempt
+      }
+    }
+
+    console.warn(
+      `[Epoch Totals] No rows returned for endpoint=${endpoint} epoch=${epochNo}`
+    );
+    return null;
+  }
+
   const [
-    totalsArr,
-    drepSummaryArr,
-    epochInfoArr,
+    totals,
+    drepSummary,
+    epochInfo,
     totalPoolVotePower,
     drepAlwaysAbstainAgg,
     drepAlwaysNoConfidenceAgg,
   ] = await Promise.all([
-      withRetry(() => koiosGet<KoiosTotals[]>("/totals", { _epoch_no: epochNo })),
-      withRetry(() =>
-        koiosGet<KoiosDrepEpochSummary[]>("/drep_epoch_summary", {
-          _epoch_no: epochNo,
-        })
-      ),
-      withRetry(() =>
-        koiosGet<KoiosEpochInfo[]>("/epoch_info", { _epoch_no: epochNo })
-      ),
+      fetchRowForEpoch<KoiosTotals>("/totals"),
+      fetchRowForEpoch<KoiosDrepEpochSummary>("/drep_epoch_summary"),
+      fetchRowForEpoch<KoiosEpochInfo>("/epoch_info"),
       sumPoolVotingPowerForEpoch(epochNo),
       getSpecialDrepAggregatesForEpoch(epochNo, "drep_always_abstain"),
       getSpecialDrepAggregatesForEpoch(epochNo, "drep_always_no_confidence"),
     ]);
-
-  const totals = totalsArr?.[0] ?? null;
-  const drepSummary = drepSummaryArr?.[0] ?? null;
-  const epochInfo = epochInfoArr?.[0] ?? null;
 
   // Financial totals
   const circulation = toBigIntOrNull(totals?.circulation);

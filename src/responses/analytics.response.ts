@@ -89,6 +89,28 @@ export interface StakeParticipationStats {
   participatingAmount: string;
   /** Total delegated amount (lovelace as string) */
   totalAmount: string;
+
+  /**
+   * Breakdown between “actual” stake addresses (from StakeDelegationState)
+   * and “default” delegations (drep_always_abstain / drep_always_no_confidence, sourced from EpochTotals).
+   */
+  breakdown: {
+    actual: StakeParticipationBucket;
+    alwaysAbstain: StakeParticipationBucket;
+    alwaysNoConfidence: StakeParticipationBucket;
+  };
+}
+
+export interface StakeParticipationBucket {
+  participatingDelegators: number;
+  totalDelegators: number;
+  participationRatePct: number | null;
+  participatingAmount: string;
+  totalAmount: string;
+  /** Percentage of all delegators in this bucket (0-100) */
+  delegatorSharePct: number | null;
+  /** Percentage of total delegated amount in this bucket (0-100) */
+  amountSharePct: number | null;
 }
 
 export interface GetStakeParticipationResponse {

@@ -81,6 +81,12 @@ export interface SyncGovernanceAnalyticsEpochResult {
   };
 }
 
+export interface SyncGovernanceAnalyticsPreviousAndCurrentResult {
+  currentEpoch: number;
+  previousEpoch: SyncGovernanceAnalyticsEpochResult;
+  currentEpochTotals: SyncEpochTotalsResult;
+}
+
 // ============================================================
 // Orchestration Functions
 // ============================================================
@@ -205,4 +211,32 @@ export async function syncGovernanceAnalyticsForPreviousEpoch(
   const epochToSync = currentEpoch - 1;
 
   return syncGovernanceAnalyticsForEpoch(prisma, epochToSync, currentEpoch);
+}
+
+/**
+ * Sync governance analytics for the previous epoch (checkpointed) AND
+ * always upsert current epoch totals/timestamps on every run.
+ *
+ * Rationale: current epoch totals evolve as the chain progresses, so we want
+ * to keep the current epoch row up-to-date until the epoch rolls over.
+ */
+export async function syncGovernanceAnalyticsForPreviousAndCurrentEpoch(
+  prisma: Prisma.TransactionClient
+): Promise<SyncGovernanceAnalyticsPreviousAndCurrentResult> {
+  const currentEpoch = await getKoiosCurrentEpoch();
+
+  const previousEpoch = await syncGovernanceAnalyticsForEpoch(
+    prisma,
+    currentEpoch - 1,
+    currentEpoch
+  );
+
+  // Always refresh current-epoch totals (these change throughout the epoch).
+  const currentEpochTotals = await syncEpochTotals(prisma, currentEpoch);
+
+  return {
+    currentEpoch,
+    previousEpoch,
+    currentEpochTotals,
+  };
 }

@@ -15,7 +15,7 @@
 import cron from "node-cron";
 import { prisma } from "../services";
 import {
-  syncGovernanceAnalyticsForPreviousEpoch,
+  syncGovernanceAnalyticsForPreviousAndCurrentEpoch,
   syncMissingEpochAnalytics,
 } from "../services/ingestion/epoch-analytics.service";
 
@@ -46,66 +46,81 @@ function startEpochAnalyticsSyncJobWithSchedule(schedule: string) {
     console.log(`\n[${timestamp}] Starting epoch analytics sync job...`);
 
     try {
-      const result = await syncGovernanceAnalyticsForPreviousEpoch(prisma);
-
-      console.log(
-        `[${timestamp}] Epoch analytics sync result (currentEpoch=${result.currentEpoch}, targetEpoch=${result.epoch}):`
+      const result = await syncGovernanceAnalyticsForPreviousAndCurrentEpoch(
+        prisma
       );
 
-      if (result.dreps) {
+      const previous = result.previousEpoch;
+
+      console.log(
+        `[${timestamp}] Epoch analytics sync result (currentEpoch=${result.currentEpoch}, previousEpoch=${previous.epoch}):`
+      );
+
+      if (previous.dreps) {
         console.log(
-          `  DReps: koios=${result.dreps.koiosTotal}, existing=${result.dreps.existingInDb}, created=${result.dreps.created}, updatedFromInfo=${result.dreps.updatedFromInfo}, failedInfoBatches=${result.dreps.failedInfoBatches}`
+          `  DReps: koios=${previous.dreps.koiosTotal}, existing=${previous.dreps.existingInDb}, created=${previous.dreps.created}, updatedFromInfo=${previous.dreps.updatedFromInfo}, failedInfoBatches=${previous.dreps.failedInfoBatches}`
         );
       } else {
-        console.log(`  DReps: skipped=${result.skipped.dreps}`);
+        console.log(`  DReps: skipped=${previous.skipped.dreps}`);
       }
 
-      if (result.drepInfo) {
+      if (previous.drepInfo) {
         console.log(
-          `  DRep Info: total=${result.drepInfo.totalDreps}, updated=${result.drepInfo.updated}, failedBatches=${result.drepInfo.failedBatches}`
+          `  DRep Info: total=${previous.drepInfo.totalDreps}, updated=${previous.drepInfo.updated}, failedBatches=${previous.drepInfo.failedBatches}`
         );
       } else {
-        console.log(`  DRep Info: skipped=${result.skipped.drepInfo}`);
+        console.log(`  DRep Info: skipped=${previous.skipped.drepInfo}`);
       }
 
       // Log totals + timestamps sync results
-      if (result.totals) {
+      if (previous.totals) {
         console.log(
-          `  Totals: upserted=${result.totals.upserted}, circulation=${result.totals.circulation?.toString() ?? "null"}, treasury=${result.totals.treasury?.toString() ?? "null"}, delegatedDrepPower=${result.totals.delegatedDrepPower?.toString() ?? "null"}, totalPoolVotePower=${result.totals.totalPoolVotePower?.toString() ?? "null"}`
+          `  Totals (previous epoch): upserted=${previous.totals.upserted}, circulation=${previous.totals.circulation?.toString() ?? "null"}, treasury=${previous.totals.treasury?.toString() ?? "null"}, delegatedDrepPower=${previous.totals.delegatedDrepPower?.toString() ?? "null"}, totalPoolVotePower=${previous.totals.totalPoolVotePower?.toString() ?? "null"}`
         );
         console.log(
-          `  Epoch Timestamps: startTime=${result.totals.startTime?.toISOString() ?? "null"}, endTime=${result.totals.endTime?.toISOString() ?? "null"}, blocks=${result.totals.blockCount ?? "null"}, txs=${result.totals.txCount ?? "null"}`
+          `  Epoch Timestamps (previous epoch): startTime=${previous.totals.startTime?.toISOString() ?? "null"}, endTime=${previous.totals.endTime?.toISOString() ?? "null"}, blocks=${previous.totals.blockCount ?? "null"}, txs=${previous.totals.txCount ?? "null"}`
         );
       } else {
-        console.log(`  Totals: skipped=${result.skipped.totals}`);
+        console.log(`  Totals (previous epoch): skipped=${previous.skipped.totals}`);
       }
 
+      // Current epoch totals are always refreshed every run
+      const currentTotals = result.currentEpochTotals;
+      console.log(
+        `  Totals (current epoch=${currentTotals.epoch}): upserted=${currentTotals.upserted}, circulation=${currentTotals.circulation?.toString() ?? "null"}, treasury=${currentTotals.treasury?.toString() ?? "null"}, delegatedDrepPower=${currentTotals.delegatedDrepPower?.toString() ?? "null"}, totalPoolVotePower=${currentTotals.totalPoolVotePower?.toString() ?? "null"}`
+      );
+      console.log(
+        `  Epoch Timestamps (current epoch): startTime=${currentTotals.startTime?.toISOString() ?? "null"}, endTime=${currentTotals.endTime?.toISOString() ?? "null"}, blocks=${currentTotals.blockCount ?? "null"}, txs=${currentTotals.txCount ?? "null"}`
+      );
+
       // Log DRep lifecycle sync results
-      if (result.drepLifecycle) {
+      if (previous.drepLifecycle) {
         console.log(
-          `  DRep Lifecycle: attempted=${result.drepLifecycle.drepsAttempted}, processed=${result.drepLifecycle.drepsProcessed}, ` +
-            `noUpdates=${result.drepLifecycle.drepsWithNoUpdates}, updatesFetched=${result.drepLifecycle.totalUpdatesFetched}, ` +
-            `events=${result.drepLifecycle.eventsIngested} (reg=${result.drepLifecycle.eventsByType.registration}, ` +
-            `dereg=${result.drepLifecycle.eventsByType.deregistration}, update=${result.drepLifecycle.eventsByType.update}), ` +
-            `failed=${result.drepLifecycle.failed.length}`
+          `  DRep Lifecycle: attempted=${previous.drepLifecycle.drepsAttempted}, processed=${previous.drepLifecycle.drepsProcessed}, ` +
+            `noUpdates=${previous.drepLifecycle.drepsWithNoUpdates}, updatesFetched=${previous.drepLifecycle.totalUpdatesFetched}, ` +
+            `events=${previous.drepLifecycle.eventsIngested} (reg=${previous.drepLifecycle.eventsByType.registration}, ` +
+            `dereg=${previous.drepLifecycle.eventsByType.deregistration}, update=${previous.drepLifecycle.eventsByType.update}), ` +
+            `failed=${previous.drepLifecycle.failed.length}`
         );
-        if (result.drepLifecycle.failed.length > 0) {
+        if (previous.drepLifecycle.failed.length > 0) {
           console.error(
             `  DRep Lifecycle: first failures:`,
-            result.drepLifecycle.failed.slice(0, 10)
+            previous.drepLifecycle.failed.slice(0, 10)
           );
         }
       } else {
-        console.log(`  DRep Lifecycle: skipped=${result.skipped.drepLifecycle}`);
+        console.log(
+          `  DRep Lifecycle: skipped=${previous.skipped.drepLifecycle}`
+        );
       }
 
       // Log pool groups sync results
-      if (result.poolGroups) {
+      if (previous.poolGroups) {
         console.log(
-          `  Pool Groups: fetched=${result.poolGroups.totalFetched}, created=${result.poolGroups.created}, updated=${result.poolGroups.updated}, uniqueGroups=${result.poolGroups.uniqueGroups}`
+          `  Pool Groups: fetched=${previous.poolGroups.totalFetched}, created=${previous.poolGroups.created}, updated=${previous.poolGroups.updated}, uniqueGroups=${previous.poolGroups.uniqueGroups}`
         );
       } else {
-        console.log(`  Pool Groups: skipped=${result.skipped.poolGroups}`);
+        console.log(`  Pool Groups: skipped=${previous.skipped.poolGroups}`);
       }
 
       // Backfill missing epoch totals (includes timestamps now)
