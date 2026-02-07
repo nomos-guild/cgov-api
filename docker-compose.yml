@@ -27,10 +27,9 @@ services:
 
   # CGOV Cron Service
   cgov-cron:
-    build:
-      context: .
-      dockerfile: Dockerfile
     image: cgov-api:latest
+    depends_on:
+      - cgov-api
     container_name: cgov_cron
     env_file:
       - .env

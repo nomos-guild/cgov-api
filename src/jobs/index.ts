@@ -5,6 +5,11 @@
 
 import { startProposalSyncJob } from "./sync-proposals.job";
 import { startVoterPowerSyncJob } from "./sync-voter-power.job";
+import { startDiscoverGithubJob } from "./discover-github.job";
+import { startSyncGithubActivityJob } from "./sync-github-activity.job";
+import { startAggregateGithubJob } from "./aggregate-github.job";
+import { startBackfillGithubJob } from "./backfill-github.job";
+import { startSnapshotGithubJob } from "./snapshot-github.job";
 
 /**
  * Starts all registered cron jobs
@@ -19,10 +24,20 @@ export const startAllJobs = () => {
   // Start voter power sync job (DRep and SPO voting power updates)
   startVoterPowerSyncJob();
 
-  // Add more jobs here as needed
-  // Example:
-  // startVoteCleanupJob();
-  // startMetricsJob();
+  // Start GitHub discovery job (weekly)
+  startDiscoverGithubJob();
+
+  // Start GitHub activity sync job (every 30 min)
+  startSyncGithubActivityJob();
+
+  // Start GitHub aggregation job (daily)
+  startAggregateGithubJob();
+
+  // Start GitHub backfill job (hourly, until all repos are backfilled)
+  startBackfillGithubJob();
+
+  // Start GitHub daily snapshot job (stars/forks for all repos)
+  startSnapshotGithubJob();
 
   console.log("[Cron] All cron jobs initialized");
 };

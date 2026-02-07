@@ -9,6 +9,13 @@ import {
 } from "../controllers/data/ingestVoters";
 import { postTriggerSync } from "../controllers/data/triggerSync";
 import { postTriggerVoterSync } from "../controllers/data/triggerVoterSync";
+import {
+  postTriggerDiscovery,
+  postTriggerSync as postTriggerGithubSync,
+  postTriggerBackfill,
+  postTriggerSnapshot,
+} from "../controllers/data/triggerGithub";
+import { developmentController } from "../controllers";
 
 const router = express.Router();
 
@@ -210,5 +217,69 @@ router.post("/trigger-sync", postTriggerSync);
  *         description: Sync failed
  */
 router.post("/trigger-voter-sync", postTriggerVoterSync);
+
+// ─── GitHub Admin Endpoints ─────────────────────────────────────────────────
+
+/**
+ * @openapi
+ * /data/github/status:
+ *   get:
+ *     summary: GitHub ingestion status (discovery, backfill, rate limit)
+ *     tags: [GitHub Admin]
+ *     responses:
+ *       200: { description: Current status of GitHub data pipelines }
+ */
+router.get("/github/status", developmentController.getStatus);
+
+/**
+ * @openapi
+ * /data/github/discover:
+ *   post:
+ *     summary: Manually trigger GitHub repository discovery
+ *     tags: [GitHub Admin]
+ *     responses:
+ *       200: { description: Discovery completed }
+ */
+router.post("/github/discover", postTriggerDiscovery);
+
+/**
+ * @openapi
+ * /data/github/sync:
+ *   post:
+ *     summary: Manually trigger GitHub activity sync
+ *     tags: [GitHub Admin]
+ *     responses:
+ *       200: { description: Sync completed }
+ */
+router.post("/github/sync", postTriggerGithubSync);
+
+/**
+ * @openapi
+ * /data/github/backfill:
+ *   post:
+ *     summary: Manually trigger historical backfill
+ *     tags: [GitHub Admin]
+ *     parameters:
+ *       - name: limit
+ *         in: query
+ *         schema: { type: integer, default: 50 }
+ *       - name: minStars
+ *         in: query
+ *         schema: { type: integer, default: 0 }
+ *     responses:
+ *       200: { description: Backfill completed }
+ */
+router.post("/github/backfill", postTriggerBackfill);
+
+/**
+ * @openapi
+ * /data/github/snapshot:
+ *   post:
+ *     summary: Manually trigger daily snapshot (stars/forks for all repos)
+ *     tags: [GitHub Admin]
+ *     responses:
+ *       200: { description: Snapshot completed }
+ */
+router.post("/github/snapshot", postTriggerSnapshot);
 
 export default router;
