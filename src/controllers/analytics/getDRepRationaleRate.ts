@@ -13,23 +13,31 @@ import {
  * Query params:
  * - page: Page number (default: 1)
  * - pageSize: Items per page (default: 20, max: 100)
+ * - activeOnly: If true, only return active DReps (default: true; pass false to include inactive)
  * - sortBy: Sort by "rationaleRate" | "totalVotes" | "name" (default: rationaleRate)
  * - sortOrder: Sort direction (asc, desc) (default: desc)
+ *
+ * Behavior:
+ * - If no query params are provided, returns all active DReps (no pagination).
  */
 export const getDRepRationaleRate = async (req: Request, res: Response) => {
   try {
-    const page = Math.max(1, parseInt(req.query.page as string) || 1);
-    const pageSize = Math.min(
+    const hasAnyQueryParams = Object.keys(req.query).length > 0;
+    const activeOnly = req.query.activeOnly !== "false";
+
+    let page = Math.max(1, parseInt(req.query.page as string) || 1);
+    let pageSize = Math.min(
       100,
       Math.max(1, parseInt(req.query.pageSize as string) || 20)
     );
     const sortBy = (req.query.sortBy as string) || "rationaleRate";
     const sortOrder = (req.query.sortOrder as string) === "asc" ? "asc" : "desc";
 
-    // Get all active DReps
+    // Get DReps (not marked as do-not-list); optionally filter to active only.
     const dreps = await prisma.drep.findMany({
       where: {
         OR: [{ doNotList: false }, { doNotList: null }],
+        ...(activeOnly ? { active: true } : {}),
       },
       select: { drepId: true, name: true },
     });
@@ -116,12 +124,17 @@ export const getDRepRationaleRate = async (req: Request, res: Response) => {
         ? Math.round((totalWithRationale / totalAllVotes) * 10000) / 100
         : 0;
 
-    // Paginate
+    // Paginate (unless request has no query params)
     const totalItems = drepSummaries.length;
-    const paginatedDreps = drepSummaries.slice(
-      (page - 1) * pageSize,
-      page * pageSize
-    );
+
+    if (!hasAnyQueryParams) {
+      page = 1;
+      pageSize = totalItems;
+    }
+
+    const paginatedDreps = !hasAnyQueryParams
+      ? drepSummaries
+      : drepSummaries.slice((page - 1) * pageSize, page * pageSize);
 
     const response: GetDRepRationaleRateResponse = {
       dreps: paginatedDreps,

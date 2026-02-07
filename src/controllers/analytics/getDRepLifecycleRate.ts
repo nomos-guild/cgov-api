@@ -12,20 +12,32 @@ import {
  * Query params:
  * - epochStart: Start epoch (optional)
  * - epochEnd: End epoch (optional)
- * - limit: Max number of epochs to return (default: 50)
+ * - limit: Max number of epochs to return (default: 50). If no query params are provided,
+ *   the endpoint returns all available epoch buckets.
  */
 export const getDRepLifecycleRate = async (req: Request, res: Response) => {
   try {
-    const epochStart = req.query.epochStart
-      ? parseInt(req.query.epochStart as string)
-      : null;
-    const epochEnd = req.query.epochEnd
-      ? parseInt(req.query.epochEnd as string)
-      : null;
-    const limit = Math.min(
-      500,
-      Math.max(1, parseInt(req.query.limit as string) || 50)
-    );
+    const parseOptionalInt = (value: unknown): number | null => {
+      if (value == null) return null;
+      const n = parseInt(String(value), 10);
+      return Number.isFinite(n) ? n : null;
+    };
+
+    const epochStartRaw = req.query.epochStart;
+    const epochEndRaw = req.query.epochEnd;
+    const limitRaw = req.query.limit;
+
+    const epochStart = parseOptionalInt(epochStartRaw);
+    const epochEnd = parseOptionalInt(epochEndRaw);
+
+    const noParamsProvided =
+      epochStartRaw === undefined &&
+      epochEndRaw === undefined &&
+      limitRaw === undefined;
+
+    const limit = noParamsProvided
+      ? null
+      : Math.min(500, Math.max(1, parseOptionalInt(limitRaw) ?? 50));
 
     // Build where clause
     const whereClause: any = {};
@@ -63,7 +75,7 @@ export const getDRepLifecycleRate = async (req: Request, res: Response) => {
     // Convert to sorted array
     const sortedEpochs = Array.from(epochMap.entries())
       .sort((a, b) => a[0] - b[0])
-      .slice(-limit);
+      .slice(limit == null ? 0 : -limit);
 
     const epochs: EpochLifecycleEvents[] = sortedEpochs.map(([epoch, data]) => ({
       epoch,

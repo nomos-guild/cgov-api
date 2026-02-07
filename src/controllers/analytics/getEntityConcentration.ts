@@ -1,4 +1,5 @@
 import { Request, Response } from "express";
+import { VoterType } from "@prisma/client";
 import { prisma } from "../../services";
 import {
   GetEntityConcentrationResponse,
@@ -21,14 +22,14 @@ function lovelaceToAda(lovelace: bigint): string {
  * and calculates concentration metrics (HHI, top-N share)
  *
  * Query params:
- * - limit: Max number of entities to return (default: 50)
+ * - limit: Max number of entities to return (default: all)
  */
 export const getEntityConcentration = async (req: Request, res: Response) => {
   try {
-    const limit = Math.min(
-      500,
-      Math.max(1, parseInt(req.query.limit as string) || 50)
-    );
+    const limitParam = req.query.limit as string | undefined;
+    const limit = limitParam
+      ? Math.min(500, Math.max(1, parseInt(limitParam)))
+      : undefined;
 
     // Get all pool groups with their pools
     const poolGroups = await prisma.poolGroup.findMany({
@@ -46,35 +47,64 @@ export const getEntityConcentration = async (req: Request, res: Response) => {
       },
     });
 
+    // Get vote counts per pool (SPO)
+    const poolIds = spos.map((s) => s.poolId);
+    const spoVoteCounts = await prisma.onchainVote.groupBy({
+      by: ["spoId"],
+      where: {
+        voterType: VoterType.SPO,
+        spoId: { in: poolIds },
+      },
+      _count: { id: true },
+    });
+
+    // Create spoId(poolId) -> voteCount map
+    const poolVoteCount = new Map<string, number>();
+    for (const vc of spoVoteCounts) {
+      if (vc.spoId) {
+        poolVoteCount.set(vc.spoId, vc._count.id);
+      }
+    }
+
     // Create poolId -> votingPower map
     const poolVotingPower = new Map<string, bigint>();
     for (const spo of spos) {
       poolVotingPower.set(spo.poolId, spo.votingPower);
     }
 
+    const poolIdsInGroup = new Set(poolGroups.map((pg) => pg.poolId));
+
     // Aggregate voting power by pool group
-    const groupPower = new Map<string, { power: bigint; poolCount: number }>();
+    const groupPower = new Map<
+      string,
+      { power: bigint; poolCount: number; totalVotesCast: number }
+    >();
     let totalVotingPower = 0n;
 
     for (const pg of poolGroups) {
       const power = poolVotingPower.get(pg.poolId) ?? 0n;
+      const votesCast = poolVoteCount.get(pg.poolId) ?? 0;
       totalVotingPower += power;
 
       const existing = groupPower.get(pg.poolGroup);
       if (existing) {
         existing.power += power;
         existing.poolCount++;
+        existing.totalVotesCast += votesCast;
       } else {
-        groupPower.set(pg.poolGroup, { power, poolCount: 1 });
+        groupPower.set(pg.poolGroup, { power, poolCount: 1, totalVotesCast: votesCast });
       }
     }
 
     // Also add pools not in any group as individual entities
     for (const spo of spos) {
-      const inGroup = poolGroups.some((pg) => pg.poolId === spo.poolId);
-      if (!inGroup) {
+      if (!poolIdsInGroup.has(spo.poolId)) {
         // Use poolId as entity identifier for ungrouped pools
-        groupPower.set(`pool:${spo.poolId}`, { power: spo.votingPower, poolCount: 1 });
+        groupPower.set(`pool:${spo.poolId}`, {
+          power: spo.votingPower,
+          poolCount: 1,
+          totalVotesCast: poolVoteCount.get(spo.poolId) ?? 0,
+        });
         totalVotingPower += spo.votingPower;
       }
     }
@@ -85,14 +115,16 @@ export const getEntityConcentration = async (req: Request, res: Response) => {
         if (a[1].power < b[1].power) return 1;
         if (a[1].power > b[1].power) return -1;
         return 0;
-      })
-      .slice(0, limit);
+      });
+
+    const limitedGroups = typeof limit === "number" ? sortedGroups.slice(0, limit) : sortedGroups;
 
     // Calculate metrics
-    const entities: PoolGroupConcentration[] = sortedGroups.map(([group, data]) => ({
+    const entities: PoolGroupConcentration[] = limitedGroups.map(([group, data]) => ({
       poolGroup: group,
       totalVotingPower: data.power.toString(),
       totalVotingPowerAda: lovelaceToAda(data.power),
+      totalVotesCast: data.totalVotesCast,
       poolCount: data.poolCount,
       sharePct:
         totalVotingPower > 0n

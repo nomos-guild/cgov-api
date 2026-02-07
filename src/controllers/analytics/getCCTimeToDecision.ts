@@ -74,12 +74,16 @@ export const getCCTimeToDecision = async (req: Request, res: Response) => {
       orderBy: { votedAt: "asc" },
     });
 
-    // Get first CC vote per proposal
+    // Get first/last CC vote per proposal
     const firstCcVoteMap = new Map<string, Date>();
+    const lastCcVoteMap = new Map<string, Date>();
     for (const vote of ccVotes) {
-      if (!firstCcVoteMap.has(vote.proposalId) && vote.votedAt) {
+      if (!vote.votedAt) continue;
+
+      if (!firstCcVoteMap.has(vote.proposalId)) {
         firstCcVoteMap.set(vote.proposalId, vote.votedAt);
       }
+      lastCcVoteMap.set(vote.proposalId, vote.votedAt);
     }
 
     // Get epoch timestamps for submission time
@@ -105,6 +109,7 @@ export const getCCTimeToDecision = async (req: Request, res: Response) => {
     // Calculate time to decision for each proposal
     const proposals: ProposalCCTimeToDecision[] = dbProposals.map((p) => {
       const firstCcVoteAt = firstCcVoteMap.get(p.proposalId);
+      const lastCcVoteAt = lastCcVoteMap.get(p.proposalId);
 
       // Use epoch start time if available, otherwise proposal createdAt
       let submissionTime: Date | null = null;
@@ -117,6 +122,8 @@ export const getCCTimeToDecision = async (req: Request, res: Response) => {
 
       let hoursToFirstVote: number | null = null;
       let daysToFirstVote: number | null = null;
+      let hoursToLastVote: number | null = null;
+      let daysToLastVote: number | null = null;
 
       if (firstCcVoteAt && submissionTime) {
         const diffMs = firstCcVoteAt.getTime() - submissionTime.getTime();
@@ -124,13 +131,22 @@ export const getCCTimeToDecision = async (req: Request, res: Response) => {
         daysToFirstVote = Math.round((diffMs / (1000 * 60 * 60 * 24)) * 10) / 10;
       }
 
+      if (lastCcVoteAt && submissionTime) {
+        const diffMs = lastCcVoteAt.getTime() - submissionTime.getTime();
+        hoursToLastVote = Math.round((diffMs / (1000 * 60 * 60)) * 10) / 10;
+        daysToLastVote = Math.round((diffMs / (1000 * 60 * 60 * 24)) * 10) / 10;
+      }
+
       return {
         proposalId: p.proposalId,
         title: p.title,
         submissionEpoch: p.submissionEpoch,
         firstCcVoteAt: firstCcVoteAt?.toISOString() ?? null,
+        lastCcVoteAt: lastCcVoteAt?.toISOString() ?? null,
         hoursToFirstVote,
         daysToFirstVote,
+        hoursToLastVote,
+        daysToLastVote,
       };
     });
 
@@ -158,10 +174,14 @@ export const getCCTimeToDecision = async (req: Request, res: Response) => {
     });
 
     const allFirstCcVoteMap = new Map<string, Date>();
+    const allLastCcVoteMap = new Map<string, Date>();
     for (const vote of allCcVotes) {
-      if (!allFirstCcVoteMap.has(vote.proposalId) && vote.votedAt) {
+      if (!vote.votedAt) continue;
+
+      if (!allFirstCcVoteMap.has(vote.proposalId)) {
         allFirstCcVoteMap.set(vote.proposalId, vote.votedAt);
       }
+      allLastCcVoteMap.set(vote.proposalId, vote.votedAt);
     }
 
     // Get all submission epochs
@@ -186,9 +206,12 @@ export const getCCTimeToDecision = async (req: Request, res: Response) => {
 
     const hourDeltas: number[] = [];
     const dayDeltas: number[] = [];
+    const hourDeltasLast: number[] = [];
+    const dayDeltasLast: number[] = [];
 
     for (const p of allProposalsWithCcVotes) {
       const firstCcVoteAt = allFirstCcVoteMap.get(p.proposalId);
+      const lastCcVoteAt = allLastCcVoteMap.get(p.proposalId);
       let submissionTime: Date | null = null;
       if (p.submissionEpoch !== null) {
         submissionTime = allEpochTimeMap.get(p.submissionEpoch) ?? null;
@@ -202,10 +225,18 @@ export const getCCTimeToDecision = async (req: Request, res: Response) => {
         hourDeltas.push(diffMs / (1000 * 60 * 60));
         dayDeltas.push(diffMs / (1000 * 60 * 60 * 24));
       }
+
+      if (lastCcVoteAt && submissionTime) {
+        const diffMs = lastCcVoteAt.getTime() - submissionTime.getTime();
+        hourDeltasLast.push(diffMs / (1000 * 60 * 60));
+        dayDeltasLast.push(diffMs / (1000 * 60 * 60 * 24));
+      }
     }
 
     hourDeltas.sort((a, b) => a - b);
     dayDeltas.sort((a, b) => a - b);
+    hourDeltasLast.sort((a, b) => a - b);
+    dayDeltasLast.sort((a, b) => a - b);
 
     const response: GetCCTimeToDecisionResponse = {
       proposals,
@@ -225,6 +256,23 @@ export const getCCTimeToDecision = async (req: Request, res: Response) => {
         p90DaysToVote:
           percentile(dayDeltas, 90) !== null
             ? Math.round(percentile(dayDeltas, 90)! * 10) / 10
+            : null,
+
+        medianHoursToLastVote:
+          percentile(hourDeltasLast, 50) !== null
+            ? Math.round(percentile(hourDeltasLast, 50)! * 10) / 10
+            : null,
+        medianDaysToLastVote:
+          percentile(dayDeltasLast, 50) !== null
+            ? Math.round(percentile(dayDeltasLast, 50)! * 10) / 10
+            : null,
+        p90HoursToLastVote:
+          percentile(hourDeltasLast, 90) !== null
+            ? Math.round(percentile(hourDeltasLast, 90)! * 10) / 10
+            : null,
+        p90DaysToLastVote:
+          percentile(dayDeltasLast, 90) !== null
+            ? Math.round(percentile(dayDeltasLast, 90)! * 10) / 10
             : null,
       },
       pagination: {

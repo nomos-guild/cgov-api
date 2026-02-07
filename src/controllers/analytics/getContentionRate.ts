@@ -39,8 +39,8 @@ function calculateContention(
  * Returns governance action contention rate
  *
  * Query params:
- * - page: Page number (default: 1)
- * - pageSize: Items per page (default: 20, max: 100)
+ * - page: Page number (optional; if omitted along with pageSize, returns all proposals)
+ * - pageSize: Items per page (optional; max: 100)
  * - status: Filter by proposal status (optional, comma-separated)
  * - governanceActionType: Filter by action type (optional, comma-separated)
  * - epochStart: Filter proposals by submission epoch >= epochStart
@@ -49,11 +49,15 @@ function calculateContention(
  */
 export const getContentionRate = async (req: Request, res: Response) => {
   try {
-    const page = Math.max(1, parseInt(req.query.page as string) || 1);
-    const pageSize = Math.min(
-      100,
-      Math.max(1, parseInt(req.query.pageSize as string) || 20)
-    );
+    const hasPaginationParams =
+      req.query.page !== undefined || req.query.pageSize !== undefined;
+
+    const page = hasPaginationParams
+      ? Math.max(1, parseInt(req.query.page as string) || 1)
+      : 1;
+    const pageSize = hasPaginationParams
+      ? Math.min(100, Math.max(1, parseInt(req.query.pageSize as string) || 20))
+      : null;
     const statusFilter = (req.query.status as string)?.split(",").filter(Boolean);
     const typeFilter = (req.query.governanceActionType as string)
       ?.split(",")
@@ -198,12 +202,15 @@ export const getContentionRate = async (req: Request, res: Response) => {
       allContentions = allContentions.filter((p) => p.isContentious);
     }
 
-    // Paginate
     const totalItems = allContentions.length;
-    const paginatedProposals = allContentions.slice(
-      (page - 1) * pageSize,
-      page * pageSize
-    );
+    const paginatedProposals =
+      hasPaginationParams && pageSize !== null
+        ? allContentions.slice((page - 1) * pageSize, page * pageSize)
+        : allContentions;
+
+    const effectivePageSize = hasPaginationParams && pageSize !== null
+      ? pageSize
+      : totalItems;
 
     const response: GetContentionRateResponse = {
       proposals: paginatedProposals,
@@ -212,9 +219,10 @@ export const getContentionRate = async (req: Request, res: Response) => {
       totalProposals,
       pagination: {
         page,
-        pageSize,
+        pageSize: effectivePageSize,
         totalItems,
-        totalPages: Math.ceil(totalItems / pageSize),
+        totalPages:
+          effectivePageSize > 0 ? Math.ceil(totalItems / effectivePageSize) : 0,
       },
     };
 

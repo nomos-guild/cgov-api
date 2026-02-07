@@ -141,7 +141,24 @@ export const getDRepCorrelation = async (req: Request, res: Response) => {
         ...result,
       };
 
+      const overview: GetDRepCorrelationResponse["overview"] = {
+        mode: "pair",
+        topN,
+        minSharedProposals,
+        drepCount: 2,
+        totalVoteRows: votes1.length + votes2.length,
+        totalPairsEvaluated: 1,
+        pairsMeetingMinSharedProposals: result.sharedProposals >= minSharedProposals ? 1 : 0,
+        pairsWithCorrelation: result.correlation !== null ? 1 : 0,
+        pairsWithDivergence: result.correlation !== null && result.correlation < 0 ? 1 : 0,
+        returnedTopCorrelated: 0,
+        returnedTopDivergent: 0,
+        mostCorrelated: null,
+        mostDivergent: null,
+      };
+
       return res.json({
+        overview,
         topCorrelated: [],
         topDivergent: [],
         pairCorrelation,
@@ -158,10 +175,23 @@ export const getDRepCorrelation = async (req: Request, res: Response) => {
     });
 
     if (drepsWithVotes.length < 2) {
-      return res.json({
-        topCorrelated: [],
-        topDivergent: [],
-      });
+      const overview: GetDRepCorrelationResponse["overview"] = {
+        mode: "all",
+        topN,
+        minSharedProposals,
+        drepCount: drepsWithVotes.length,
+        totalVoteRows: 0,
+        totalPairsEvaluated: drepsWithVotes.length * (drepsWithVotes.length - 1) / 2,
+        pairsMeetingMinSharedProposals: 0,
+        pairsWithCorrelation: 0,
+        pairsWithDivergence: 0,
+        returnedTopCorrelated: 0,
+        returnedTopDivergent: 0,
+        mostCorrelated: null,
+        mostDivergent: null,
+      };
+
+      return res.json({ overview, topCorrelated: [], topDivergent: [] });
     }
 
     // Get all DRep votes
@@ -224,7 +254,44 @@ export const getDRepCorrelation = async (req: Request, res: Response) => {
       .sort((a, b) => (a.correlation ?? 0) - (b.correlation ?? 0))
       .slice(0, topN);
 
+    const totalPairsEvaluated = drepIds.length * (drepIds.length - 1) / 2;
+    const pairsMeetingMinSharedProposals = correlations.length;
+    const correlationsWithCoeff = correlations.filter((c) => c.correlation !== null);
+    const pairsWithCorrelation = correlationsWithCoeff.length;
+    const pairsWithDivergence = correlationsWithCoeff.filter((c) => (c.correlation ?? 0) < 0).length;
+
+    const mostCorrelated =
+      correlationsWithCoeff.length === 0
+        ? null
+        : correlationsWithCoeff.reduce((best, current) =>
+            (current.correlation ?? -Infinity) > (best.correlation ?? -Infinity) ? current : best
+          );
+
+    const mostDivergent =
+      correlationsWithCoeff.length === 0
+        ? null
+        : correlationsWithCoeff.reduce((worst, current) =>
+            (current.correlation ?? Infinity) < (worst.correlation ?? Infinity) ? current : worst
+          );
+
+    const overview: GetDRepCorrelationResponse["overview"] = {
+      mode: "all",
+      topN,
+      minSharedProposals,
+      drepCount: drepIds.length,
+      totalVoteRows: allVotes.length,
+      totalPairsEvaluated,
+      pairsMeetingMinSharedProposals,
+      pairsWithCorrelation,
+      pairsWithDivergence,
+      returnedTopCorrelated: topCorrelated.length,
+      returnedTopDivergent: topDivergent.length,
+      mostCorrelated,
+      mostDivergent,
+    };
+
     const response: GetDRepCorrelationResponse = {
+      overview,
       topCorrelated,
       topDivergent,
     };

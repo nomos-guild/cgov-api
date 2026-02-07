@@ -16,19 +16,24 @@ import {
  * Divergence score measures how different DRep and SPO voting patterns are
  *
  * Query params:
- * - page: Page number (default: 1)
- * - pageSize: Items per page (default: 20, max: 100)
+ * - page: Page number (optional). If omitted (and pageSize omitted), returns all proposals.
+ * - pageSize: Items per page (optional, max: 100). If omitted (and page omitted), returns all proposals.
  * - status: Filter by proposal status (optional, comma-separated)
  * - epochStart: Filter proposals by submission epoch >= epochStart
  * - epochEnd: Filter proposals by submission epoch <= epochEnd
  */
 export const getVoteDivergence = async (req: Request, res: Response) => {
   try {
-    const page = Math.max(1, parseInt(req.query.page as string) || 1);
-    const pageSize = Math.min(
-      100,
-      Math.max(1, parseInt(req.query.pageSize as string) || 20)
-    );
+    const hasPageParam = req.query.page !== undefined;
+    const hasPageSizeParam = req.query.pageSize !== undefined;
+    const paginationRequested = hasPageParam || hasPageSizeParam;
+
+    const page = paginationRequested
+      ? Math.max(1, parseInt(req.query.page as string) || 1)
+      : 1;
+    const pageSize = paginationRequested
+      ? Math.min(100, Math.max(1, parseInt(req.query.pageSize as string) || 20))
+      : null;
     const statusFilter = (req.query.status as string)?.split(",").filter(Boolean);
     const epochStart = req.query.epochStart
       ? parseInt(req.query.epochStart as string)
@@ -55,8 +60,12 @@ export const getVoteDivergence = async (req: Request, res: Response) => {
       prisma.proposal.findMany({
         where: whereClause,
         orderBy: { submissionEpoch: "desc" },
-        skip: (page - 1) * pageSize,
-        take: pageSize,
+        ...(paginationRequested
+          ? {
+              skip: (page - 1) * (pageSize ?? 20),
+              take: pageSize ?? 20,
+            }
+          : {}),
         select: {
           proposalId: true,
           title: true,
@@ -145,9 +154,13 @@ export const getVoteDivergence = async (req: Request, res: Response) => {
       averageDivergence,
       pagination: {
         page,
-        pageSize,
+        pageSize: paginationRequested ? (pageSize ?? 20) : totalItems,
         totalItems,
-        totalPages: Math.ceil(totalItems / pageSize),
+        totalPages: paginationRequested
+          ? Math.ceil(totalItems / (pageSize ?? 20))
+          : totalItems > 0
+            ? 1
+            : 0,
       },
     };
 

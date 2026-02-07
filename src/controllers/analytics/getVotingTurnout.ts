@@ -125,8 +125,11 @@ const computeSpoTurnoutMetrics = (row: any) => {
  */
 export const getVotingTurnout = async (req: Request, res: Response) => {
   try {
-    const page = Math.max(1, parseInt(req.query.page as string) || 1);
-    const pageSize = Math.min(
+    const hasPaginationParams =
+      req.query.page !== undefined || req.query.pageSize !== undefined;
+
+    const parsedPage = Math.max(1, parseInt(req.query.page as string) || 1);
+    const parsedPageSize = Math.min(
       100,
       Math.max(1, parseInt(req.query.pageSize as string) || 20)
     );
@@ -156,39 +159,48 @@ export const getVotingTurnout = async (req: Request, res: Response) => {
       whereClause.submissionEpoch = { ...whereClause.submissionEpoch, lte: epochEnd };
     }
 
+    const proposalFindManyArgs = {
+      where: whereClause,
+      orderBy: { submissionEpoch: "desc" as const },
+      ...(hasPaginationParams
+        ? {
+            skip: (parsedPage - 1) * parsedPageSize,
+            take: parsedPageSize,
+          }
+        : {}),
+      select: {
+        proposalId: true,
+        title: true,
+        governanceActionType: true,
+        submissionEpoch: true,
+        status: true,
+        // DRep fields
+        drepActiveYesVotePower: true,
+        drepActiveNoVotePower: true,
+        drepActiveAbstainVotePower: true,
+        drepTotalVotePower: true,
+        drepAlwaysAbstainVotePower: true,
+        drepAlwaysNoConfidencePower: true,
+        drepInactiveVotePower: true,
+        // SPO fields
+        spoActiveYesVotePower: true,
+        spoActiveNoVotePower: true,
+        spoActiveAbstainVotePower: true,
+        spoTotalVotePower: true,
+        spoAlwaysAbstainVotePower: true,
+        spoAlwaysNoConfidencePower: true,
+        spoNoVotePower: true,
+      },
+    };
+
     // Get total count and proposals
     const [totalItems, proposals] = await Promise.all([
       prisma.proposal.count({ where: whereClause }),
-      prisma.proposal.findMany({
-        where: whereClause,
-        orderBy: { submissionEpoch: "desc" },
-        skip: (page - 1) * pageSize,
-        take: pageSize,
-        select: {
-          proposalId: true,
-          title: true,
-          governanceActionType: true,
-          submissionEpoch: true,
-          status: true,
-          // DRep fields
-          drepActiveYesVotePower: true,
-          drepActiveNoVotePower: true,
-          drepActiveAbstainVotePower: true,
-          drepTotalVotePower: true,
-          drepAlwaysAbstainVotePower: true,
-          drepAlwaysNoConfidencePower: true,
-          drepInactiveVotePower: true,
-          // SPO fields
-          spoActiveYesVotePower: true,
-          spoActiveNoVotePower: true,
-          spoActiveAbstainVotePower: true,
-          spoTotalVotePower: true,
-          spoAlwaysAbstainVotePower: true,
-          spoAlwaysNoConfidencePower: true,
-          spoNoVotePower: true,
-        },
-      }),
+      prisma.proposal.findMany(proposalFindManyArgs),
     ]);
+
+    const page = hasPaginationParams ? parsedPage : 1;
+    const pageSize = hasPaginationParams ? parsedPageSize : totalItems;
 
     // Calculate turnout for each proposal
     const proposalTurnouts: ProposalTurnout[] = proposals.map((p) => {
@@ -318,7 +330,7 @@ export const getVotingTurnout = async (req: Request, res: Response) => {
         page,
         pageSize,
         totalItems,
-        totalPages: Math.ceil(totalItems / pageSize),
+        totalPages: pageSize > 0 ? Math.ceil(totalItems / pageSize) : 0,
       },
     };
 

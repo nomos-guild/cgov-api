@@ -18,19 +18,17 @@ const router = express.Router();
  *     parameters:
  *       - name: page
  *         in: query
- *         description: Page number (starts at 1)
+ *         description: Page number (starts at 1). If omitted (and pageSize omitted), returns all proposals (no pagination).
  *         schema:
  *           type: integer
  *           minimum: 1
- *           default: 1
  *       - name: pageSize
  *         in: query
- *         description: Number of items per page (max 100)
+ *         description: Number of items per page (max 100). If omitted (and page omitted), returns all proposals (no pagination).
  *         schema:
  *           type: integer
  *           minimum: 1
  *           maximum: 100
- *           default: 20
  *       - name: status
  *         in: query
  *         description: Filter by proposal status (comma-separated)
@@ -64,7 +62,7 @@ router.get("/voting-turnout", analyticsController.getVotingTurnout);
  * /analytics/stake-participation:
  *   get:
  *     summary: Get active stake address participation
- *     description: Returns statistics on delegator participation based on their DRep voting activity. Counts distinct stake addresses whose DRep voted on proposals, and includes breakdown buckets (with percentages) for drep_always_abstain and drep_always_no_confidence.
+ *     description: Returns statistics on delegator participation based on their DRep voting activity. Counts distinct stake addresses whose DRep voted on the specified proposal (or any proposal if proposalId is omitted). Includes breakdown buckets (with percentages) for drep_always_abstain and drep_always_no_confidence.
  *     tags:
  *       - Governance Analytics
  *     parameters:
@@ -73,31 +71,6 @@ router.get("/voting-turnout", analyticsController.getVotingTurnout);
  *         description: Filter by specific proposal
  *         schema:
  *           type: string
- *       - name: epochStart
- *         in: query
- *         description: Start epoch for filtering
- *         schema:
- *           type: integer
- *       - name: epochEnd
- *         in: query
- *         description: End epoch for filtering
- *         schema:
- *           type: integer
- *       - name: page
- *         in: query
- *         description: Page number (starts at 1)
- *         schema:
- *           type: integer
- *           minimum: 1
- *           default: 1
- *       - name: pageSize
- *         in: query
- *         description: Number of items per page (max 100)
- *         schema:
- *           type: integer
- *           minimum: 1
- *           maximum: 100
- *           default: 20
  *     responses:
  *       200:
  *         description: Successfully retrieved stake participation data
@@ -153,11 +126,6 @@ router.get("/delegation-rate", analyticsController.getDelegationRate);
  *         description: Filter by specific DRep for per-DRep distribution
  *         schema:
  *           type: string
- *       - name: epoch
- *         in: query
- *         description: Epoch for historical snapshot (defaults to current)
- *         schema:
- *           type: integer
  *     responses:
  *       200:
  *         description: Successfully retrieved delegation distribution data
@@ -334,7 +302,7 @@ router.get("/drep-activity-rate", analyticsController.getDRepActivityRate);
  * /analytics/drep-rationale-rate:
  *   get:
  *     summary: Get DRep rationale rate
- *     description: Returns DRep rationale rate (votes with rationale / total votes). A vote has rationale if anchorUrl or rationale field is non-empty.
+ *     description: Returns DRep rationale rate (votes with rationale / total votes). A vote has rationale if anchorUrl or rationale field is non-empty. If no query params are provided, returns all active DReps (no pagination).
  *     tags:
  *       - Governance Analytics
  *     parameters:
@@ -348,21 +316,12 @@ router.get("/drep-activity-rate", analyticsController.getDRepActivityRate);
  *         schema:
  *           type: integer
  *           default: 20
- *       - name: epochStart
+ *       - name: activeOnly
  *         in: query
- *         description: Start epoch for filtering votes
+ *         description: If true, only return active DReps (default true; pass false to include inactive)
  *         schema:
- *           type: integer
- *       - name: epochEnd
- *         in: query
- *         description: End epoch for filtering votes
- *         schema:
- *           type: integer
- *       - name: proposalId
- *         in: query
- *         description: Filter by specific proposal
- *         schema:
- *           type: string
+ *           type: boolean
+ *           default: true
  *       - name: sortBy
  *         in: query
  *         schema:
@@ -388,7 +347,7 @@ router.get("/drep-rationale-rate", analyticsController.getDRepRationaleRate);
  * /analytics/drep-correlation:
  *   get:
  *     summary: Get DRep voting correlation
- *     description: Returns correlation analysis between DRep voting patterns
+ *     description: Returns correlation analysis between DRep voting patterns, including overview stats about the computation.
  *     tags:
  *       - Governance Analytics
  *     parameters:
@@ -443,6 +402,7 @@ router.get("/drep-correlation", analyticsController.getDRepCorrelation);
  *           type: integer
  *       - name: limit
  *         in: query
+ *         description: Max number of epochs to return. If no query params are provided, returns all epoch buckets.
  *         schema:
  *           type: integer
  *           default: 50
@@ -463,17 +423,19 @@ router.get("/drep-lifecycle-rate", analyticsController.getDRepLifecycleRate);
  * /analytics/spo-silent-stake:
  *   get:
  *     summary: Get SPO silent stake rate
- *     description: Returns SPO stake that did not vote per proposal
+ *     description: Returns SPO stake that did not vote per proposal. If page and pageSize are omitted, returns all proposals.
  *     tags:
  *       - Governance Analytics
  *     parameters:
  *       - name: page
  *         in: query
+ *         description: Page number. If omitted (and pageSize omitted), returns all proposals.
  *         schema:
  *           type: integer
  *           default: 1
  *       - name: pageSize
  *         in: query
+ *         description: Items per page. If omitted (and page omitted), returns all proposals.
  *         schema:
  *           type: integer
  *           default: 20
@@ -502,17 +464,19 @@ router.get("/spo-silent-stake", analyticsController.getSpoSilentStake);
  * /analytics/spo-default-stance:
  *   get:
  *     summary: Get SPO default stance adoption
- *     description: Returns SPO always abstain and always no confidence adoption rates
+ *     description: Returns SPO always abstain and always no confidence adoption rates. If page and pageSize are omitted, returns all proposals.
  *     tags:
  *       - Governance Analytics
  *     parameters:
  *       - name: page
  *         in: query
+ *         description: Page number. If omitted (and pageSize omitted), returns all proposals.
  *         schema:
  *           type: integer
  *           default: 1
  *       - name: pageSize
  *         in: query
+ *         description: Items per page. If omitted (and page omitted), returns all proposals.
  *         schema:
  *           type: integer
  *           default: 20
@@ -541,22 +505,16 @@ router.get("/spo-default-stance", analyticsController.getSpoDefaultStance);
  * /analytics/entity-concentration:
  *   get:
  *     summary: Get SPO entity voting power concentration
- *     description: Returns multi-pool operator concentration metrics including Herfindahl-Hirschman Index (HHI) and top-N entity share of total voting power
+ *     description: Returns multi-pool operator concentration metrics including Herfindahl-Hirschman Index (HHI) and top-5/top-10 entity share of total voting power
  *     tags:
  *       - Governance Analytics
  *     parameters:
  *       - name: limit
  *         in: query
- *         description: Max number of entities to return in detail list
+ *         description: Max number of entities to return in detail list (if omitted, returns all)
  *         schema:
  *           type: integer
- *           default: 50
- *       - name: topN
- *         in: query
- *         description: Number of top entities for concentration share calculation
- *         schema:
- *           type: integer
- *           default: 10
+ *           maximum: 500
  *     responses:
  *       200:
  *         description: Successfully retrieved entity concentration data
@@ -570,17 +528,19 @@ router.get("/entity-concentration", analyticsController.getEntityConcentration);
  * /analytics/vote-divergence:
  *   get:
  *     summary: Get SPO-DRep vote divergence
- *     description: Returns divergence between SPO and DRep voting patterns per proposal
+ *     description: Returns divergence between SPO and DRep voting patterns per proposal. If page and pageSize are omitted, returns all proposals.
  *     tags:
  *       - Governance Analytics
  *     parameters:
  *       - name: page
  *         in: query
+ *         description: Page number. If omitted (and pageSize omitted), returns all proposals.
  *         schema:
  *           type: integer
  *           default: 1
  *       - name: pageSize
  *         in: query
+ *         description: Items per page (max 100). If omitted (and page omitted), returns all proposals.
  *         schema:
  *           type: integer
  *           default: 20
@@ -613,7 +573,7 @@ router.get("/vote-divergence", analyticsController.getVoteDivergence);
  * /analytics/action-volume:
  *   get:
  *     summary: Get governance action volume
- *     description: Returns governance action volume by epoch and type. Volume counts proposals by submissionEpoch with breakdown by governanceActionType.
+ *     description: Returns governance action volume by epoch and type. Volume counts proposals by submissionEpoch with breakdown by governanceActionType. Also includes a byAuthor breakdown sourced from proposal metadata (metadata.authors[].name).
  *     tags:
  *       - Governance Analytics
  *     parameters:
@@ -627,16 +587,6 @@ router.get("/vote-divergence", analyticsController.getVoteDivergence);
  *         description: End epoch for filtering
  *         schema:
  *           type: integer
- *       - name: governanceActionType
- *         in: query
- *         description: Filter by governance action type (comma-separated)
- *         schema:
- *           type: string
- *       - name: status
- *         in: query
- *         description: Filter by proposal status (comma-separated)
- *         schema:
- *           type: string
  *       - name: limit
  *         in: query
  *         description: Max number of epochs to return
@@ -656,20 +606,20 @@ router.get("/action-volume", analyticsController.getActionVolume);
  * /analytics/contention-rate:
  *   get:
  *     summary: Get governance action contention rate
- *     description: Returns contention metrics for proposals (close vote splits)
+ *     description: Returns contention metrics for proposals (close vote splits). If neither 'page' nor 'pageSize' is provided, returns all proposals.
  *     tags:
  *       - Governance Analytics
  *     parameters:
  *       - name: page
  *         in: query
+ *         description: Page number (starts at 1). Only used when 'page' or 'pageSize' is provided.
  *         schema:
  *           type: integer
- *           default: 1
  *       - name: pageSize
  *         in: query
+ *         description: Items per page (max 100). Only used when 'page' or 'pageSize' is provided.
  *         schema:
  *           type: integer
- *           default: 20
  *       - name: status
  *         in: query
  *         schema:
@@ -705,7 +655,7 @@ router.get("/contention-rate", analyticsController.getContentionRate);
  * /analytics/treasury-rate:
  *   get:
  *     summary: Get treasury balance rate per epoch
- *     description: Returns treasury as percentage of circulation per epoch
+ *     description: Returns treasury as percentage of circulation per epoch. By default, returns all epochs that have both treasury and circulation.
  *     tags:
  *       - Governance Analytics
  *     parameters:
@@ -721,7 +671,6 @@ router.get("/contention-rate", analyticsController.getContentionRate);
  *         in: query
  *         schema:
  *           type: integer
- *           default: 100
  *     responses:
  *       200:
  *         description: Successfully retrieved treasury rate data
@@ -776,22 +725,23 @@ router.get("/time-to-enactment", analyticsController.getTimeToEnactment);
  * /analytics/compliance-status:
  *   get:
  *     summary: Get constitutional compliance status
- *     description: Returns CC voting results and constitutional status per proposal
+ *     description: Returns CC voting results and constitutional status per proposal. If pagination params are omitted, returns all proposals.
  *     tags:
  *       - Governance Analytics
  *     parameters:
  *       - name: page
  *         in: query
+ *         description: Page number (starts at 1). If omitted with pageSize, returns all proposals.
  *         schema:
  *           type: integer
- *           default: 1
  *       - name: pageSize
  *         in: query
+ *         description: Number of items per page (max 100). If omitted with page, returns all proposals.
  *         schema:
  *           type: integer
- *           default: 20
  *       - name: status
  *         in: query
+ *         description: Filter by proposal status (comma-separated)
  *         schema:
  *           type: string
  *     responses:
@@ -811,7 +761,7 @@ router.get("/compliance-status", analyticsController.getComplianceStatus);
  * /analytics/cc-time-to-decision:
  *   get:
  *     summary: Get CC time-to-decision
- *     description: Returns time from proposal submission to first CC vote
+ *     description: Returns time from proposal submission to first/last CC vote (hours/days), includes first/last CC vote timestamps per proposal, and provides median/p90 stats for both first-vote and last-vote timings.
  *     tags:
  *       - Governance Analytics
  *     parameters:
@@ -895,14 +845,14 @@ router.get("/cc-participation", analyticsController.getCCParticipation);
  *     parameters:
  *       - name: page
  *         in: query
+ *         description: Page number (if omitted along with pageSize, returns all proposals)
  *         schema:
  *           type: integer
- *           default: 1
  *       - name: pageSize
  *         in: query
+ *         description: Items per page (if omitted along with page, returns all proposals)
  *         schema:
  *           type: integer
- *           default: 20
  *       - name: status
  *         in: query
  *         description: Filter proposals by status (comma-separated)
@@ -937,14 +887,14 @@ router.get("/cc-abstain-rate", analyticsController.getCCAbstainRate);
  *     parameters:
  *       - name: page
  *         in: query
+ *         description: Page number (if omitted along with pageSize, returns all proposals)
  *         schema:
  *           type: integer
- *           default: 1
  *       - name: pageSize
  *         in: query
+ *         description: Items per page (if omitted along with page, returns all proposals)
  *         schema:
  *           type: integer
- *           default: 20
  *       - name: status
  *         in: query
  *         description: Filter proposals by status (comma-separated)
@@ -977,22 +927,25 @@ router.get("/cc-agreement-rate", analyticsController.getCCAgreementRate);
  * /analytics/info-availability:
  *   get:
  *     summary: Get governance info availability
- *     description: Returns proposal and vote information completeness metrics
+ *     description: Returns proposal and vote information completeness metrics. If page/pageSize are omitted, returns all proposals.
  *     tags:
  *       - Governance Analytics
  *     parameters:
  *       - name: page
  *         in: query
+ *         description: Page number (optional). If omitted (and pageSize omitted), returns all proposals.
  *         schema:
  *           type: integer
  *           default: 1
  *       - name: pageSize
  *         in: query
+ *         description: Items per page (optional, max 100). If omitted (and page omitted), returns all proposals.
  *         schema:
  *           type: integer
  *           default: 20
  *       - name: status
  *         in: query
+ *         description: Filter by proposal status (comma-separated)
  *         schema:
  *           type: string
  *     responses:

@@ -319,7 +319,38 @@ export interface DRepPairCorrelation {
   correlation: number | null;
 }
 
+export interface DRepCorrelationOverview {
+  /** Whether the response is for a specific pair or computed across all DReps */
+  mode: "pair" | "all";
+  /** Value used to truncate the top lists (clamped in controller) */
+  topN: number;
+  /** Minimum shared proposals required for inclusion (clamped in controller) */
+  minSharedProposals: number;
+  /** Number of DReps in scope for the computation */
+  drepCount: number;
+  /** Total onchain vote rows considered (vote != null) */
+  totalVoteRows: number;
+  /** Total DRep pairs evaluated (n * (n - 1) / 2) */
+  totalPairsEvaluated: number;
+  /** Pairs that met minSharedProposals (i.e., made it into the correlation set) */
+  pairsMeetingMinSharedProposals: number;
+  /** Pairs with a non-null correlation coefficient */
+  pairsWithCorrelation: number;
+  /** Pairs with negative correlation (divergent voting patterns) */
+  pairsWithDivergence: number;
+  /** Number of items returned in topCorrelated */
+  returnedTopCorrelated: number;
+  /** Number of items returned in topDivergent */
+  returnedTopDivergent: number;
+
+  /** Most correlated pair (highest correlation) among returned results, if any */
+  mostCorrelated: DRepPairCorrelation | null;
+  /** Most divergent pair (lowest correlation) among returned results, if any */
+  mostDivergent: DRepPairCorrelation | null;
+}
+
 export interface GetDRepCorrelationResponse {
+  overview: DRepCorrelationOverview;
   /** Top correlated pairs (most similar) */
   topCorrelated: DRepPairCorrelation[];
   /** Top divergent pairs (most different) */
@@ -417,12 +448,16 @@ export interface ProposalDefaultStance {
   spoAlwaysAbstainVotePower: string | null;
   /** Always no confidence vote power - lovelace as string */
   spoAlwaysNoConfidencePower: string | null;
+  /** Combined default stance power (always abstain + always no confidence) - lovelace as string */
+  combinedDefaultStancePower: string | null;
   /** SPO total vote power - lovelace as string */
   spoTotalVotePower: string | null;
   /** Always abstain percentage (0-100) */
   alwaysAbstainPct: number | null;
   /** Always no confidence percentage (0-100) */
   alwaysNoConfidencePct: number | null;
+  /** Combined default stance percentage (0-100) */
+  combinedDefaultStancePct: number | null;
 }
 
 export interface GetSpoDefaultStanceResponse {
@@ -444,6 +479,8 @@ export interface PoolGroupConcentration {
   totalVotingPower: string;
   /** Voting power in ADA */
   totalVotingPowerAda: string;
+  /** Total number of onchain votes cast by pools in this entity */
+  totalVotesCast: number;
   /** Number of pools in this group */
   poolCount: number;
   /** Share of total voting power (0-100) */
@@ -513,6 +550,8 @@ export interface GetActionVolumeResponse {
   totalProposals: number;
   byType: Record<string, number>;
   byStatus: Record<string, number>;
+  /** Total proposal counts keyed by metadata.authors[].name */
+  byAuthor: Record<string, number>;
 }
 
 /**
@@ -649,7 +688,26 @@ export interface ProposalComplianceStatus {
   eligibleMembers: number;
 }
 
+export interface ComplianceStatusOverview {
+  /** Eligible CC members used for all calculations */
+  eligibleMembers: number;
+  /** Total proposals in the current result set */
+  totalProposals: number;
+  ccApprovedCounts: {
+    approved: number;
+    rejected: number;
+    pending: number;
+  };
+  constitutionalStatusCounts: {
+    constitutional: number;
+    unconstitutional: number;
+    pending: number;
+    committeeTooSmall: number;
+  };
+}
+
 export interface GetComplianceStatusResponse {
+  overview: ComplianceStatusOverview;
   proposals: ProposalComplianceStatus[];
   pagination: {
     page: number;
@@ -672,10 +730,16 @@ export interface ProposalCCTimeToDecision {
   submissionEpoch: number | null;
   /** First CC vote timestamp */
   firstCcVoteAt: string | null;
+  /** Last CC vote timestamp */
+  lastCcVoteAt: string | null;
   /** Time from submission to first CC vote (hours) */
   hoursToFirstVote: number | null;
   /** Time from submission to first CC vote (days) */
   daysToFirstVote: number | null;
+  /** Time from submission to last CC vote (hours) */
+  hoursToLastVote: number | null;
+  /** Time from submission to last CC vote (days) */
+  daysToLastVote: number | null;
 }
 
 export interface GetCCTimeToDecisionResponse {
@@ -685,6 +749,11 @@ export interface GetCCTimeToDecisionResponse {
     medianDaysToVote: number | null;
     p90HoursToVote: number | null;
     p90DaysToVote: number | null;
+
+    medianHoursToLastVote: number | null;
+    medianDaysToLastVote: number | null;
+    p90HoursToLastVote: number | null;
+    p90DaysToLastVote: number | null;
   };
   pagination: {
     page: number;
@@ -700,15 +769,42 @@ export interface GetCCTimeToDecisionResponse {
 export interface CCMemberParticipation {
   ccId: string;
   memberName: string | null;
+  /** Whether this CC member is currently eligible (from committee_info when available) */
+  isEligible: boolean | null;
+  /** Raw DB status field for this CC member (may be stale) */
+  dbStatus: string | null;
   proposalsVoted: number;
   totalProposals: number;
+  /** Votes/denominator based on the member's active window */
+  activeWindowProposalsVoted: number;
+  /** Proposals the member could plausibly vote on during their active window */
+  activeWindowTotalProposals: number;
+  /** Participation rate within active window (0-100) */
   participationRatePct: number;
+  /** Legacy participation rate against totalProposals (0-100) */
+  participationRatePctGlobal: number;
+
+  /** Earliest vote timestamp within the current proposal filter scope */
+  firstVoteAt: string | null;
+  firstVoteProposalId: string | null;
+  firstVoteProposalTitle: string | null;
+  firstVoteProposalSubmissionEpoch: number | null;
+  firstVoteProposalStatus: string | null;
+
+  /** Latest vote timestamp within the current proposal filter scope */
+  lastVoteAt: string | null;
+  lastVoteProposalId: string | null;
+  lastVoteProposalTitle: string | null;
+  lastVoteProposalSubmissionEpoch: number | null;
+  lastVoteProposalStatus: string | null;
 }
 
 export interface GetCCParticipationResponse {
   members: CCMemberParticipation[];
   aggregateParticipationPct: number;
   eligibleMembers: number;
+  /** Eligible CC member IDs (cc_hot_id) from Koios when available; null if unavailable */
+  eligibleCcIds: string[] | null;
   totalProposals: number;
 }
 

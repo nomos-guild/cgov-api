@@ -13,17 +13,22 @@ import {
  * Measures completeness of proposal and vote metadata
  *
  * Query params:
- * - page: Page number (default: 1)
- * - pageSize: Items per page (default: 20, max: 100)
+ * - page: Page number (optional). If omitted (and pageSize omitted), returns all proposals.
+ * - pageSize: Items per page (optional, max: 100). If omitted (and page omitted), returns all proposals.
  * - status: Filter by proposal status (optional, comma-separated)
  */
 export const getInfoAvailability = async (req: Request, res: Response) => {
   try {
-    const page = Math.max(1, parseInt(req.query.page as string) || 1);
-    const pageSize = Math.min(
-      100,
-      Math.max(1, parseInt(req.query.pageSize as string) || 20)
-    );
+    const hasPageParam = req.query.page !== undefined;
+    const hasPageSizeParam = req.query.pageSize !== undefined;
+    const paginationRequested = hasPageParam || hasPageSizeParam;
+
+    const page = paginationRequested
+      ? Math.max(1, parseInt(req.query.page as string) || 1)
+      : 1;
+    const pageSize = paginationRequested
+      ? Math.min(100, Math.max(1, parseInt(req.query.pageSize as string) || 20))
+      : undefined;
     const statusFilter = (req.query.status as string)?.split(",").filter(Boolean);
 
     // Build where clause
@@ -32,23 +37,27 @@ export const getInfoAvailability = async (req: Request, res: Response) => {
       whereClause.status = { in: statusFilter };
     }
 
-    // Get total count and proposals
-    const [totalItems, dbProposals] = await Promise.all([
-      prisma.proposal.count({ where: whereClause }),
-      prisma.proposal.findMany({
-        where: whereClause,
-        orderBy: { submissionEpoch: "desc" },
-        skip: (page - 1) * pageSize,
-        take: pageSize,
-        select: {
-          proposalId: true,
-          title: true,
-          description: true,
-          rationale: true,
-          metadata: true,
-        },
-      }),
-    ]);
+    const dbProposals = await prisma.proposal.findMany({
+      where: whereClause,
+      orderBy: { submissionEpoch: "desc" },
+      ...(paginationRequested
+        ? {
+            skip: (page - 1) * (pageSize ?? 20),
+            take: pageSize ?? 20,
+          }
+        : {}),
+      select: {
+        proposalId: true,
+        title: true,
+        description: true,
+        rationale: true,
+        metadata: true,
+      },
+    });
+
+    const totalItems = paginationRequested
+      ? await prisma.proposal.count({ where: whereClause })
+      : dbProposals.length;
 
     // Calculate info completeness for each proposal
     const proposals: ProposalInfoCompleteness[] = dbProposals.map((p) => {
@@ -114,9 +123,13 @@ export const getInfoAvailability = async (req: Request, res: Response) => {
       aggregateProposalCompletenessPct,
       pagination: {
         page,
-        pageSize,
+        pageSize: paginationRequested ? (pageSize ?? 20) : totalItems,
         totalItems,
-        totalPages: Math.ceil(totalItems / pageSize),
+        totalPages: paginationRequested
+          ? Math.ceil(totalItems / (pageSize ?? 20))
+          : totalItems > 0
+            ? 1
+            : 0,
       },
     };
 

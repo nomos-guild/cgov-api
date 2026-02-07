@@ -12,7 +12,8 @@ import {
  * Query params:
  * - epochStart: Start epoch (optional)
  * - epochEnd: End epoch (optional)
- * - limit: Max number of epochs to return (default: 100)
+ * - limit: Max number of epochs to return (optional). If omitted and no other query params
+ *   are provided, returns all epochs that have both treasury and circulation.
  */
 export const getTreasuryRate = async (req: Request, res: Response) => {
   try {
@@ -22,13 +23,24 @@ export const getTreasuryRate = async (req: Request, res: Response) => {
     const epochEnd = req.query.epochEnd
       ? parseInt(req.query.epochEnd as string)
       : null;
-    const limit = Math.min(
-      1000,
-      Math.max(1, parseInt(req.query.limit as string) || 100)
-    );
+    const hasLimitParam = req.query.limit !== undefined;
+    const requestedLimit = hasLimitParam
+      ? parseInt(req.query.limit as string)
+      : null;
+    const limit =
+      requestedLimit !== null
+        ? Math.min(1000, Math.max(1, requestedLimit || 100))
+        : null;
+
+    const hasAnyQueryParams =
+      epochStart !== null || epochEnd !== null || hasLimitParam;
+    const shouldReturnAll = !hasAnyQueryParams;
 
     // Build where clause
-    const whereClause: any = {};
+    const whereClause: any = {
+      treasury: { not: null },
+      circulation: { not: null },
+    };
     if (epochStart !== null) {
       whereClause.epoch = { ...whereClause.epoch, gte: epochStart };
     }
@@ -40,7 +52,7 @@ export const getTreasuryRate = async (req: Request, res: Response) => {
     const epochTotals = await prisma.epochTotals.findMany({
       where: whereClause,
       orderBy: { epoch: "desc" },
-      take: limit,
+      take: shouldReturnAll ? undefined : limit ?? 100,
       select: {
         epoch: true,
         treasury: true,

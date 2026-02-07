@@ -13,17 +13,22 @@ import {
  * Agreement rate = percentage of CC members who voted with the majority
  *
  * Query params:
- * - page: Page number (default: 1)
- * - pageSize: Items per page (default: 20, max: 100)
+ * - page: Page number (optional; when omitted along with pageSize, returns all proposals)
+ * - pageSize: Items per page (optional; max: 100)
  * - status: Filter by proposal status (optional, comma-separated)
  */
 export const getCCAgreementRate = async (req: Request, res: Response) => {
   try {
-    const page = Math.max(1, parseInt(req.query.page as string) || 1);
-    const pageSize = Math.min(
-      100,
-      Math.max(1, parseInt(req.query.pageSize as string) || 20)
-    );
+    const pageParam = req.query.page as string | undefined;
+    const pageSizeParam = req.query.pageSize as string | undefined;
+    const shouldPaginate = Boolean(pageParam || pageSizeParam);
+
+    const page = shouldPaginate
+      ? Math.max(1, parseInt(pageParam ?? "1") || 1)
+      : 1;
+    const pageSize = shouldPaginate
+      ? Math.min(100, Math.max(1, parseInt(pageSizeParam ?? "20") || 20))
+      : undefined;
     const statusFilter = (req.query.status as string)?.split(",").filter(Boolean);
 
     // Build where clause
@@ -38,8 +43,12 @@ export const getCCAgreementRate = async (req: Request, res: Response) => {
       prisma.proposal.findMany({
         where: whereClause,
         orderBy: { submissionEpoch: "desc" },
-        skip: (page - 1) * pageSize,
-        take: pageSize,
+        ...(shouldPaginate
+          ? {
+              skip: (page - 1) * (pageSize as number),
+              take: pageSize as number,
+            }
+          : {}),
         select: {
           proposalId: true,
           title: true,
@@ -149,9 +158,13 @@ export const getCCAgreementRate = async (req: Request, res: Response) => {
       aggregateAgreementRatePct,
       pagination: {
         page,
-        pageSize,
+        pageSize: shouldPaginate ? (pageSize as number) : totalItems,
         totalItems,
-        totalPages: Math.ceil(totalItems / pageSize),
+        totalPages: shouldPaginate
+          ? Math.ceil(totalItems / (pageSize as number))
+          : totalItems > 0
+            ? 1
+            : 0,
       },
     };
 

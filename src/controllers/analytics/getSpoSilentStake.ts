@@ -11,19 +11,24 @@ import { computeSpoLedgerBuckets } from "../../libs/ledgerVoteMath";
  * Returns SPO silent stake rate (stake that did not vote)
  *
  * Query params:
- * - page: Page number (default: 1)
- * - pageSize: Items per page (default: 20, max: 100)
+ * - page: Page number (optional). If omitted (and pageSize omitted), returns all proposals.
+ * - pageSize: Items per page (optional, max: 100). If omitted (and page omitted), returns all proposals.
  * - status: Filter by proposal status (optional, comma-separated)
  * - epochStart: Filter proposals by submission epoch >= epochStart
  * - epochEnd: Filter proposals by submission epoch <= epochEnd
  */
 export const getSpoSilentStake = async (req: Request, res: Response) => {
   try {
-    const page = Math.max(1, parseInt(req.query.page as string) || 1);
-    const pageSize = Math.min(
-      100,
-      Math.max(1, parseInt(req.query.pageSize as string) || 20)
-    );
+    const hasPageParam = req.query.page !== undefined;
+    const hasPageSizeParam = req.query.pageSize !== undefined;
+    const paginationRequested = hasPageParam || hasPageSizeParam;
+
+    const page = paginationRequested
+      ? Math.max(1, parseInt(req.query.page as string) || 1)
+      : 1;
+    const pageSize = paginationRequested
+      ? Math.min(100, Math.max(1, parseInt(req.query.pageSize as string) || 20))
+      : undefined;
     const statusFilter = (req.query.status as string)?.split(",").filter(Boolean);
     const epochStart = req.query.epochStart
       ? parseInt(req.query.epochStart as string)
@@ -44,29 +49,33 @@ export const getSpoSilentStake = async (req: Request, res: Response) => {
       whereClause.submissionEpoch = { ...whereClause.submissionEpoch, lte: epochEnd };
     }
 
-    // Get total count and proposals
-    const [totalItems, dbProposals] = await Promise.all([
-      prisma.proposal.count({ where: whereClause }),
-      prisma.proposal.findMany({
-        where: whereClause,
-        orderBy: { submissionEpoch: "desc" },
-        skip: (page - 1) * pageSize,
-        take: pageSize,
-        select: {
-          proposalId: true,
-          title: true,
-          governanceActionType: true,
-          submissionEpoch: true,
-          spoNoVotePower: true,
-          spoTotalVotePower: true,
-          spoActiveYesVotePower: true,
-          spoActiveNoVotePower: true,
-          spoActiveAbstainVotePower: true,
-          spoAlwaysAbstainVotePower: true,
-          spoAlwaysNoConfidencePower: true,
-        },
-      }),
-    ]);
+    const dbProposals = await prisma.proposal.findMany({
+      where: whereClause,
+      orderBy: { submissionEpoch: "desc" },
+      ...(paginationRequested
+        ? {
+            skip: (page - 1) * (pageSize ?? 20),
+            take: pageSize ?? 20,
+          }
+        : {}),
+      select: {
+        proposalId: true,
+        title: true,
+        governanceActionType: true,
+        submissionEpoch: true,
+        spoNoVotePower: true,
+        spoTotalVotePower: true,
+        spoActiveYesVotePower: true,
+        spoActiveNoVotePower: true,
+        spoActiveAbstainVotePower: true,
+        spoAlwaysAbstainVotePower: true,
+        spoAlwaysNoConfidencePower: true,
+      },
+    });
+
+    const totalItems = paginationRequested
+      ? await prisma.proposal.count({ where: whereClause })
+      : dbProposals.length;
 
     // Calculate silent stake for each proposal
     const proposals: ProposalSilentStake[] = dbProposals.map((p) => {
@@ -129,9 +138,13 @@ export const getSpoSilentStake = async (req: Request, res: Response) => {
       aggregateSilentPct,
       pagination: {
         page,
-        pageSize,
+        pageSize: paginationRequested ? (pageSize ?? 20) : totalItems,
         totalItems,
-        totalPages: Math.ceil(totalItems / pageSize),
+        totalPages: paginationRequested
+          ? Math.ceil(totalItems / (pageSize ?? 20))
+          : totalItems > 0
+            ? 1
+            : 0,
       },
     };
 

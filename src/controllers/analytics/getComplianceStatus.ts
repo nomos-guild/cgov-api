@@ -50,17 +50,22 @@ function determineConstitutionalStatus(
  * Returns constitutional compliance status per proposal
  *
  * Query params:
- * - page: Page number (default: 1)
- * - pageSize: Items per page (default: 20, max: 100)
+ * - page: Page number (optional; if omitted with pageSize, returns all proposals)
+ * - pageSize: Items per page (optional, max: 100; if omitted with page, returns all proposals)
  * - status: Filter by proposal status (optional, comma-separated)
  */
 export const getComplianceStatus = async (req: Request, res: Response) => {
   try {
-    const page = Math.max(1, parseInt(req.query.page as string) || 1);
-    const pageSize = Math.min(
-      100,
-      Math.max(1, parseInt(req.query.pageSize as string) || 20)
-    );
+    const pageQuery = req.query.page as string | undefined;
+    const pageSizeQuery = req.query.pageSize as string | undefined;
+    const shouldPaginate = pageQuery !== undefined || pageSizeQuery !== undefined;
+
+    const page = shouldPaginate
+      ? Math.max(1, parseInt(pageQuery || "1"))
+      : 1;
+    const pageSize = shouldPaginate
+      ? Math.min(100, Math.max(1, parseInt(pageSizeQuery || "20")))
+      : 0;
     const statusFilter = (req.query.status as string)?.split(",").filter(Boolean);
 
     // Build where clause
@@ -81,8 +86,12 @@ export const getComplianceStatus = async (req: Request, res: Response) => {
       prisma.proposal.findMany({
         where: whereClause,
         orderBy: { submissionEpoch: "desc" },
-        skip: (page - 1) * pageSize,
-        take: pageSize,
+        ...(shouldPaginate
+          ? {
+              skip: (page - 1) * pageSize,
+              take: pageSize,
+            }
+          : {}),
         select: {
           proposalId: true,
           title: true,
@@ -166,13 +175,47 @@ export const getComplianceStatus = async (req: Request, res: Response) => {
       };
     });
 
+    const overview: GetComplianceStatusResponse["overview"] = {
+      eligibleMembers,
+      totalProposals: totalItems,
+      ccApprovedCounts: {
+        approved: 0,
+        rejected: 0,
+        pending: 0,
+      },
+      constitutionalStatusCounts: {
+        constitutional: 0,
+        unconstitutional: 0,
+        pending: 0,
+        committeeTooSmall: 0,
+      },
+    };
+
+    for (const proposal of proposals) {
+      if (proposal.ccApproved === true) overview.ccApprovedCounts.approved++;
+      else if (proposal.ccApproved === false) overview.ccApprovedCounts.rejected++;
+      else overview.ccApprovedCounts.pending++;
+
+      if (proposal.constitutionalStatus === "Constitutional") {
+        overview.constitutionalStatusCounts.constitutional++;
+      } else if (proposal.constitutionalStatus === "Unconstitutional") {
+        overview.constitutionalStatusCounts.unconstitutional++;
+      } else if (proposal.constitutionalStatus === "Committee Too Small") {
+        overview.constitutionalStatusCounts.committeeTooSmall++;
+      } else {
+        overview.constitutionalStatusCounts.pending++;
+      }
+    }
+
+    const effectivePageSize = shouldPaginate ? pageSize : totalItems;
     const response: GetComplianceStatusResponse = {
+      overview,
       proposals,
       pagination: {
-        page,
-        pageSize,
+        page: shouldPaginate ? page : 1,
+        pageSize: effectivePageSize,
         totalItems,
-        totalPages: Math.ceil(totalItems / pageSize),
+        totalPages: effectivePageSize > 0 ? Math.ceil(totalItems / effectivePageSize) : 0,
       },
     };
 

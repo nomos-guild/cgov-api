@@ -19,19 +19,23 @@ function percentile(sortedValues: number[], p: number): number | null {
  * Returns time-to-enactment metrics per proposal
  *
  * Query params:
- * - page: Page number (default: 1)
- * - pageSize: Items per page (default: 20, max: 100)
+ * - page: Page number (optional; if omitted and pageSize omitted, returns all results)
+ * - pageSize: Items per page (optional; if omitted and page omitted, returns all results; max: 100 when paginating)
  * - status: Filter by proposal status (optional, comma-separated)
  * - governanceActionType: Filter by action type (optional, comma-separated)
  * - enactedOnly: If "true", only return enacted proposals (default: false)
  */
 export const getTimeToEnactment = async (req: Request, res: Response) => {
   try {
-    const page = Math.max(1, parseInt(req.query.page as string) || 1);
-    const pageSize = Math.min(
-      100,
-      Math.max(1, parseInt(req.query.pageSize as string) || 20)
-    );
+    const pageParam = req.query.page as string | undefined;
+    const pageSizeParam = req.query.pageSize as string | undefined;
+    const wantsPagination = pageParam !== undefined || pageSizeParam !== undefined;
+    const page = wantsPagination
+      ? Math.max(1, parseInt(pageParam ?? "1") || 1)
+      : 1;
+    const pageSize = wantsPagination
+      ? Math.min(100, Math.max(1, parseInt(pageSizeParam ?? "20") || 20))
+      : null;
     const statusFilter = (req.query.status as string)?.split(",").filter(Boolean);
     const typeFilter = (req.query.governanceActionType as string)
       ?.split(",")
@@ -51,24 +55,24 @@ export const getTimeToEnactment = async (req: Request, res: Response) => {
     }
 
     // Get proposals
-    const [totalItems, dbProposals] = await Promise.all([
-      prisma.proposal.count({ where: whereClause }),
-      prisma.proposal.findMany({
-        where: whereClause,
-        orderBy: { submissionEpoch: "desc" },
-        skip: (page - 1) * pageSize,
-        take: pageSize,
-        select: {
-          proposalId: true,
-          title: true,
-          governanceActionType: true,
-          status: true,
-          submissionEpoch: true,
-          ratifiedEpoch: true,
-          enactedEpoch: true,
-        },
-      }),
-    ]);
+    const totalItems = await prisma.proposal.count({ where: whereClause });
+
+    const dbProposals = await prisma.proposal.findMany({
+      where: whereClause,
+      orderBy: { submissionEpoch: "desc" },
+      ...(wantsPagination && pageSize !== null
+        ? { skip: (page - 1) * pageSize, take: pageSize }
+        : {}),
+      select: {
+        proposalId: true,
+        title: true,
+        governanceActionType: true,
+        status: true,
+        submissionEpoch: true,
+        ratifiedEpoch: true,
+        enactedEpoch: true,
+      },
+    });
 
     // Get epoch timestamps for wall-clock calculations
     const allEpochs = new Set<number>();
@@ -202,9 +206,14 @@ export const getTimeToEnactment = async (req: Request, res: Response) => {
       },
       pagination: {
         page,
-        pageSize,
+        pageSize: pageSize ?? totalItems,
         totalItems,
-        totalPages: Math.ceil(totalItems / pageSize),
+        totalPages:
+          pageSize === null
+            ? totalItems === 0
+              ? 0
+              : 1
+            : Math.ceil(totalItems / pageSize),
       },
     };
 

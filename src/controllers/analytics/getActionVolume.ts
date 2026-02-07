@@ -5,6 +5,31 @@ import {
   EpochActionVolume,
 } from "../../responses/analytics.response";
 
+function extractAuthorNames(metadata: string | null): string[] {
+  if (!metadata) return [];
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(metadata);
+  } catch {
+    return [];
+  }
+
+  if (!parsed || typeof parsed !== "object") return [];
+
+  const authors = (parsed as any).authors;
+  if (!Array.isArray(authors)) return [];
+
+  const names = authors
+    .map((a) => (a && typeof a === "object" ? (a as any).name : undefined))
+    .filter((n): n is string => typeof n === "string")
+    .map((n) => n.replace(/\s+/g, " ").trim())
+    .filter((n) => n.length > 0);
+
+  // Avoid double-counting if metadata repeats the same author.
+  return Array.from(new Set(names));
+}
+
 /**
  * GET /analytics/action-volume
  * Returns governance action volume by epoch and type
@@ -43,6 +68,7 @@ export const getActionVolume = async (req: Request, res: Response) => {
         submissionEpoch: true,
         governanceActionType: true,
         status: true,
+        metadata: true,
       },
     });
 
@@ -50,6 +76,7 @@ export const getActionVolume = async (req: Request, res: Response) => {
     const epochMap = new Map<number, Record<string, number>>();
     const totalByType: Record<string, number> = {};
     const totalByStatus: Record<string, number> = {};
+    const totalByAuthor: Record<string, number> = {};
 
     for (const p of proposals) {
       const epoch = p.submissionEpoch ?? -1;
@@ -68,6 +95,12 @@ export const getActionVolume = async (req: Request, res: Response) => {
 
       // Status totals
       totalByStatus[status] = (totalByStatus[status] ?? 0) + 1;
+
+      // Author totals (from metadata JSON)
+      const authorNames = extractAuthorNames(p.metadata ?? null);
+      for (const name of authorNames) {
+        totalByAuthor[name] = (totalByAuthor[name] ?? 0) + 1;
+      }
     }
 
     // Convert to sorted array
@@ -90,6 +123,7 @@ export const getActionVolume = async (req: Request, res: Response) => {
       totalProposals: proposals.length,
       byType: totalByType,
       byStatus: totalByStatus,
+      byAuthor: totalByAuthor,
     };
 
     res.json(response);
