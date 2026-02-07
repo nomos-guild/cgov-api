@@ -104,6 +104,7 @@ router.get("/stake-participation", analyticsController.getStakeParticipation);
  *         schema:
  *           type: integer
  *           default: 100
+ *           maximum: 1000
  *     responses:
  *       200:
  *         description: Successfully retrieved delegation rate data
@@ -159,6 +160,7 @@ router.get("/delegation-distribution", analyticsController.getDelegationDistribu
  *         schema:
  *           type: integer
  *           default: 50
+ *           maximum: 500
  *     responses:
  *       200:
  *         description: Successfully retrieved new delegation rate data
@@ -181,7 +183,7 @@ router.get("/new-delegation-rate", analyticsController.getNewDelegationRate);
  *         description: Data view type
  *         schema:
  *           type: string
- *           enum: [proposals]
+ *           enum: [proposals, both, epochs]
  *           default: proposals
  *       - name: proposalId
  *         in: query
@@ -200,10 +202,11 @@ router.get("/new-delegation-rate", analyticsController.getNewDelegationRate);
  *           type: integer
  *       - name: limit
  *         in: query
- *         description: Max items to return
+ *         description: Max items to return. If omitted and no query params are provided, returns all proposals.
  *         schema:
  *           type: integer
  *           default: 50
+ *           maximum: 500
  *     responses:
  *       200:
  *         description: Successfully retrieved inactive ADA data
@@ -258,6 +261,7 @@ router.get("/gini", analyticsController.getGiniCoefficient);
  *         schema:
  *           type: integer
  *           default: 20
+ *           maximum: 100
  *       - name: epochStart
  *         in: query
  *         schema:
@@ -316,6 +320,7 @@ router.get("/drep-activity-rate", analyticsController.getDRepActivityRate);
  *         schema:
  *           type: integer
  *           default: 20
+ *           maximum: 100
  *       - name: activeOnly
  *         in: query
  *         description: If true, only return active DReps (default true; pass false to include inactive)
@@ -593,6 +598,7 @@ router.get("/vote-divergence", analyticsController.getVoteDivergence);
  *         schema:
  *           type: integer
  *           default: 50
+ *           maximum: 500
  *     responses:
  *       200:
  *         description: Successfully retrieved action volume data
@@ -669,8 +675,11 @@ router.get("/contention-rate", analyticsController.getContentionRate);
  *           type: integer
  *       - name: limit
  *         in: query
+ *         description: Max number of epochs to return. If omitted and any query params are provided, defaults to 100. If no query params are provided, returns all epochs that have both treasury and circulation.
  *         schema:
  *           type: integer
+ *           default: 100
+ *           maximum: 1000
  *     responses:
  *       200:
  *         description: Successfully retrieved treasury rate data
@@ -698,6 +707,7 @@ router.get("/treasury-rate", analyticsController.getTreasuryRate);
  *         schema:
  *           type: integer
  *           default: 20
+ *           maximum: 100
  *       - name: status
  *         in: query
  *         schema:
@@ -796,36 +806,11 @@ router.get("/cc-time-to-decision", analyticsController.getCCTimeToDecision);
  *     tags:
  *       - Governance Analytics
  *     parameters:
- *       - name: page
- *         in: query
- *         description: Page number (starts at 1)
- *         schema:
- *           type: integer
- *           minimum: 1
- *           default: 1
- *       - name: pageSize
- *         in: query
- *         description: Number of items per page (max 100)
- *         schema:
- *           type: integer
- *           minimum: 1
- *           maximum: 100
- *           default: 20
  *       - name: status
  *         in: query
  *         description: Filter proposals by status (comma-separated)
  *         schema:
  *           type: string
- *       - name: epochStart
- *         in: query
- *         description: Start epoch for filtering
- *         schema:
- *           type: integer
- *       - name: epochEnd
- *         in: query
- *         description: End epoch for filtering
- *         schema:
- *           type: integer
  *     responses:
  *       200:
  *         description: Successfully retrieved CC participation data
@@ -853,21 +838,12 @@ router.get("/cc-participation", analyticsController.getCCParticipation);
  *         description: Items per page (if omitted along with page, returns all proposals)
  *         schema:
  *           type: integer
+ *           maximum: 100
  *       - name: status
  *         in: query
  *         description: Filter proposals by status (comma-separated)
  *         schema:
  *           type: string
- *       - name: epochStart
- *         in: query
- *         description: Start epoch for filtering
- *         schema:
- *           type: integer
- *       - name: epochEnd
- *         in: query
- *         description: End epoch for filtering
- *         schema:
- *           type: integer
  *     responses:
  *       200:
  *         description: Successfully retrieved CC abstain rate data
@@ -895,21 +871,12 @@ router.get("/cc-abstain-rate", analyticsController.getCCAbstainRate);
  *         description: Items per page (if omitted along with page, returns all proposals)
  *         schema:
  *           type: integer
+ *           maximum: 100
  *       - name: status
  *         in: query
  *         description: Filter proposals by status (comma-separated)
  *         schema:
  *           type: string
- *       - name: epochStart
- *         in: query
- *         description: Start epoch for filtering
- *         schema:
- *           type: integer
- *       - name: epochEnd
- *         in: query
- *         description: End epoch for filtering
- *         schema:
- *           type: integer
  *     responses:
  *       200:
  *         description: Successfully retrieved CC agreement rate data

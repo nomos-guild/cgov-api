@@ -7,7 +7,10 @@ import {
 
 /**
  * GET /analytics/delegation-rate
- * Returns delegation rate (% ada) per epoch
+ * Returns delegation rates per epoch as a % of circulation.
+ *
+ * - delegationRatePct: DRep delegated voting power / circulation
+ * - spoDelegationRatePct: total pool vote power / circulation
  *
  * Query params:
  * - epochStart: Start epoch (optional)

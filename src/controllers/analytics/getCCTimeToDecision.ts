@@ -19,7 +19,8 @@ function percentile(sortedValues: number[], p: number): number | null {
  * GET /analytics/cc-time-to-decision
  * Returns time-to-decision metrics for Constitutional Committee
  *
- * Measures time from proposal submission to first CC vote
+ * Measures time from proposal submission to first and last CC vote.
+ * Submission time uses the epoch start timestamp when available, otherwise falls back to proposal createdAt.
  *
  * Query params:
  * - page: Page number (default: 1)

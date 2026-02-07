@@ -113,7 +113,11 @@ const computeSpoTurnoutMetrics = (row: any) => {
 
 /**
  * GET /analytics/voting-turnout
- * Returns voting turnout (% ada) for DRep and SPO per proposal
+ * Returns voting turnout metrics for DRep and SPO per proposal.
+ *
+ * - turnoutPct: active votes / total vote power (backward compatible)
+ * - participatingPct: (active votes + default stance) / total vote power
+ * Includes per-proposal breakdown fields plus weighted aggregate rates.
  *
  * Query params:
  * - page: Page number (default: 1)

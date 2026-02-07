@@ -32,7 +32,8 @@ function extractAuthorNames(metadata: string | null): string[] {
 
 /**
  * GET /analytics/action-volume
- * Returns governance action volume by epoch and type
+ * Returns governance action volume by epoch and type.
+ * Also includes overall totals by type, status, and author (from proposal metadata).
  *
  * Query params:
  * - epochStart: Start epoch (optional)

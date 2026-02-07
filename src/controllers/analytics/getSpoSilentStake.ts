@@ -8,7 +8,10 @@ import { computeSpoLedgerBuckets } from "../../libs/ledgerVoteMath";
 
 /**
  * GET /analytics/spo-silent-stake
- * Returns SPO silent stake rate (stake that did not vote)
+ * Returns SPO silent stake rate.
+ *
+ * "Silent" includes stake that did not explicitly vote, plus default-stance stake
+ * (always abstain / always no confidence).
  *
  * Query params:
  * - page: Page number (optional). If omitted (and pageSize omitted), returns all proposals.

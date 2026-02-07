@@ -17,7 +17,13 @@ type KoiosCcMemberInfo = {
 
 /**
  * GET /analytics/cc-participation
- * Returns CC member participation rate
+ * Returns CC member participation metrics.
+ *
+ * Participation rate is computed both:
+ * - globally: proposalsVoted / totalProposals in scope
+ * - within an inferred "active window": proposals voted within the member's window / proposals whose epoch window overlaps it
+ *
+ * When available, committee eligibility and expiration epochs are sourced from Koios; otherwise they are inferred from DB state.
  *
  * Query params:
  * - status: Filter by proposal status (optional, comma-separated)

@@ -10,7 +10,8 @@ import {
  * GET /analytics/cc-agreement-rate
  * Returns CC vote agreement rate per proposal
  *
- * Agreement rate = percentage of CC members who voted with the majority
+ * Agreement rate = percentage of (latest) CC member votes on the proposal
+ * that match the proposal's majority vote (among votes cast).
  *
  * Query params:
  * - page: Page number (optional; when omitted along with pageSize, returns all proposals)

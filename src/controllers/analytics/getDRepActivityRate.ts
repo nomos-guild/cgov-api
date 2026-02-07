@@ -8,7 +8,12 @@ import {
 
 /**
  * GET /analytics/drep-activity-rate
- * Returns DRep activity rate (unique proposals voted / proposals in scope)
+ * Returns DRep activity rate based on unique proposals voted.
+ *
+ * - proposalsVoted counts unique proposals a DRep has voted on (re-votes don't increase this).
+ * - activityRatePct uses a per-DRep denominator of proposals since the DRep's registration epoch (when known);
+ *   otherwise it falls back to total proposals in scope.
+ * - activityRateAllTimePct uses total proposals in scope as the denominator.
  * Also returns totalVotesCast (raw vote rows) as additional info.
  *
  * Query params:

@@ -5,7 +5,11 @@ import { GetStakeParticipationResponse } from "../../responses/analytics.respons
 
 /**
  * GET /analytics/stake-participation
- * Returns active stake address participation stats
+ * Returns delegated stake participation stats.
+ *
+ * Participating delegators are stake addresses delegated to a DRep that has voted (optionally scoped to a proposal).
+ * Default-stance delegations (always abstain / always no confidence) are treated as participating and are included
+ * via epoch-level aggregates.
  *
  * Query params:
  * - proposalId: Filter by specific proposal (optional)
