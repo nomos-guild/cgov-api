@@ -1,5 +1,18 @@
 # add-endpoint Changelog
 
+## 1.2.0 (2026-02-04)
+
+Journey-driven evolution from `2026-02-04-governance-analytics-endpoints.md`.
+
+### Added
+- **BigInt percentage calculations** pattern using scaled arithmetic (multiply by 10000n first)
+- **Latest vote per voter** deduplication pattern for voters who can change their vote
+- **Epoch time mapping** pattern for wall-clock calculations from epoch numbers
+- **Analytics metrics** section with:
+  - Gini coefficient for decentralization measurement
+  - HHI (Herfindahl-Hirschman Index) for concentration
+  - Contention score for close vote splits
+
 ## 1.1.0 (2026-02-04)
 
 Journey-driven evolution from `2026-02-04-drep-dashboard-endpoints.md`.

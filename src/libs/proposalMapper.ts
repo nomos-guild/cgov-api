@@ -188,7 +188,7 @@ const combineCountTallies = (...counts: CountTally[]): CountTally =>
  * Helper to safely convert BigInt or number to number for calculations
  * Accepts both types for compatibility during schema migration
  */
-const toNumber = (value: bigint | number | null | undefined): number => {
+export const toNumber = (value: bigint | number | null | undefined): number => {
   if (value === null || value === undefined) return 0;
   return Number(value);
 };
@@ -281,9 +281,9 @@ const buildDrepVoteInfo = (
  *
  * The submission epoch for this governance action is 534.
  */
-const SPO_FORMULA_TRANSITION_GOV_ACTION =
+export const SPO_FORMULA_TRANSITION_GOV_ACTION =
   "gov_action1pvv5wmjqhwa4u85vu9f4ydmzu2mgt8n7et967ph2urhx53r70xusqnmm525";
-const SPO_FORMULA_TRANSITION_EPOCH = 534;
+export const SPO_FORMULA_TRANSITION_EPOCH = 534;
 
 /**
  * Determines if a proposal should use the new SPO voting formula.
@@ -294,7 +294,7 @@ const SPO_FORMULA_TRANSITION_EPOCH = 534;
  * @param proposal - The proposal to check
  * @returns true if the new formula should be used, false for old formula
  */
-const shouldUseNewSpoFormula = (proposal: ProposalWithVotes): boolean => {
+export const shouldUseNewSpoFormula = (proposal: ProposalWithVotes): boolean => {
   // Check if this is the transition governance action itself
   if (proposal.proposalId === SPO_FORMULA_TRANSITION_GOV_ACTION) {
     return true;
@@ -802,7 +802,7 @@ const aggregateVotes = (votes: VoteWithRelations[]) => {
  * Note: Protocol Parameter Change has sub-types with different thresholds,
  * but we don't have sub-type information from Koios, so we use the most common threshold (0.67)
  */
-const VOTING_THRESHOLDS: Record<GovernanceType, VotingThreshold> = {
+export const VOTING_THRESHOLDS: Record<GovernanceType, VotingThreshold> = {
   // 1. Motion of no-confidence: CC doesn't vote, DRep 0.67, SPO 0.51
   NO_CONFIDENCE: {
     ccThreshold: null,
@@ -855,7 +855,7 @@ const VOTING_THRESHOLDS: Record<GovernanceType, VotingThreshold> = {
 /**
  * Get voting threshold for a governance action type
  */
-const getVotingThreshold = (
+export const getVotingThreshold = (
   governanceType: GovernanceType | null | undefined
 ): VotingThreshold => {
   if (!governanceType) {
@@ -869,7 +869,7 @@ const getVotingThreshold = (
  * Evaluate if a voter type meets its threshold
  * Returns true if yesPercent >= threshold * 100
  */
-const evaluateThreshold = (
+export const evaluateThreshold = (
   yesPercent: number,
   threshold: number | null
 ): boolean | null => {

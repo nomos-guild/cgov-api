@@ -5,6 +5,8 @@
 
 import { startProposalSyncJob } from "./sync-proposals.job";
 import { startVoterPowerSyncJob } from "./sync-voter-power.job";
+import { startEpochAnalyticsSyncJob } from "./sync-epoch-analytics.job";
+import { startDrepDelegatorSyncJob } from "./sync-drep-delegators.job";
 
 /**
  * Starts all registered cron jobs
@@ -18,6 +20,12 @@ export const startAllJobs = () => {
 
   // Start voter power sync job (DRep and SPO voting power updates)
   startVoterPowerSyncJob();
+
+  // Start governance analytics epoch sync job (DRep inventory + epoch snapshots)
+  startEpochAnalyticsSyncJob();
+
+  // Start DRep delegation change sync job
+  startDrepDelegatorSyncJob();
 
   // Add more jobs here as needed
   // Example:
