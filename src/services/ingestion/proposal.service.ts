@@ -285,6 +285,9 @@ export async function ingestProposal(
   //    only fetch votes from this proposal's submission epoch onward.
   return ingestProposalData(koiosProposal, {
     minVotesEpoch: koiosProposal.proposed_epoch,
+    // For single-proposal ingestion we prefer the per-proposal fetch path so
+    // it matches sync-on-read semantics and avoids cross-proposal paging drift.
+    useCache: false,
   });
 }
 
