@@ -12,6 +12,9 @@ import type { KoiosVote } from "../../types/koios.types";
 
 // Cache all votes at module level to avoid fetching multiple times during sync
 let cachedVotes: KoiosVote[] | null = null;
+// Track the minimum epoch used to build cachedVotes (if any) so we can safely
+// reuse or refresh the cache when different triggers request different windows.
+let cachedVotesMinEpoch: number | undefined = undefined;
 
 // Cache for vote metadata JSON keyed by anchor URL to avoid duplicate fetches
 const voteMetadataCache = new Map<string, string | null>();
@@ -104,6 +107,7 @@ export interface VoteIngestionStats {
  */
 export function clearVoteCache() {
   cachedVotes = null;
+  cachedVotesMinEpoch = undefined;
 }
 
 /**
@@ -143,7 +147,17 @@ export async function ingestVotesForProposal(
       // Bulk-sync mode: fetch all relevant votes once, keep in memory, then
       // filter per proposal. This is used by the cron-style sync that walks
       // through many proposals in one run.
-      if (!cachedVotes) {
+      const shouldRefreshCache =
+        !cachedVotes ||
+        // If caller wants *all* votes but cache was built with an epoch floor,
+        // the cache may be missing earlier votes.
+        (typeof minEpoch !== "number" && typeof cachedVotesMinEpoch === "number") ||
+        // If caller asks for an earlier epoch than cache includes, refresh.
+        (typeof minEpoch === "number" &&
+          typeof cachedVotesMinEpoch === "number" &&
+          minEpoch < cachedVotesMinEpoch);
+
+      if (shouldRefreshCache) {
         let allVotes: KoiosVote[] = [];
         let offset = 0;
         const limit = 1000; // Max limit per request
@@ -163,6 +177,9 @@ export async function ingestVotesForProposal(
           const params: any = {
             limit,
             offset,
+            // Stable ordering is important for offset-based pagination.
+            // Without it, inserts during paging can cause duplicates/skips.
+            order: "block_time.asc,vote_tx_hash.asc",
           };
 
           if (typeof minEpoch === "number") {
@@ -190,12 +207,21 @@ export async function ingestVotesForProposal(
         }
 
         cachedVotes = allVotes;
+        cachedVotesMinEpoch = typeof minEpoch === "number" ? minEpoch : undefined;
         console.log(
           `[Vote Ingestion] ✓ Fetched ${cachedVotes.length} total votes from Koios`
         );
       }
 
       // Filter in memory to find votes for this specific proposal
+      // (cachedVotes should always be set here, but keep TS + runtime safe)
+      if (!cachedVotes) {
+        console.warn(
+          "[Vote Ingestion] Vote cache unexpectedly empty; falling back to no votes"
+        );
+        return stats;
+      }
+
       koiosVotes = cachedVotes.filter((vote) => vote.proposal_id === proposalId);
     } else {
       // Sync-on-read mode: fetch only votes for this proposal (and optional
@@ -215,6 +241,8 @@ export async function ingestVotesForProposal(
           limit,
           offset,
           proposal_id: `eq.${proposalId}`,
+          // Stable ordering is important for offset-based pagination.
+          order: "block_time.asc,vote_tx_hash.asc",
         };
 
         if (typeof minEpoch === "number") {
