@@ -108,26 +108,26 @@ jobs:
           gcloud scheduler jobs delete epoch-analytics-sync --location=${{ env.REGION }} --quiet || true
           gcloud scheduler jobs create http epoch-analytics-sync \
             --location=${{ env.REGION }} \
-            --schedule="1-59/5 * * * *" \
+            --schedule="10 * * * *" \
             --uri="${{ steps.url.outputs.url }}/data/trigger-epoch-analytics-sync" \
             --http-method=POST \
             --headers="X-API-Key=${{ secrets.SERVER_API_KEY }}" \
             --attempt-deadline=900s \
             --time-zone="UTC" \
-            --description="Sync epoch analytics (DRep inventory, epoch totals, lifecycle events, pool groups) every 5 minutes"
+            --description="Sync epoch analytics (DRep inventory, epoch totals, lifecycle events, pool groups) every hour at minute 10"
 
       - name: Create/Update DRep Delegator Sync Scheduler Job
         run: |
           gcloud scheduler jobs delete drep-delegator-sync --location=${{ env.REGION }} --quiet || true
           gcloud scheduler jobs create http drep-delegator-sync \
             --location=${{ env.REGION }} \
-            --schedule="2-59/5 * * * *" \
+            --schedule="40 * * * *" \
             --uri="${{ steps.url.outputs.url }}/data/trigger-drep-delegator-sync" \
             --http-method=POST \
             --headers="X-API-Key=${{ secrets.SERVER_API_KEY }}" \
             --attempt-deadline=900s \
             --time-zone="UTC" \
-            --description="Sync DRep delegation changes every 5 minutes"
+            --description="Sync DRep delegation changes every hour at minute 40"
 
       - name: Deployment Summary
         run: |
@@ -143,5 +143,5 @@ jobs:
           echo "|-----|----------|----------|" >> $GITHUB_STEP_SUMMARY
           echo "| drep-proposal-sync | \`*/5 * * * *\` | POST /data/trigger-sync |" >> $GITHUB_STEP_SUMMARY
           echo "| drep-voter-power-sync | \`0 0 * * *\` | POST /data/trigger-voter-sync |" >> $GITHUB_STEP_SUMMARY
-          echo "| epoch-analytics-sync | \`1-59/5 * * * *\` | POST /data/trigger-epoch-analytics-sync |" >> $GITHUB_STEP_SUMMARY
-          echo "| drep-delegator-sync | \`2-59/5 * * * *\` | POST /data/trigger-drep-delegator-sync |" >> $GITHUB_STEP_SUMMARY
+          echo "| epoch-analytics-sync | \`10 * * * *\` | POST /data/trigger-epoch-analytics-sync |" >> $GITHUB_STEP_SUMMARY
+          echo "| drep-delegator-sync | \`40 * * * *\` | POST /data/trigger-drep-delegator-sync |" >> $GITHUB_STEP_SUMMARY
