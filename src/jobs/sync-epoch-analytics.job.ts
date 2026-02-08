@@ -24,11 +24,29 @@ let isEpochAnalyticsSyncRunning = false;
 
 /**
  * Starts the governance analytics epoch sync job.
- *
- * Runs every hour at minute 10.
+ * Schedule is configurable via EPOCH_ANALYTICS_SYNC_SCHEDULE env variable
+ * Defaults to every hour at minute 10
  */
 export const startEpochAnalyticsSyncJob = () => {
-  startEpochAnalyticsSyncJobWithSchedule("10 * * * *");
+  const schedule = process.env.EPOCH_ANALYTICS_SYNC_SCHEDULE || "10 * * * *";
+  const enabled = process.env.ENABLE_CRON_JOBS !== "false";
+
+  if (!enabled) {
+    console.log(
+      "[Cron] Epoch analytics sync job disabled via ENABLE_CRON_JOBS env variable"
+    );
+    return;
+  }
+
+  // Validate cron schedule
+  if (!cron.validate(schedule)) {
+    console.error(
+      `[Cron] Invalid cron schedule: ${schedule}. Using default: 10 * * * *`
+    );
+    return startEpochAnalyticsSyncJobWithSchedule("10 * * * *");
+  }
+
+  startEpochAnalyticsSyncJobWithSchedule(schedule);
 };
 
 function startEpochAnalyticsSyncJobWithSchedule(schedule: string) {
