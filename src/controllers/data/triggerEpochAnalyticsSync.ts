@@ -125,7 +125,11 @@ export const postTriggerEpochAnalyticsSync = async (
           epoch: previous.epoch,
           dreps: previous.dreps ?? { skipped: true },
           drepInfo: previous.drepInfo ?? { skipped: true },
-          totals: previous.totals ?? { skipped: true },
+          // Only include summary fields from totals (BigInt values like
+          // circulation/treasury/supply cannot be JSON-serialized)
+          totals: previous.totals
+            ? { epoch: previous.totals.epoch, upserted: previous.totals.upserted }
+            : { skipped: true },
           drepLifecycle: previous.drepLifecycle ?? { skipped: true },
           poolGroups: previous.poolGroups ?? { skipped: true },
         },
