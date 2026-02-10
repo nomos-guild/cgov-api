@@ -16,6 +16,8 @@ import {
   postTriggerSnapshot,
 } from "../controllers/data/triggerGithub";
 import { developmentController } from "../controllers";
+import { postTriggerEpochAnalyticsSync } from "../controllers/data/triggerEpochAnalyticsSync";
+import { postTriggerDrepDelegatorSync } from "../controllers/data/triggerDrepDelegatorSync";
 
 const router = express.Router();
 
@@ -217,6 +219,42 @@ router.post("/trigger-sync", postTriggerSync);
  *         description: Sync failed
  */
 router.post("/trigger-voter-sync", postTriggerVoterSync);
+
+/**
+ * @openapi
+ * /data/trigger-epoch-analytics-sync:
+ *   post:
+ *     summary: Manually trigger epoch analytics sync
+ *     description: Triggers a full sync of epoch analytics data including DRep inventory, DRep info, epoch totals, DRep lifecycle events, and pool groups. Used for manual testing and by Cloud Scheduler cron jobs.
+ *     tags:
+ *       - Data Ingestion
+ *     responses:
+ *       200:
+ *         description: Sync completed successfully
+ *       409:
+ *         description: Sync already running
+ *       500:
+ *         description: Sync failed
+ */
+router.post("/trigger-epoch-analytics-sync", postTriggerEpochAnalyticsSync);
+
+/**
+ * @openapi
+ * /data/trigger-drep-delegator-sync:
+ *   post:
+ *     summary: Manually trigger DRep delegator sync
+ *     description: Triggers a sync of DRep delegation changes including stake address delegation state updates and change log entries. Used for manual testing and by Cloud Scheduler cron jobs.
+ *     tags:
+ *       - Data Ingestion
+ *     responses:
+ *       200:
+ *         description: Sync completed successfully
+ *       409:
+ *         description: Sync already running
+ *       500:
+ *         description: Sync failed
+ */
+router.post("/trigger-drep-delegator-sync", postTriggerDrepDelegatorSync);
 
 // ─── GitHub Admin Endpoints ─────────────────────────────────────────────────
 

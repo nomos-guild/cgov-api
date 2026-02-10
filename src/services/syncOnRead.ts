@@ -341,9 +341,13 @@ async function fetchVotesForProposal(
   let hasMore = true;
 
   while (hasMore) {
-    const batch = await koiosGet<Array<{ vote_tx_hash: string }>>(
-      `/vote_list?proposal_id=eq.${proposalId}&limit=${limit}&offset=${offset}`
-    );
+    const batch = await koiosGet<Array<{ vote_tx_hash: string }>>("/vote_list", {
+      proposal_id: `eq.${proposalId}`,
+      limit,
+      offset,
+      // Stable ordering is important for offset-based pagination.
+      order: "block_time.asc,vote_tx_hash.asc",
+    });
 
     if (!batch || batch.length === 0) {
       hasMore = false;

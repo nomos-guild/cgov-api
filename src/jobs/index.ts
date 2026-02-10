@@ -10,6 +10,8 @@ import { startSyncGithubActivityJob } from "./sync-github-activity.job";
 import { startAggregateGithubJob } from "./aggregate-github.job";
 import { startBackfillGithubJob } from "./backfill-github.job";
 import { startSnapshotGithubJob } from "./snapshot-github.job";
+import { startEpochAnalyticsSyncJob } from "./sync-epoch-analytics.job";
+import { startDrepDelegatorSyncJob } from "./sync-drep-delegators.job";
 
 /**
  * Starts all registered cron jobs
@@ -38,6 +40,12 @@ export const startAllJobs = () => {
 
   // Start GitHub daily snapshot job (stars/forks for all repos)
   startSnapshotGithubJob();
+
+  // Start governance analytics epoch sync job (DRep inventory + epoch snapshots)
+  startEpochAnalyticsSyncJob();
+
+  // Start DRep delegation change sync job
+  startDrepDelegatorSyncJob();
 
   console.log("[Cron] All cron jobs initialized");
 };

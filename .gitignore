@@ -6,5 +6,7 @@
 .env*
 !.env.example
 
-# AI
-.claude
+# AI - .claude folder is public (open source)
+# Only ignore build artifacts and dependencies inside it
+.claude/mcp/*/node_modules
+.claude/mcp/*/dist

@@ -239,6 +239,154 @@ export interface KoiosDrepInfo {
   active?: boolean;
   expires_epoch_no?: number | null;
   amount?: string; // Voting power in lovelace
+  live_delegators?: number; // Number of delegators to this DRep
   meta_url?: string | null;
   meta_hash?: string | null;
+}
+
+/**
+ * Epoch Totals from Koios API
+ * Endpoint: GET /totals?_epoch_no=<E>
+ */
+export interface KoiosTotals {
+  epoch_no: number;
+  circulation?: string | null;
+  treasury?: string | null;
+  reward?: string | null;
+  supply?: string | null;
+  reserves?: string | null;
+}
+
+/**
+ * Stake Account List from Koios API
+ * Endpoint: GET /account_list
+ */
+export interface KoiosAccountListEntry {
+  stake_address: string;
+  stake_address_hex?: string | null;
+  script_hash?: string | null;
+}
+
+/**
+ * DRep Delegators from Koios API
+ * Endpoint: GET /drep_delegators?_drep_id=<drepId>
+ *
+ * Note: Koios responses for delegators include `stake_address` and `amount`
+ * (lovelace). Some deployments may include `epoch_no`.
+ */
+export interface KoiosDrepDelegator {
+  stake_address: string;
+  amount: string;
+  epoch_no?: number | null;
+}
+
+/**
+ * Stake Account Update History from Koios API
+ * Endpoint: POST /account_update_history
+ */
+export interface KoiosAccountUpdateHistoryEntry {
+  stake_address: string;
+  action_type: string;
+  tx_hash?: string | null;
+  epoch_no?: number | null;
+  epoch_slot?: number | null;
+  absolute_slot?: number | null;
+  block_time?: number | null;
+  drep_id?: string | null;
+  delegated_drep?: string | null;
+  drep?: string | null;
+  pool_id?: string | null;
+  pool_id_bech32?: string | null;
+  info?: {
+    drep_id?: string | null;
+    delegated_drep?: string | null;
+    drep?: string | null;
+  } | null;
+}
+
+/**
+ * Transaction Info from Koios API
+ * Endpoint: POST /tx_info
+ *
+ * We only model the fields we need for delegation backfills.
+ */
+export interface KoiosTxInfoCertificate {
+  type: string;
+  index?: number | null;
+  info?: Record<string, unknown> | null;
+}
+
+export interface KoiosTxInfo {
+  tx_hash: string;
+  epoch_no?: number | null;
+  epoch_slot?: number | null;
+  absolute_slot?: number | null;
+  tx_timestamp?: number | null;
+  certificates?: KoiosTxInfoCertificate[] | null;
+}
+
+/**
+ * DRep Updates from Koios API
+ * Endpoint: GET /drep_updates?_drep_id=<drepId>
+ * Used for DRep lifecycle events (registration, deregistration, updates)
+ */
+export interface KoiosDrepUpdate {
+  drep_id: string;
+  hex?: string | null;
+  has_script?: boolean | null;
+  update_tx_hash: string;
+  cert_index?: number | null;
+  block_time: number; // Unix timestamp
+  /**
+   * Effective action for this DRep Update certificate.
+   * Koios docs: allowed values are "updated" | "registered" | "deregistered".
+   */
+  action?: "updated" | "registered" | "deregistered" | string;
+  deposit?: string | null;
+  meta_url?: string | null;
+  meta_hash?: string | null;
+  meta_json?: {
+    body?: {
+      givenName?: unknown;
+      paymentAddress?: unknown;
+      doNotList?: unknown;
+      image?: {
+        contentUrl?: unknown;
+      };
+    };
+  } | null;
+}
+
+/**
+ * Pool Groups from Koios API
+ * Endpoint: GET /pool_groups
+ * Maps pools to multi-pool operator entities
+ */
+export interface KoiosPoolGroup {
+  pool_id_bech32: string; // Pool ID in bech32 format
+  pool_id_hex?: string | null;
+  pool_group?: string | null; // Shared group identifier (e.g. multi-pool operator tag)
+  ticker?: string | null; // Pool ticker
+  adastat_group?: string | null; // AdaStat entity/group label
+  balanceanalytics_group?: string | null; // BalanceAnalytics entity/group label
+}
+
+/**
+ * Epoch Info from Koios API
+ * Endpoint: GET /epoch_info?_epoch_no=<epoch>
+ * Provides epoch timestamps for wall-clock calculations
+ */
+export interface KoiosEpochInfo {
+  epoch_no: number;
+  out_sum?: string | null;
+  fees?: string | null;
+  tx_count?: number | null;
+  blk_count?: number | null;
+  start_time?: number | null; // Unix timestamp
+  end_time?: number | null; // Unix timestamp
+  first_block_time?: number | null; // Unix timestamp
+  last_block_time?: number | null; // Unix timestamp
+  active_stake?: string | null;
+  total_rewards?: string | null;
+  avg_blk_reward?: string | null;
 }
