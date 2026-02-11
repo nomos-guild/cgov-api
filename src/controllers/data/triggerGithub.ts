@@ -2,14 +2,16 @@ import { Request, Response } from "express";
 import { discoverRepositories } from "../../services/ingestion/github-discovery";
 import { syncActiveRepos, syncModerateRepos, syncDormantRepos, snapshotAllRepos } from "../../services/ingestion/github-activity";
 import { backfillRepositories } from "../../services/ingestion/github-backfill";
+import { aggregateRecentToHistorical, precomputeNetworkGraphs } from "../../services/ingestion/github-aggregation";
 import { cacheInvalidatePrefix } from "../../services/cache";
 
 let discoveryInProgress = false;
 let syncInProgress = false;
 let backfillInProgress = false;
 let snapshotInProgress = false;
+let aggregateInProgress = false;
 
-export const postTriggerDiscovery = async (_req: Request, res: Response) => {
+export const postTriggerGithubDiscovery = async (_req: Request, res: Response) => {
   if (discoveryInProgress) {
     return res.status(429).json({ error: "Discovery already in progress" });
   }
@@ -28,7 +30,7 @@ export const postTriggerDiscovery = async (_req: Request, res: Response) => {
   }
 };
 
-export const postTriggerSync = async (req: Request, res: Response) => {
+export const postTriggerGithubSync = async (req: Request, res: Response) => {
   if (syncInProgress) {
     return res.status(429).json({ error: "Sync already in progress" });
   }
@@ -69,7 +71,7 @@ export const postTriggerSync = async (req: Request, res: Response) => {
   }
 };
 
-export const postTriggerBackfill = async (req: Request, res: Response) => {
+export const postTriggerGithubBackfill = async (req: Request, res: Response) => {
   if (backfillInProgress) {
     return res.status(429).json({ error: "Backfill already in progress" });
   }
@@ -91,7 +93,7 @@ export const postTriggerBackfill = async (req: Request, res: Response) => {
   }
 };
 
-export const postTriggerSnapshot = async (_req: Request, res: Response) => {
+export const postTriggerGithubSnapshot = async (_req: Request, res: Response) => {
   if (snapshotInProgress) {
     return res.status(429).json({ error: "Snapshot already in progress" });
   }
@@ -107,5 +109,27 @@ export const postTriggerSnapshot = async (_req: Request, res: Response) => {
     });
   } finally {
     snapshotInProgress = false;
+  }
+};
+
+export const postTriggerGithubAggregate = async (_req: Request, res: Response) => {
+  if (aggregateInProgress) {
+    return res.status(429).json({ error: "Aggregation already in progress" });
+  }
+  aggregateInProgress = true;
+
+  try {
+    const rollup = await aggregateRecentToHistorical();
+    await precomputeNetworkGraphs();
+    cacheInvalidatePrefix("dev:");
+    res.json({ success: true, result: { rollup } });
+  } catch (error) {
+    console.error("Aggregation failed", error);
+    res.status(500).json({
+      error: "Aggregation failed",
+      message: error instanceof Error ? error.message : "Unknown error",
+    });
+  } finally {
+    aggregateInProgress = false;
   }
 };

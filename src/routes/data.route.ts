@@ -10,10 +10,11 @@ import {
 import { postTriggerSync } from "../controllers/data/triggerSync";
 import { postTriggerVoterSync } from "../controllers/data/triggerVoterSync";
 import {
-  postTriggerDiscovery,
-  postTriggerSync as postTriggerGithubSync,
-  postTriggerBackfill,
-  postTriggerSnapshot,
+  postTriggerGithubDiscovery,
+  postTriggerGithubSync,
+  postTriggerGithubBackfill,
+  postTriggerGithubSnapshot,
+  postTriggerGithubAggregate,
 } from "../controllers/data/triggerGithub";
 import { developmentController } from "../controllers";
 import { postTriggerEpochAnalyticsSync } from "../controllers/data/triggerEpochAnalyticsSync";
@@ -278,7 +279,7 @@ router.get("/github/status", developmentController.getStatus);
  *     responses:
  *       200: { description: Discovery completed }
  */
-router.post("/github/discover", postTriggerDiscovery);
+router.post("/github/discover", postTriggerGithubDiscovery);
 
 /**
  * @openapi
@@ -307,7 +308,7 @@ router.post("/github/sync", postTriggerGithubSync);
  *     responses:
  *       200: { description: Backfill completed }
  */
-router.post("/github/backfill", postTriggerBackfill);
+router.post("/github/backfill", postTriggerGithubBackfill);
 
 /**
  * @openapi
@@ -318,6 +319,17 @@ router.post("/github/backfill", postTriggerBackfill);
  *     responses:
  *       200: { description: Snapshot completed }
  */
-router.post("/github/snapshot", postTriggerSnapshot);
+router.post("/github/snapshot", postTriggerGithubSnapshot);
+
+/**
+ * @openapi
+ * /data/github/aggregate:
+ *   post:
+ *     summary: Manually trigger GitHub aggregation (rollups + network graphs)
+ *     tags: [GitHub Admin]
+ *     responses:
+ *       200: { description: Aggregation completed }
+ */
+router.post("/github/aggregate", postTriggerGithubAggregate);
 
 export default router;

@@ -69,7 +69,8 @@ jobs:
             --set-env-vars="DATABASE_URL=${{ secrets.DATABASE_URL }}" \
             --set-env-vars="MAINNET_BLOCKFROST_API_KEY=${{ secrets.MAINNET_BLOCKFROST_API_KEY }}" \
             --set-env-vars="KOIOS_API_KEY=${{ secrets.KOIOS_API_KEY }}" \
-            --set-env-vars="SERVER_API_KEY=${{ secrets.SERVER_API_KEY }}"
+            --set-env-vars="SERVER_API_KEY=${{ secrets.SERVER_API_KEY }}" \
+            --set-env-vars="GITHUB_TOKEN=${{ secrets.GITHUB_TOKEN }}"
 
       - name: Get Cloud Run Service URL
         id: url
@@ -129,6 +130,71 @@ jobs:
             --time-zone="UTC" \
             --description="Sync DRep delegation changes every hour at minute 40"
 
+      - name: Create/Update GitHub Discovery Scheduler Job
+        run: |
+          gcloud scheduler jobs delete github-discover --location=${{ env.REGION }} --quiet || true
+          gcloud scheduler jobs create http github-discover \
+            --location=${{ env.REGION }} \
+            --schedule="0 3 * * 0" \
+            --uri="${{ steps.url.outputs.url }}/data/github/discover" \
+            --http-method=POST \
+            --headers="X-API-Key=${{ secrets.SERVER_API_KEY }}" \
+            --attempt-deadline=900s \
+            --time-zone="UTC" \
+            --description="Discover GitHub repositories weekly (Sunday 03:00 UTC)"
+
+      - name: Create/Update GitHub Activity Sync Scheduler Job
+        run: |
+          gcloud scheduler jobs delete github-sync --location=${{ env.REGION }} --quiet || true
+          gcloud scheduler jobs create http github-sync \
+            --location=${{ env.REGION }} \
+            --schedule="*/30 * * * *" \
+            --uri="${{ steps.url.outputs.url }}/data/github/sync" \
+            --http-method=POST \
+            --headers="X-API-Key=${{ secrets.SERVER_API_KEY }}" \
+            --attempt-deadline=900s \
+            --time-zone="UTC" \
+            --description="Sync GitHub activity every 30 minutes"
+
+      - name: Create/Update GitHub Backfill Scheduler Job
+        run: |
+          gcloud scheduler jobs delete github-backfill --location=${{ env.REGION }} --quiet || true
+          gcloud scheduler jobs create http github-backfill \
+            --location=${{ env.REGION }} \
+            --schedule="15 * * * *" \
+            --uri="${{ steps.url.outputs.url }}/data/github/backfill" \
+            --http-method=POST \
+            --headers="X-API-Key=${{ secrets.SERVER_API_KEY }}" \
+            --attempt-deadline=900s \
+            --time-zone="UTC" \
+            --description="Backfill GitHub historical data hourly at minute 15"
+
+      - name: Create/Update GitHub Snapshot Scheduler Job
+        run: |
+          gcloud scheduler jobs delete github-snapshot --location=${{ env.REGION }} --quiet || true
+          gcloud scheduler jobs create http github-snapshot \
+            --location=${{ env.REGION }} \
+            --schedule="0 1 * * *" \
+            --uri="${{ steps.url.outputs.url }}/data/github/snapshot" \
+            --http-method=POST \
+            --headers="X-API-Key=${{ secrets.SERVER_API_KEY }}" \
+            --attempt-deadline=900s \
+            --time-zone="UTC" \
+            --description="Snapshot GitHub stars/forks daily (01:00 UTC)"
+
+      - name: Create/Update GitHub Aggregation Scheduler Job
+        run: |
+          gcloud scheduler jobs delete github-aggregate --location=${{ env.REGION }} --quiet || true
+          gcloud scheduler jobs create http github-aggregate \
+            --location=${{ env.REGION }} \
+            --schedule="0 5 * * *" \
+            --uri="${{ steps.url.outputs.url }}/data/github/aggregate" \
+            --http-method=POST \
+            --headers="X-API-Key=${{ secrets.SERVER_API_KEY }}" \
+            --attempt-deadline=900s \
+            --time-zone="UTC" \
+            --description="Aggregate GitHub activity daily (05:00 UTC)"
+
       - name: Deployment Summary
         run: |
           echo "## Deployment Complete" >> $GITHUB_STEP_SUMMARY
@@ -145,3 +211,8 @@ jobs:
           echo "| drep-voter-power-sync | \`0 0 * * *\` | POST /data/trigger-voter-sync |" >> $GITHUB_STEP_SUMMARY
           echo "| epoch-analytics-sync | \`10 * * * *\` | POST /data/trigger-epoch-analytics-sync |" >> $GITHUB_STEP_SUMMARY
           echo "| drep-delegator-sync | \`40 * * * *\` | POST /data/trigger-drep-delegator-sync |" >> $GITHUB_STEP_SUMMARY
+          echo "| github-discover | \`0 3 * * 0\` | POST /data/github/discover |" >> $GITHUB_STEP_SUMMARY
+          echo "| github-sync | \`*/30 * * * *\` | POST /data/github/sync |" >> $GITHUB_STEP_SUMMARY
+          echo "| github-backfill | \`15 * * * *\` | POST /data/github/backfill |" >> $GITHUB_STEP_SUMMARY
+          echo "| github-snapshot | \`0 1 * * *\` | POST /data/github/snapshot |" >> $GITHUB_STEP_SUMMARY
+          echo "| github-aggregate | \`0 5 * * *\` | POST /data/github/aggregate |" >> $GITHUB_STEP_SUMMARY
