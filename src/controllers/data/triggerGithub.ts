@@ -95,23 +95,31 @@ export const postTriggerGithubDiscovery = async (_req: Request, res: Response) =
     });
   }
 
-  try {
-    const result = await discoverRepositories();
-    await releaseJobLock(jobName, "success", result.newRepos + result.updatedRepos);
-    res.json({ success: true, result });
-  } catch (error) {
-    console.error("Discovery failed", error);
-    await releaseJobLock(
-      jobName,
-      "failed",
-      0,
-      error instanceof Error ? error.message : "Unknown error"
-    );
-    res.status(500).json({
-      error: "Discovery failed",
-      message: error instanceof Error ? error.message : "Unknown error",
-    });
-  }
+  // ✅ Respond immediately to avoid Cloud Scheduler timeout
+  res.json({
+    success: true,
+    message: `${displayName} started`,
+    jobName,
+  });
+
+  // ✅ Process asynchronously
+  (async () => {
+    try {
+      const result = await discoverRepositories();
+      await releaseJobLock(jobName, "success", result.newRepos + result.updatedRepos);
+      console.log(`[${jobName}] Completed successfully:`, result);
+    } catch (error) {
+      console.error(`[${jobName}] Failed:`, error);
+      await releaseJobLock(
+        jobName,
+        "failed",
+        0,
+        error instanceof Error ? error.message : "Unknown error"
+      );
+    }
+  })().catch((error) => {
+    console.error(`[${jobName}] Unhandled error in async processing:`, error);
+  });
 };
 
 // ─── GitHub Sync (Tiered) ────────────────────────────────────────────────────
@@ -137,44 +145,52 @@ export const postTriggerGithubSync = async (req: Request, res: Response) => {
     });
   }
 
-  try {
-    let result: any;
-    if (tier === "active") {
-      result = await syncActiveRepos();
-    } else if (tier === "moderate") {
-      result = await syncModerateRepos();
-    } else if (tier === "dormant") {
-      result = await syncDormantRepos();
-    } else {
-      const active = await syncActiveRepos();
-      const moderate = await syncModerateRepos();
-      const dormant = await syncDormantRepos();
-      result = {
-        active,
-        moderate,
-        dormant,
-        total: active.total + moderate.total + dormant.total,
-        success: active.success + moderate.success + dormant.success,
-        failed: active.failed + moderate.failed + dormant.failed,
-      };
-    }
+  // ✅ Respond immediately to avoid Cloud Scheduler timeout
+  res.json({
+    success: true,
+    message: `${displayName} started`,
+    jobName,
+  });
 
-    cacheInvalidatePrefix("dev:");
-    await releaseJobLock(jobName, "success", result.success || 0);
-    res.json({ success: true, result });
-  } catch (error) {
-    console.error("Sync failed", error);
-    await releaseJobLock(
-      jobName,
-      "failed",
-      0,
-      error instanceof Error ? error.message : "Unknown error"
-    );
-    res.status(500).json({
-      error: "Sync failed",
-      message: error instanceof Error ? error.message : "Unknown error",
-    });
-  }
+  // ✅ Process asynchronously (don't await)
+  (async () => {
+    try {
+      let result: any;
+      if (tier === "active") {
+        result = await syncActiveRepos();
+      } else if (tier === "moderate") {
+        result = await syncModerateRepos();
+      } else if (tier === "dormant") {
+        result = await syncDormantRepos();
+      } else {
+        const active = await syncActiveRepos();
+        const moderate = await syncModerateRepos();
+        const dormant = await syncDormantRepos();
+        result = {
+          active,
+          moderate,
+          dormant,
+          total: active.total + moderate.total + dormant.total,
+          success: active.success + moderate.success + dormant.success,
+          failed: active.failed + moderate.failed + dormant.failed,
+        };
+      }
+
+      cacheInvalidatePrefix("dev:");
+      await releaseJobLock(jobName, "success", result.success || 0);
+      console.log(`[${jobName}] Completed successfully:`, result);
+    } catch (error) {
+      console.error(`[${jobName}] Failed:`, error);
+      await releaseJobLock(
+        jobName,
+        "failed",
+        0,
+        error instanceof Error ? error.message : "Unknown error"
+      );
+    }
+  })().catch((error) => {
+    console.error(`[${jobName}] Unhandled error in async processing:`, error);
+  });
 };
 
 // ─── GitHub Backfill ─────────────────────────────────────────────────────────
@@ -194,23 +210,31 @@ export const postTriggerGithubBackfill = async (req: Request, res: Response) => 
   const limit = Math.max(1, parseInt((req.query.limit as string) || "50", 10) || 50);
   const minStars = Math.max(0, parseInt((req.query.minStars as string) || "0", 10) || 0);
 
-  try {
-    const result = await backfillRepositories({ limit, minStars });
-    await releaseJobLock(jobName, "success", result.success);
-    res.json({ success: true, result });
-  } catch (error) {
-    console.error("Backfill failed", error);
-    await releaseJobLock(
-      jobName,
-      "failed",
-      0,
-      error instanceof Error ? error.message : "Unknown error"
-    );
-    res.status(500).json({
-      error: "Backfill failed",
-      message: error instanceof Error ? error.message : "Unknown error",
-    });
-  }
+  // ✅ Respond immediately to avoid Cloud Scheduler timeout
+  res.json({
+    success: true,
+    message: `${displayName} started`,
+    jobName,
+  });
+
+  // ✅ Process asynchronously
+  (async () => {
+    try {
+      const result = await backfillRepositories({ limit, minStars });
+      await releaseJobLock(jobName, "success", result.success);
+      console.log(`[${jobName}] Completed successfully:`, result);
+    } catch (error) {
+      console.error(`[${jobName}] Failed:`, error);
+      await releaseJobLock(
+        jobName,
+        "failed",
+        0,
+        error instanceof Error ? error.message : "Unknown error"
+      );
+    }
+  })().catch((error) => {
+    console.error(`[${jobName}] Unhandled error in async processing:`, error);
+  });
 };
 
 // ─── GitHub Snapshot ─────────────────────────────────────────────────────────
@@ -227,23 +251,31 @@ export const postTriggerGithubSnapshot = async (_req: Request, res: Response) =>
     });
   }
 
-  try {
-    const result = await snapshotAllRepos();
-    await releaseJobLock(jobName, "success", result.success);
-    res.json({ success: true, result });
-  } catch (error) {
-    console.error("Snapshot failed", error);
-    await releaseJobLock(
-      jobName,
-      "failed",
-      0,
-      error instanceof Error ? error.message : "Unknown error"
-    );
-    res.status(500).json({
-      error: "Snapshot failed",
-      message: error instanceof Error ? error.message : "Unknown error",
-    });
-  }
+  // ✅ Respond immediately to avoid Cloud Scheduler timeout
+  res.json({
+    success: true,
+    message: `${displayName} started`,
+    jobName,
+  });
+
+  // ✅ Process asynchronously
+  (async () => {
+    try {
+      const result = await snapshotAllRepos();
+      await releaseJobLock(jobName, "success", result.success);
+      console.log(`[${jobName}] Completed successfully:`, result);
+    } catch (error) {
+      console.error(`[${jobName}] Failed:`, error);
+      await releaseJobLock(
+        jobName,
+        "failed",
+        0,
+        error instanceof Error ? error.message : "Unknown error"
+      );
+    }
+  })().catch((error) => {
+    console.error(`[${jobName}] Unhandled error in async processing:`, error);
+  });
 };
 
 // ─── GitHub Aggregation ──────────────────────────────────────────────────────
@@ -260,23 +292,31 @@ export const postTriggerGithubAggregate = async (_req: Request, res: Response) =
     });
   }
 
-  try {
-    const rollup = await aggregateRecentToHistorical();
-    await precomputeNetworkGraphs();
-    cacheInvalidatePrefix("dev:");
-    await releaseJobLock(jobName, "success", rollup.daysRolledUp);
-    res.json({ success: true, result: { rollup } });
-  } catch (error) {
-    console.error("Aggregation failed", error);
-    await releaseJobLock(
-      jobName,
-      "failed",
-      0,
-      error instanceof Error ? error.message : "Unknown error"
-    );
-    res.status(500).json({
-      error: "Aggregation failed",
-      message: error instanceof Error ? error.message : "Unknown error",
-    });
-  }
+  // ✅ Respond immediately to avoid Cloud Scheduler timeout
+  res.json({
+    success: true,
+    message: `${displayName} started`,
+    jobName,
+  });
+
+  // ✅ Process asynchronously
+  (async () => {
+    try {
+      const rollup = await aggregateRecentToHistorical();
+      await precomputeNetworkGraphs();
+      cacheInvalidatePrefix("dev:");
+      await releaseJobLock(jobName, "success", rollup.daysRolledUp);
+      console.log(`[${jobName}] Completed successfully:`, { rollup });
+    } catch (error) {
+      console.error(`[${jobName}] Failed:`, error);
+      await releaseJobLock(
+        jobName,
+        "failed",
+        0,
+        error instanceof Error ? error.message : "Unknown error"
+      );
+    }
+  })().catch((error) => {
+    console.error(`[${jobName}] Unhandled error in async processing:`, error);
+  });
 };
