@@ -48,9 +48,9 @@ interface GraphQLResponse<T = Record<string, unknown>> {
 // ─── Core Client ─────────────────────────────────────────────────────────────
 
 function getToken(): string {
-  const token = process.env.GITHUB_TOKEN;
+  const token = process.env.GH_API_TOKEN;
   if (!token) {
-    throw new Error("GITHUB_TOKEN environment variable is not set");
+    throw new Error("GH_API_TOKEN environment variable is not set");
   }
   return token;
 }

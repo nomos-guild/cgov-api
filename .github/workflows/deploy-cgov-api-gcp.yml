@@ -70,7 +70,7 @@ jobs:
             --set-env-vars="MAINNET_BLOCKFROST_API_KEY=${{ secrets.MAINNET_BLOCKFROST_API_KEY }}" \
             --set-env-vars="KOIOS_API_KEY=${{ secrets.KOIOS_API_KEY }}" \
             --set-env-vars="SERVER_API_KEY=${{ secrets.SERVER_API_KEY }}" \
-            --set-env-vars="GITHUB_TOKEN=${{ secrets.GITHUB_TOKEN }}"
+            --set-env-vars="GH_API_TOKEN=${{ secrets.GH_API_TOKEN }}"
 
       - name: Get Cloud Run Service URL
         id: url
