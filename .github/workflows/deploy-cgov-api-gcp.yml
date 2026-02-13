@@ -143,31 +143,68 @@ jobs:
             --time-zone="UTC" \
             --description="Discover GitHub repositories weekly (Sunday 03:00 UTC)"
 
-      - name: Create/Update GitHub Activity Sync Scheduler Job
+      - name: Delete Old Unified Sync Job (if exists)
         run: |
           gcloud scheduler jobs delete github-sync --location=${{ env.REGION }} --quiet || true
-          gcloud scheduler jobs create http github-sync \
+
+      - name: Create/Update GitHub Active Repos Sync Job
+        run: |
+          gcloud scheduler jobs delete github-sync-active --location=${{ env.REGION }} --quiet || true
+          gcloud scheduler jobs create http github-sync-active \
             --location=${{ env.REGION }} \
             --schedule="*/30 * * * *" \
-            --uri="${{ steps.url.outputs.url }}/data/github/sync" \
+            --uri="${{ steps.url.outputs.url }}/data/github/sync?tier=active" \
+            --http-method=POST \
+            --headers="X-API-Key=${{ secrets.SERVER_API_KEY }}" \
+            --attempt-deadline=600s \
+            --max-retry-attempts=2 \
+            --max-backoff=300s \
+            --time-zone="UTC" \
+            --description="Sync active GitHub repos (326 repos) every 30 minutes"
+
+      - name: Create/Update GitHub Moderate Repos Sync Job
+        run: |
+          gcloud scheduler jobs delete github-sync-moderate --location=${{ env.REGION }} --quiet || true
+          gcloud scheduler jobs create http github-sync-moderate \
+            --location=${{ env.REGION }} \
+            --schedule="0 */4 * * *" \
+            --uri="${{ steps.url.outputs.url }}/data/github/sync?tier=moderate" \
+            --http-method=POST \
+            --headers="X-API-Key=${{ secrets.SERVER_API_KEY }}" \
+            --attempt-deadline=600s \
+            --max-retry-attempts=2 \
+            --max-backoff=300s \
+            --time-zone="UTC" \
+            --description="Sync moderate GitHub repos (519 repos) every 4 hours"
+
+      - name: Create/Update GitHub Dormant Repos Sync Job
+        run: |
+          gcloud scheduler jobs delete github-sync-dormant --location=${{ env.REGION }} --quiet || true
+          gcloud scheduler jobs create http github-sync-dormant \
+            --location=${{ env.REGION }} \
+            --schedule="0 5 * * 0" \
+            --uri="${{ steps.url.outputs.url }}/data/github/sync?tier=dormant" \
             --http-method=POST \
             --headers="X-API-Key=${{ secrets.SERVER_API_KEY }}" \
             --attempt-deadline=900s \
+            --max-retry-attempts=1 \
             --time-zone="UTC" \
-            --description="Sync GitHub activity every 30 minutes"
+            --description="Sync dormant GitHub repos (2982 repos) weekly on Sunday at 5am UTC"
 
       - name: Create/Update GitHub Backfill Scheduler Job
         run: |
           gcloud scheduler jobs delete github-backfill --location=${{ env.REGION }} --quiet || true
           gcloud scheduler jobs create http github-backfill \
             --location=${{ env.REGION }} \
-            --schedule="15 * * * *" \
-            --uri="${{ steps.url.outputs.url }}/data/github/backfill" \
+            --schedule="15 */2 * * *" \
+            --uri="${{ steps.url.outputs.url }}/data/github/backfill?limit=10&minStars=0" \
             --http-method=POST \
             --headers="X-API-Key=${{ secrets.SERVER_API_KEY }}" \
-            --attempt-deadline=900s \
+            --attempt-deadline=600s \
+            --max-retry-attempts=2 \
+            --max-backoff=300s \
             --time-zone="UTC" \
-            --description="Backfill GitHub historical data hourly at minute 15"
+            --description="Backfill GitHub historical data (10 repos/batch) every 2 hours at minute 15"
 
       - name: Create/Update GitHub Snapshot Scheduler Job
         run: |
@@ -178,9 +215,10 @@ jobs:
             --uri="${{ steps.url.outputs.url }}/data/github/snapshot" \
             --http-method=POST \
             --headers="X-API-Key=${{ secrets.SERVER_API_KEY }}" \
-            --attempt-deadline=900s \
+            --attempt-deadline=1800s \
+            --max-retry-attempts=1 \
             --time-zone="UTC" \
-            --description="Snapshot GitHub stars/forks daily (01:00 UTC)"
+            --description="Snapshot GitHub stars/forks daily (01:00 UTC) - ~3827 repos in ~77 batches"
 
       - name: Create/Update GitHub Aggregation Scheduler Job
         run: |
@@ -212,7 +250,9 @@ jobs:
           echo "| epoch-analytics-sync | \`10 * * * *\` | POST /data/trigger-epoch-analytics-sync |" >> $GITHUB_STEP_SUMMARY
           echo "| drep-delegator-sync | \`40 * * * *\` | POST /data/trigger-drep-delegator-sync |" >> $GITHUB_STEP_SUMMARY
           echo "| github-discover | \`0 3 * * 0\` | POST /data/github/discover |" >> $GITHUB_STEP_SUMMARY
-          echo "| github-sync | \`*/30 * * * *\` | POST /data/github/sync |" >> $GITHUB_STEP_SUMMARY
-          echo "| github-backfill | \`15 * * * *\` | POST /data/github/backfill |" >> $GITHUB_STEP_SUMMARY
+          echo "| github-sync-active | \`*/30 * * * *\` | POST /data/github/sync?tier=active |" >> $GITHUB_STEP_SUMMARY
+          echo "| github-sync-moderate | \`0 */4 * * *\` | POST /data/github/sync?tier=moderate |" >> $GITHUB_STEP_SUMMARY
+          echo "| github-sync-dormant | \`0 5 * * 0\` | POST /data/github/sync?tier=dormant |" >> $GITHUB_STEP_SUMMARY
+          echo "| github-backfill | \`15 */2 * * *\` | POST /data/github/backfill?limit=10 |" >> $GITHUB_STEP_SUMMARY
           echo "| github-snapshot | \`0 1 * * *\` | POST /data/github/snapshot |" >> $GITHUB_STEP_SUMMARY
           echo "| github-aggregate | \`0 5 * * *\` | POST /data/github/aggregate |" >> $GITHUB_STEP_SUMMARY
