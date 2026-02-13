@@ -5,6 +5,11 @@
 
 import { startProposalSyncJob } from "./sync-proposals.job";
 import { startVoterPowerSyncJob } from "./sync-voter-power.job";
+import { startDiscoverGithubJob } from "./discover-github.job";
+import { startSyncGithubActivityJob } from "./sync-github-activity.job";
+import { startAggregateGithubJob } from "./aggregate-github.job";
+import { startBackfillGithubJob } from "./backfill-github.job";
+import { startSnapshotGithubJob } from "./snapshot-github.job";
 import { startEpochAnalyticsSyncJob } from "./sync-epoch-analytics.job";
 import { startDrepDelegatorSyncJob } from "./sync-drep-delegators.job";
 
@@ -21,16 +26,26 @@ export const startAllJobs = () => {
   // Start voter power sync job (DRep and SPO voting power updates)
   startVoterPowerSyncJob();
 
+  // Start GitHub discovery job (weekly)
+  startDiscoverGithubJob();
+
+  // Start GitHub activity sync job (every 30 min)
+  startSyncGithubActivityJob();
+
+  // Start GitHub aggregation job (daily)
+  startAggregateGithubJob();
+
+  // Start GitHub backfill job (hourly, until all repos are backfilled)
+  startBackfillGithubJob();
+
+  // Start GitHub daily snapshot job (stars/forks for all repos)
+  startSnapshotGithubJob();
+
   // Start governance analytics epoch sync job (DRep inventory + epoch snapshots)
   startEpochAnalyticsSyncJob();
 
   // Start DRep delegation change sync job
   startDrepDelegatorSyncJob();
-
-  // Add more jobs here as needed
-  // Example:
-  // startVoteCleanupJob();
-  // startMetricsJob();
 
   console.log("[Cron] All cron jobs initialized");
 };
