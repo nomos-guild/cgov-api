@@ -1,16 +1,15 @@
 /**
  * Backfill DrepEpochSnapshot table with historical data.
  *
- * For each DRep, fetches the full voting power history from Koios
- * /drep_voting_power_history (returns all epochs in one paginated call).
+ * Phase 1: Ensure EpochTotals rows have startTime for epoch→date mapping.
+ * Phase 2: Fetch voting power history from Koios and create snapshot rows
+ *          (delegatorCount set to 0 as placeholder).
+ * Phase 3: Reconstruct exact historical delegator counts from the
+ *          StakeDelegationChange log (pure DB, no API calls).
  *
- * Delegator counts: Koios /drep_delegators per epoch per DRep is prohibitively
- * expensive (N DReps × M epochs). As a fallback we use the current delegatorCount
- * from the local Drep table for all epochs. TODO: Improve with historical
- * delegator counts once a cheaper data source is available.
- *
- * Also ensures EpochTotals rows exist with startTime for epochs 507+ so that
- * the /dreps/:drepId/history endpoint can map epochs to dates.
+ * Prerequisites:
+ *   - The DRep delegation sync (syncDrepDelegationChanges) must have completed
+ *     at least one full run so that StakeDelegationChange records exist.
  *
  * Usage:
  *   npx ts-node src/scripts/backfill-drep-snapshots.ts
@@ -21,12 +20,19 @@ import { prisma } from "../services/prisma";
 import { koiosGet } from "../services/koios";
 import { withRetry } from "../services/ingestion/utils";
 import { processInParallel } from "../services/ingestion/parallel";
-import type { KoiosDrepVotingPower, KoiosEpochInfo } from "../types/koios.types";
-import { getKoiosCurrentEpoch, chunkArray } from "../services/ingestion/sync-utils";
+import type {
+  KoiosDrepVotingPower,
+  KoiosEpochInfo,
+} from "../types/koios.types";
+import {
+  getKoiosCurrentEpoch,
+  chunkArray,
+} from "../services/ingestion/sync-utils";
 
 // Conway era started at epoch 507 — no DReps before that
 const CONWAY_START_EPOCH = 507;
-const BACKFILL_CONCURRENCY = 3;
+const VOTING_POWER_CONCURRENCY = 3;
+const DELEGATOR_CONCURRENCY = 5;
 const DB_CHUNK_SIZE = 500;
 const KOIOS_PAGE_SIZE = 1000;
 
@@ -36,7 +42,6 @@ const KOIOS_PAGE_SIZE = 1000;
 
 /**
  * Fetches ALL voting power history entries for a single DRep across all epochs.
- * Koios /drep_voting_power_history with only _drep_id returns all epochs.
  * Pages through the result set (PostgREST max 1000 per page).
  */
 async function fetchVotingPowerHistory(
@@ -68,8 +73,7 @@ async function fetchVotingPowerHistory(
 }
 
 /**
- * Fetches epoch info from Koios for a range of epochs.
- * Used to backfill EpochTotals.startTime for epoch→date mapping.
+ * Fetches epoch info from Koios for a single epoch.
  */
 async function fetchEpochInfo(epochNo: number): Promise<KoiosEpochInfo | null> {
   try {
@@ -83,100 +87,14 @@ async function fetchEpochInfo(epochNo: number): Promise<KoiosEpochInfo | null> {
 }
 
 // ============================================================
-// Main
+// Phase 1: Epoch Timestamps
 // ============================================================
 
-async function main() {
-  console.log("[Backfill] Starting DRep epoch snapshot backfill...");
-
-  const currentEpoch = await getKoiosCurrentEpoch();
-  console.log(`[Backfill] Current epoch: ${currentEpoch}`);
-
-  // Step 1: Ensure EpochTotals rows exist with startTime for epochs 507+
+async function phase1EpochTimestamps(currentEpoch: number) {
   console.log(
-    `[Backfill] Step 1: Ensuring EpochTotals rows exist for epochs ${CONWAY_START_EPOCH}–${currentEpoch}...`
-  );
-  await backfillEpochTimestamps(currentEpoch);
-
-  // Step 2: Fetch all DRep IDs and their current delegator counts from the DB
-  const dreps = await prisma.drep.findMany({
-    select: { drepId: true, delegatorCount: true },
-    orderBy: { drepId: "asc" },
-  });
-  console.log(`[Backfill] Found ${dreps.length} DReps in database`);
-
-  // Step 3: For each DRep, fetch voting power history and upsert snapshots
-  console.log(
-    `[Backfill] Step 2: Fetching voting power history and creating snapshots (concurrency=${BACKFILL_CONCURRENCY})...`
+    `[Phase 1] Ensuring EpochTotals rows exist for epochs ${CONWAY_START_EPOCH}–${currentEpoch}...`
   );
 
-  let totalSnapshotted = 0;
-  let totalDrepsProcessed = 0;
-
-  const result = await processInParallel(
-    dreps,
-    (d) => d.drepId,
-    async (drep) => {
-      const history = await fetchVotingPowerHistory(drep.drepId);
-
-      // Filter to Conway era epochs only
-      const conwayHistory = history.filter(
-        (h) => h.epoch_no >= CONWAY_START_EPOCH && h.epoch_no <= currentEpoch
-      );
-
-      if (conwayHistory.length === 0) {
-        return { drepId: drep.drepId, snapshotted: 0 };
-      }
-
-      // Use current delegatorCount as fallback for all epochs
-      // TODO: Improve with per-epoch delegator counts from a cheaper source
-      const delegatorCount = drep.delegatorCount ?? 0;
-
-      const snapshotData = conwayHistory.map((h) => ({
-        drepId: drep.drepId,
-        epoch: h.epoch_no,
-        delegatorCount,
-        votingPower: BigInt(h.amount),
-      }));
-
-      let snapshotted = 0;
-      const chunks = chunkArray(snapshotData, DB_CHUNK_SIZE);
-      for (const chunk of chunks) {
-        const result = await prisma.drepEpochSnapshot.createMany({
-          data: chunk,
-          skipDuplicates: true,
-        });
-        snapshotted += result.count;
-      }
-
-      totalDrepsProcessed++;
-      totalSnapshotted += snapshotted;
-
-      if (totalDrepsProcessed % 50 === 0) {
-        console.log(
-          `[Backfill] Progress: ${totalDrepsProcessed}/${dreps.length} DReps, ${totalSnapshotted} snapshots inserted`
-        );
-      }
-
-      return { drepId: drep.drepId, snapshotted };
-    },
-    BACKFILL_CONCURRENCY
-  );
-
-  console.log(
-    `[Backfill] Complete: ${result.successful.length} DReps processed, ${totalSnapshotted} snapshots inserted, ${result.failed.length} failures`
-  );
-
-  if (result.failed.length > 0) {
-    console.error(
-      "[Backfill] Failed DReps:",
-      result.failed.slice(0, 20)
-    );
-  }
-}
-
-async function backfillEpochTimestamps(currentEpoch: number) {
-  // Find epochs that are missing startTime in EpochTotals
   const allEpochs: number[] = [];
   for (let e = CONWAY_START_EPOCH; e <= currentEpoch; e++) {
     allEpochs.push(e);
@@ -193,15 +111,15 @@ async function backfillEpochTimestamps(currentEpoch: number) {
   const missingEpochs = allEpochs.filter((e) => !existingSet.has(e));
 
   if (missingEpochs.length === 0) {
-    console.log("[Backfill] All epoch timestamps already present");
+    console.log("[Phase 1] All epoch timestamps already present");
     return;
   }
 
   console.log(
-    `[Backfill] Backfilling epoch timestamps for ${missingEpochs.length} epochs...`
+    `[Phase 1] Backfilling timestamps for ${missingEpochs.length} epochs...`
   );
 
-  const epochResult = await processInParallel(
+  const result = await processInParallel(
     missingEpochs,
     (e) => `${e}`,
     async (epochNo) => {
@@ -240,12 +158,259 @@ async function backfillEpochTimestamps(currentEpoch: number) {
 
       return epochNo;
     },
-    BACKFILL_CONCURRENCY
+    VOTING_POWER_CONCURRENCY
   );
 
   console.log(
-    `[Backfill] Epoch timestamps: ${epochResult.successful.length} synced, ${epochResult.failed.length} failed`
+    `[Phase 1] Done: ${result.successful.length} synced, ${result.failed.length} failed`
   );
+}
+
+// ============================================================
+// Phase 2: Voting Power Snapshots (delegatorCount = 0 placeholder)
+// ============================================================
+
+async function phase2VotingPowerSnapshots(currentEpoch: number) {
+  const dreps = await prisma.drep.findMany({
+    select: { drepId: true },
+    orderBy: { drepId: "asc" },
+  });
+  console.log(
+    `[Phase 2] Fetching voting power history for ${dreps.length} DReps (concurrency=${VOTING_POWER_CONCURRENCY})...`
+  );
+
+  let totalSnapshotted = 0;
+  let totalDrepsProcessed = 0;
+
+  const result = await processInParallel(
+    dreps,
+    (d) => d.drepId,
+    async (drep) => {
+      const history = await fetchVotingPowerHistory(drep.drepId);
+
+      const conwayHistory = history.filter(
+        (h) => h.epoch_no >= CONWAY_START_EPOCH && h.epoch_no <= currentEpoch
+      );
+
+      if (conwayHistory.length === 0) {
+        return { drepId: drep.drepId, snapshotted: 0 };
+      }
+
+      // delegatorCount = 0 as placeholder; Phase 3 will fill actual values
+      const snapshotData = conwayHistory.map((h) => ({
+        drepId: drep.drepId,
+        epoch: h.epoch_no,
+        delegatorCount: 0,
+        votingPower: BigInt(h.amount),
+      }));
+
+      let snapshotted = 0;
+      const chunks = chunkArray(snapshotData, DB_CHUNK_SIZE);
+      for (const chunk of chunks) {
+        const res = await prisma.drepEpochSnapshot.createMany({
+          data: chunk,
+          skipDuplicates: true,
+        });
+        snapshotted += res.count;
+      }
+
+      totalDrepsProcessed++;
+      totalSnapshotted += snapshotted;
+
+      if (totalDrepsProcessed % 50 === 0) {
+        console.log(
+          `[Phase 2] Progress: ${totalDrepsProcessed}/${dreps.length} DReps, ${totalSnapshotted} snapshots inserted`
+        );
+      }
+
+      return { drepId: drep.drepId, snapshotted };
+    },
+    VOTING_POWER_CONCURRENCY
+  );
+
+  console.log(
+    `[Phase 2] Done: ${result.successful.length} DReps processed, ${totalSnapshotted} snapshots inserted, ${result.failed.length} failures`
+  );
+
+  if (result.failed.length > 0) {
+    console.error(
+      "[Phase 2] Failed DReps:",
+      result.failed.slice(0, 20)
+    );
+  }
+}
+
+// ============================================================
+// Phase 3: Exact Delegator Counts from StakeDelegationChange
+// ============================================================
+
+/**
+ * Reconstructs exact historical delegator counts from the StakeDelegationChange
+ * log. For each DRep, incoming delegations (+1) and outgoing delegations (-1)
+ * are aggregated per epoch into a running sum = exact delegator count.
+ */
+async function phase3ExactDelegatorCounts() {
+  // Find DReps with snapshots that still have placeholder delegator counts
+  const needsUpdate: Array<{ drep_id: string }> = await prisma.$queryRaw`
+    SELECT "drep_id"
+    FROM "drep_epoch_snapshot"
+    GROUP BY "drep_id"
+    HAVING COUNT(DISTINCT "delegator_count") = 1
+  `;
+
+  if (needsUpdate.length === 0) {
+    console.log("[Phase 3] All DReps already have varied delegator counts — skipping");
+    return;
+  }
+
+  // Check that StakeDelegationChange data exists
+  const changeCount = await prisma.stakeDelegationChange.count();
+  if (changeCount === 0) {
+    console.error(
+      "[Phase 3] No StakeDelegationChange records found. " +
+      "Run the DRep delegation sync (syncDrepDelegationChanges) first."
+    );
+    return;
+  }
+
+  console.log(
+    `[Phase 3] Reconstructing delegator counts for ${needsUpdate.length} DReps ` +
+    `from ${changeCount} delegation change records (concurrency=${DELEGATOR_CONCURRENCY})...`
+  );
+
+  let totalUpdated = 0;
+  let drepsProcessed = 0;
+  let drepsSkippedNoData = 0;
+
+  const result = await processInParallel(
+    needsUpdate,
+    (d) => d.drep_id,
+    async (row) => {
+      const drepId = row.drep_id;
+
+      // Get snapshot epochs for this DRep
+      const snapshots = await prisma.drepEpochSnapshot.findMany({
+        where: { drepId },
+        select: { id: true, epoch: true },
+        orderBy: { epoch: "asc" },
+      });
+
+      if (snapshots.length === 0) {
+        drepsProcessed++;
+        return { drepId, updated: 0 };
+      }
+
+      // Incoming delegations: someone delegated TO this DRep → +1
+      const incoming = await prisma.stakeDelegationChange.findMany({
+        where: { toDrepId: drepId },
+        select: { delegatedEpoch: true },
+      });
+
+      // Outgoing delegations: someone left this DRep → -1
+      const outgoing = await prisma.stakeDelegationChange.findMany({
+        where: { fromDrepId: drepId },
+        select: { delegatedEpoch: true },
+      });
+
+      if (incoming.length === 0 && outgoing.length === 0) {
+        drepsProcessed++;
+        drepsSkippedNoData++;
+        return { drepId, updated: 0 };
+      }
+
+      // Build epoch → net delta map
+      const deltaByEpoch = new Map<number, number>();
+      for (const { delegatedEpoch } of incoming) {
+        if (delegatedEpoch < 0) continue; // skip -1 sentinel (unknown epoch)
+        deltaByEpoch.set(
+          delegatedEpoch,
+          (deltaByEpoch.get(delegatedEpoch) ?? 0) + 1
+        );
+      }
+      for (const { delegatedEpoch } of outgoing) {
+        if (delegatedEpoch < 0) continue;
+        deltaByEpoch.set(
+          delegatedEpoch,
+          (deltaByEpoch.get(delegatedEpoch) ?? 0) - 1
+        );
+      }
+
+      // Sort by epoch and compute running cumulative sum
+      const sortedEpochs = Array.from(deltaByEpoch.keys()).sort((a, b) => a - b);
+      const cumulativeAtEpoch = new Map<number, number>();
+      let running = 0;
+      for (const epoch of sortedEpochs) {
+        running += deltaByEpoch.get(epoch)!;
+        cumulativeAtEpoch.set(epoch, running);
+      }
+
+      // For each snapshot epoch, find the delegator count
+      // (the cumulative value at the latest delta epoch <= snapshot epoch)
+      let updated = 0;
+      for (const snap of snapshots) {
+        let count = 0;
+        for (const epoch of sortedEpochs) {
+          if (epoch > snap.epoch) break;
+          count = cumulativeAtEpoch.get(epoch)!;
+        }
+        // Guard against negative counts from incomplete data
+        count = Math.max(0, count);
+
+        await prisma.drepEpochSnapshot.update({
+          where: { id: snap.id },
+          data: { delegatorCount: count },
+        });
+        updated++;
+      }
+
+      drepsProcessed++;
+      totalUpdated += updated;
+
+      if (drepsProcessed % 50 === 0) {
+        console.log(
+          `[Phase 3] Progress: ${drepsProcessed}/${needsUpdate.length} DReps, ${totalUpdated} rows updated`
+        );
+      }
+
+      return { drepId, updated };
+    },
+    DELEGATOR_CONCURRENCY
+  );
+
+  console.log(
+    `[Phase 3] Done: ${result.successful.length} DReps processed, ` +
+    `${totalUpdated} snapshot rows updated, ` +
+    `${drepsSkippedNoData} DReps skipped (no change data), ` +
+    `${result.failed.length} failures`
+  );
+
+  if (drepsSkippedNoData > 0) {
+    console.warn(
+      `[Phase 3] ${drepsSkippedNoData} DReps had no StakeDelegationChange records. ` +
+      `Their delegator counts remain at 0. Ensure the delegation sync has completed a full run.`
+    );
+  }
+
+  if (result.failed.length > 0) {
+    console.error("[Phase 3] Failed DReps:", result.failed.slice(0, 20));
+  }
+}
+
+// ============================================================
+// Main
+// ============================================================
+
+async function main() {
+  console.log("[Backfill] Starting DRep epoch snapshot backfill...");
+
+  const currentEpoch = await getKoiosCurrentEpoch();
+  console.log(`[Backfill] Current epoch: ${currentEpoch}`);
+
+  await phase1EpochTimestamps(currentEpoch);
+  await phase2VotingPowerSnapshots(currentEpoch);
+  await phase3ExactDelegatorCounts();
+
+  console.log("[Backfill] All phases complete.");
 }
 
 main()

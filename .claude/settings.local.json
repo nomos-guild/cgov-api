@@ -35,7 +35,8 @@
       "mcp__cgov-api-project__get_environment_variables",
       "mcp__cgov-api-project__get_deployment_info",
       "mcp__cgov-api-project__search_project_knowledge",
-      "Bash(curl:*)"
+      "Bash(curl:*)",
+      "Bash(gh issue view:*)"
     ],
     "deny": []
   },
