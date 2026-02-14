@@ -20,8 +20,10 @@ import { getKoiosCurrentEpoch } from "./sync-utils";
 export {
   syncAllDrepsInventory,
   syncAllDrepsInfo,
+  snapshotDrepEpoch,
   type SyncDrepInventoryResult,
   type SyncDrepInfoResult,
+  type SnapshotDrepEpochResult,
 } from "./drep-sync.service";
 
 // Re-export from epoch-totals.service (includes epoch timestamps)
@@ -55,7 +57,7 @@ export {
 } from "./pool-groups.service";
 
 // Import for orchestration
-import { syncAllDrepsInventory, syncAllDrepsInfo, type SyncDrepInventoryResult, type SyncDrepInfoResult } from "./drep-sync.service";
+import { syncAllDrepsInventory, syncAllDrepsInfo, snapshotDrepEpoch, type SyncDrepInventoryResult, type SyncDrepInfoResult, type SnapshotDrepEpochResult } from "./drep-sync.service";
 import { syncEpochTotals, type SyncEpochTotalsResult } from "./epoch-totals.service";
 import { syncDrepLifecycleEvents, type SyncDrepLifecycleResult } from "./drep-lifecycle.service";
 import { syncPoolGroups, type SyncPoolGroupsResult } from "./pool-groups.service";
@@ -69,12 +71,14 @@ export interface SyncGovernanceAnalyticsEpochResult {
   currentEpoch: number;
   dreps?: SyncDrepInventoryResult;
   drepInfo?: SyncDrepInfoResult;
+  drepSnapshot?: SnapshotDrepEpochResult;
   totals?: SyncEpochTotalsResult; // Now includes epoch timestamps
   drepLifecycle?: SyncDrepLifecycleResult;
   poolGroups?: SyncPoolGroupsResult;
   skipped: {
     dreps: boolean;
     drepInfo: boolean;
+    drepSnapshot: boolean;
     totals: boolean;
     drepLifecycle: boolean;
     poolGroups: boolean;
@@ -110,6 +114,7 @@ async function syncGovernanceAnalyticsForEpoch(
       skipped: {
         dreps: true,
         drepInfo: true,
+        drepSnapshot: true,
         totals: true,
         drepLifecycle: true,
         poolGroups: true,
@@ -130,6 +135,7 @@ async function syncGovernanceAnalyticsForEpoch(
     skipped: {
       dreps: !!state.drepsSyncedAt,
       drepInfo: !!state.drepInfoSyncedAt,
+      drepSnapshot: !!state.drepSnapshotSyncedAt,
       totals: !!state.totalsSyncedAt,
       drepLifecycle: !!state.drepLifecycleSyncedAt,
       poolGroups: !!state.poolGroupsSyncedAt,
@@ -154,7 +160,16 @@ async function syncGovernanceAnalyticsForEpoch(
     });
   }
 
-  // 3) Epoch denominators/totals + timestamps (from /totals, /drep_epoch_summary, /epoch_info)
+  // 3) DRep epoch snapshot (delegatorCount + votingPower for every DRep)
+  if (!state.drepSnapshotSyncedAt) {
+    res.drepSnapshot = await snapshotDrepEpoch(prisma, epochToSync);
+    await prisma.epochAnalyticsSync.update({
+      where: { epoch: epochToSync },
+      data: { drepSnapshotSyncedAt: new Date() },
+    });
+  }
+
+  // 4) Epoch denominators/totals + timestamps (from /totals, /drep_epoch_summary, /epoch_info)
   if (!state.totalsSyncedAt) {
     res.totals = await syncEpochTotals(prisma, epochToSync);
     await prisma.epochAnalyticsSync.update({
@@ -163,7 +178,7 @@ async function syncGovernanceAnalyticsForEpoch(
     });
   }
 
-  // 4) DRep lifecycle events (registrations, deregistrations, updates)
+  // 5) DRep lifecycle events (registrations, deregistrations, updates)
   if (!state.drepLifecycleSyncedAt) {
     res.drepLifecycle = await syncDrepLifecycleEvents(prisma);
     // Mark checkpoint if we successfully talked to Koios (i.e., fetched any updates)
@@ -188,7 +203,7 @@ async function syncGovernanceAnalyticsForEpoch(
     }
   }
 
-  // 5) Pool groups (multi-pool operator mappings)
+  // 6) Pool groups (multi-pool operator mappings)
   if (!state.poolGroupsSyncedAt) {
     res.poolGroups = await syncPoolGroups(prisma);
     await prisma.epochAnalyticsSync.update({

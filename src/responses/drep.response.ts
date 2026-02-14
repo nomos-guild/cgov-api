@@ -81,6 +81,16 @@ export interface GetDRepDetailResponse {
   proposalParticipationPercent: number;
   /** Number of delegators to this DRep */
   delegatorCount: number | null;
+  /** CIP-119: Short biography */
+  bio: string | null;
+  /** CIP-119: Motivations for becoming a DRep */
+  motivations: string | null;
+  /** CIP-119: Goals and objectives */
+  objectives: string | null;
+  /** CIP-119: Relevant qualifications */
+  qualifications: string | null;
+  /** CIP-119: References (JSON string of array) */
+  references: string | null;
 }
 
 /**
@@ -119,4 +129,28 @@ export interface GetDRepVotesResponse {
     totalItems: number;
     totalPages: number;
   };
+}
+
+/**
+ * Single data point in DRep history time series
+ */
+export interface DRepHistoryDataPoint {
+  /** Epoch number */
+  epoch: number;
+  /** Epoch start date (ISO string) */
+  date: string | null;
+  /** Delegator count at this epoch */
+  delegatorCount: number;
+  /** Voting power in lovelace (as string for BigInt serialization) */
+  votingPower: string;
+  /** Voting power in ADA */
+  votingPowerAda: string;
+}
+
+/**
+ * DRep history time series for line charts
+ */
+export interface GetDRepHistoryResponse {
+  drepId: string;
+  history: DRepHistoryDataPoint[];
 }

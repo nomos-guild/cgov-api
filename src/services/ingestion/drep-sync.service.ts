@@ -76,12 +76,19 @@ async function fetchAllKoiosDrepIds(): Promise<string[]> {
 /**
  * Fetches DRep metadata (name, paymentAddr, iconUrl, doNotList) from /drep_updates.
  */
-async function fetchDrepMetadata(drepId: string): Promise<{
+interface DrepMetadata {
   name?: string;
   paymentAddr?: string;
   iconUrl?: string;
   doNotList?: boolean;
-}> {
+  bio?: string;
+  motivations?: string;
+  objectives?: string;
+  qualifications?: string;
+  references?: string;
+}
+
+async function fetchDrepMetadata(drepId: string): Promise<DrepMetadata> {
   try {
     const drepUpdates = await withRetry(() =>
       koiosGet<
@@ -94,6 +101,11 @@ async function fetchDrepMetadata(drepId: string): Promise<{
               image?: {
                 contentUrl?: unknown;
               };
+              bio?: unknown;
+              motivations?: unknown;
+              objectives?: unknown;
+              qualifications?: unknown;
+              references?: unknown;
             };
           } | null;
         }>
@@ -104,6 +116,11 @@ async function fetchDrepMetadata(drepId: string): Promise<{
     let paymentAddr: string | undefined;
     let iconUrl: string | undefined;
     let doNotList: boolean | undefined;
+    let bio: string | undefined;
+    let motivations: string | undefined;
+    let objectives: string | undefined;
+    let qualifications: string | undefined;
+    let references: string | undefined;
 
     for (const update of drepUpdates || []) {
       const body = update.meta_json?.body;
@@ -121,13 +138,38 @@ async function fetchDrepMetadata(drepId: string): Promise<{
       if (doNotList === undefined && body.doNotList !== undefined) {
         doNotList = extractBooleanField(body.doNotList);
       }
+      if (!bio && body.bio !== undefined) {
+        bio = extractStringField(body.bio);
+      }
+      if (!motivations && body.motivations !== undefined) {
+        motivations = extractStringField(body.motivations);
+      }
+      if (!objectives && body.objectives !== undefined) {
+        objectives = extractStringField(body.objectives);
+      }
+      if (!qualifications && body.qualifications !== undefined) {
+        qualifications = extractStringField(body.qualifications);
+      }
+      if (!references && body.references !== undefined) {
+        // references can be an array of objects; store as JSON string
+        if (typeof body.references === "string") {
+          references = body.references;
+        } else if (body.references != null) {
+          try {
+            references = JSON.stringify(body.references);
+          } catch {
+            // skip if not serializable
+          }
+        }
+      }
 
-      if (name && paymentAddr && iconUrl && doNotList !== undefined) {
+      if (name && paymentAddr && iconUrl && doNotList !== undefined &&
+          bio && motivations && objectives && qualifications && references) {
         break;
       }
     }
 
-    return { name, paymentAddr, iconUrl, doNotList };
+    return { name, paymentAddr, iconUrl, doNotList, bio, motivations, objectives, qualifications, references };
   } catch {
     return {};
   }
@@ -351,6 +393,12 @@ export async function syncAllDrepsInfo(
               ...(typeof metadata.doNotList === "boolean" && {
                 doNotList: metadata.doNotList,
               }),
+              // CIP-119 metadata
+              ...(metadata.bio && { bio: metadata.bio }),
+              ...(metadata.motivations && { motivations: metadata.motivations }),
+              ...(metadata.objectives && { objectives: metadata.objectives }),
+              ...(metadata.qualifications && { qualifications: metadata.qualifications }),
+              ...(metadata.references && { references: metadata.references }),
             },
           });
           return info;
@@ -377,4 +425,44 @@ export async function syncAllDrepsInfo(
     updated,
     failedBatches,
   };
+}
+
+// ============================================================
+// Epoch Snapshot
+// ============================================================
+
+export interface SnapshotDrepEpochResult {
+  epoch: number;
+  snapshotted: number;
+}
+
+/**
+ * Snapshot current delegatorCount and votingPower for every DRep into DrepEpochSnapshot.
+ * Designed to be called once per epoch (idempotent via upsert on [drepId, epoch]).
+ */
+export async function snapshotDrepEpoch(
+  prisma: Prisma.TransactionClient,
+  epoch: number
+): Promise<SnapshotDrepEpochResult> {
+  const dreps = await prisma.drep.findMany({
+    select: { drepId: true, delegatorCount: true, votingPower: true },
+  });
+
+  let snapshotted = 0;
+  const chunkSize = 500;
+  for (let i = 0; i < dreps.length; i += chunkSize) {
+    const chunk = dreps.slice(i, i + chunkSize);
+    const result = await prisma.drepEpochSnapshot.createMany({
+      data: chunk.map((d) => ({
+        drepId: d.drepId,
+        epoch,
+        delegatorCount: d.delegatorCount ?? 0,
+        votingPower: d.votingPower,
+      })),
+      skipDuplicates: true,
+    });
+    snapshotted += result.count;
+  }
+
+  return { epoch, snapshotted };
 }

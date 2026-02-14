@@ -36,6 +36,11 @@ export const getDRepDetail = async (req: Request, res: Response) => {
         paymentAddr: true,
         votingPower: true,
         delegatorCount: true,
+        bio: true,
+        motivations: true,
+        objectives: true,
+        qualifications: true,
+        references: true,
       },
     });
 
@@ -119,6 +124,11 @@ export const getDRepDetail = async (req: Request, res: Response) => {
       rationalesProvided: rationalesCount,
       proposalParticipationPercent: participationPercent,
       delegatorCount: drep.delegatorCount,
+      bio: drep.bio ?? null,
+      motivations: drep.motivations ?? null,
+      objectives: drep.objectives ?? null,
+      qualifications: drep.qualifications ?? null,
+      references: drep.references ?? null,
     };
 
     return res.json(response);
