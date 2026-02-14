@@ -51,8 +51,8 @@ export const getDRepDetail = async (req: Request, res: Response) => {
       });
     }
 
-    // Get vote statistics for this DRep in parallel
-    const [voteBreakdownResult, rationalesCount, totalProposals] = await Promise.all([
+    // Get vote statistics and registration info for this DRep in parallel
+    const [voteBreakdownResult, rationalesCount, totalProposals, registrationEvent] = await Promise.all([
       // Vote breakdown by type
       prisma.onchainVote.groupBy({
         by: ["vote"],
@@ -74,6 +74,13 @@ export const getDRepDetail = async (req: Request, res: Response) => {
 
       // Total number of proposals (for participation calculation)
       prisma.proposal.count(),
+
+      // Earliest registration event
+      prisma.drepLifecycleEvent.findFirst({
+        where: { drepId, action: "registration" },
+        orderBy: { epochNo: "asc" },
+        select: { epochNo: true },
+      }),
     ]);
 
     // Build vote breakdown
@@ -112,6 +119,17 @@ export const getDRepDetail = async (req: Request, res: Response) => {
         ? Math.round((uniqueProposalsVoted.length / totalProposals) * 100 * 100) / 100
         : 0;
 
+    // Resolve registration date from EpochTotals
+    const registeredEpoch = registrationEvent?.epochNo ?? null;
+    let registeredDate: string | null = null;
+    if (registeredEpoch !== null) {
+      const epochTotals = await prisma.epochTotals.findUnique({
+        where: { epoch: registeredEpoch },
+        select: { startTime: true },
+      });
+      registeredDate = epochTotals?.startTime?.toISOString() ?? null;
+    }
+
     const response: GetDRepDetailResponse = {
       drepId: drep.drepId,
       name: drep.name,
@@ -129,6 +147,8 @@ export const getDRepDetail = async (req: Request, res: Response) => {
       objectives: drep.objectives ?? null,
       qualifications: drep.qualifications ?? null,
       references: drep.references ?? null,
+      registeredEpoch,
+      registeredDate,
     };
 
     return res.json(response);

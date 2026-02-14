@@ -91,6 +91,10 @@ export interface GetDRepDetailResponse {
   qualifications: string | null;
   /** CIP-119: References (JSON string of array) */
   references: string | null;
+  /** Epoch when the DRep first registered */
+  registeredEpoch: number | null;
+  /** ISO date string of the registration epoch start time */
+  registeredDate: string | null;
 }
 
 /**
