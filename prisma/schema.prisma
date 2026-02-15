@@ -46,11 +46,18 @@ model Drep {
   expiresEpoch          Int?                   @map("expires_epoch")
   metaUrl               String?                @map("meta_url")
   metaHash              String?                @map("meta_hash")
+  // CIP-119 metadata fields (from /drep_updates meta_json.body)
+  bio                   String?                @map("bio")
+  motivations           String?                @map("motivations")
+  objectives            String?                @map("objectives")
+  qualifications        String?                @map("qualifications")
+  references            String?                @map("references") // JSON string of references array
   createdAt             DateTime?              @default(now()) @map("created_at")
   updatedAt             DateTime?              @map("updated_at")
   user                  User?                  @relation(fields: [userId], references: [id])
   onchainVotes          OnchainVote[]
   stakeDelegationStates StakeDelegationState[]
+  epochSnapshots        DrepEpochSnapshot[]
 
   @@map("drep")
 }
@@ -144,14 +151,15 @@ model StakeDelegationSyncState {
 // Tracks per-epoch completion state for the governance analytics sync job.
 // This lets the job run frequently but only do heavy work once per epoch.
 model EpochAnalyticsSync {
-  epoch                 Int       @id @map("epoch_no")
-  drepsSyncedAt         DateTime? @map("dreps_synced_at")
-  drepInfoSyncedAt      DateTime? @map("drep_info_synced_at")
-  totalsSyncedAt        DateTime? @map("totals_synced_at")
-  drepLifecycleSyncedAt DateTime? @map("drep_lifecycle_synced_at")
-  poolGroupsSyncedAt    DateTime? @map("pool_groups_synced_at")
-  createdAt             DateTime  @default(now()) @map("created_at")
-  updatedAt             DateTime  @updatedAt @map("updated_at")
+  epoch                    Int       @id @map("epoch_no")
+  drepsSyncedAt            DateTime? @map("dreps_synced_at")
+  drepInfoSyncedAt         DateTime? @map("drep_info_synced_at")
+  drepSnapshotSyncedAt     DateTime? @map("drep_snapshot_synced_at")
+  totalsSyncedAt           DateTime? @map("totals_synced_at")
+  drepLifecycleSyncedAt    DateTime? @map("drep_lifecycle_synced_at")
+  poolGroupsSyncedAt       DateTime? @map("pool_groups_synced_at")
+  createdAt                DateTime  @default(now()) @map("created_at")
+  updatedAt                DateTime  @updatedAt @map("updated_at")
 
   @@map("epoch_analytics_sync")
 }
@@ -226,6 +234,25 @@ model DrepLifecycleEvent {
   @@index([epochNo])
   @@index([action])
   @@map("drep_lifecycle_event")
+}
+
+// Per-epoch snapshot of DRep delegator count and voting power.
+// Populated once per epoch during the epoch analytics sync job.
+// Enables historical line charts on DRep profile pages.
+model DrepEpochSnapshot {
+  id             Int      @id @default(autoincrement())
+  drepId         String   @map("drep_id")
+  epoch          Int      @map("epoch_no")
+  delegatorCount Int      @map("delegator_count")
+  votingPower    BigInt   @map("voting_power")
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  drep Drep @relation(fields: [drepId], references: [drepId])
+
+  @@unique([drepId, epoch])
+  @@index([drepId])
+  @@index([epoch])
+  @@map("drep_epoch_snapshot")
 }
 
 // Pool Groups - Maps pools to multi-pool operators/entities

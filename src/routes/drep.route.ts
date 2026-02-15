@@ -196,4 +196,48 @@ router.get("/:drepId", drepController.getDRepDetail);
  */
 router.get("/:drepId/votes", drepController.getDRepVotes);
 
+/**
+ * @openapi
+ * /dreps/{drepId}/history:
+ *   get:
+ *     summary: Get DRep history time series
+ *     description: Returns per-epoch snapshots of delegator count and voting power for a specific DRep. Used for rendering line charts on DRep profile pages.
+ *     tags:
+ *       - DRep Dashboard
+ *     parameters:
+ *       - name: drepId
+ *         in: path
+ *         required: true
+ *         description: The DRep identifier
+ *         schema:
+ *           type: string
+ *           example: "drep1abc123..."
+ *     responses:
+ *       200:
+ *         description: Successfully retrieved DRep history
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/GetDRepHistoryResponse'
+ *       400:
+ *         description: Missing or invalid drepId
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ *       404:
+ *         description: DRep not found
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ *       500:
+ *         description: Server error
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ */
+router.get("/:drepId/history", drepController.getDRepHistory);
+
 export default router;
