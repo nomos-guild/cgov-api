@@ -80,66 +80,90 @@ export const postTriggerDrepDelegatorSync = async (
 
     console.log("[DRep Delegator Sync] Triggered via API endpoint");
 
-    // Run the sync
-    const result = await syncDrepDelegationChanges(prisma);
-
-    // Mark sync as completed
-    await prisma.syncStatus.update({
-      where: { jobName: JOB_NAME },
-      data: {
-        isRunning: false,
-        completedAt: new Date(),
-        lastResult: "success",
-        itemsProcessed: result.statesUpdated + result.changesInserted,
-        expiresAt: null,
-        errorMessage: null,
-      },
-    });
-
-    console.log("[DRep Delegator Sync] Completed successfully");
-
+    // ✅ Respond immediately to avoid Cloud Scheduler timeout
     res.json({
       success: true,
-      message: "DRep delegator sync completed",
-      results: {
-        currentEpoch: result.currentEpoch,
-        lastProcessedEpoch: result.lastProcessedEpoch,
-        maxDelegationEpoch: result.maxDelegationEpoch,
-        drepsProcessed: result.drepsProcessed,
-        delegatorsProcessed: result.delegatorsProcessed,
-        statesUpdated: result.statesUpdated,
-        changesInserted: result.changesInserted,
-        failed: result.failed.length,
-      },
+      message: "DRep delegator sync started",
+      jobName: JOB_NAME,
+    });
+
+    // ✅ Process asynchronously
+    (async () => {
+      try {
+        // Run the sync
+        const result = await syncDrepDelegationChanges(prisma);
+
+        // Mark sync as completed
+        await prisma.syncStatus.update({
+          where: { jobName: JOB_NAME },
+          data: {
+            isRunning: false,
+            completedAt: new Date(),
+            lastResult: "success",
+            itemsProcessed: result.statesUpdated + result.changesInserted,
+            expiresAt: null,
+            errorMessage: null,
+          },
+        });
+
+        console.log("[DRep Delegator Sync] Completed successfully:", {
+          currentEpoch: result.currentEpoch,
+          drepsProcessed: result.drepsProcessed,
+          delegatorsProcessed: result.delegatorsProcessed,
+          statesUpdated: result.statesUpdated,
+          changesInserted: result.changesInserted,
+        });
+      } catch (error) {
+        console.error("[DRep Delegator Sync] Async processing error:", error);
+
+        const errorMessage = error instanceof Error ? error.message : "Unknown error";
+
+        // Mark sync as failed
+        try {
+          await prisma.syncStatus.update({
+            where: { jobName: JOB_NAME },
+            data: {
+              isRunning: false,
+              completedAt: new Date(),
+              lastResult: "failed",
+              expiresAt: null,
+              errorMessage: errorMessage,
+            },
+          });
+        } catch (updateError) {
+          console.error("[DRep Delegator Sync] Failed to update sync status:", updateError);
+        }
+      }
+    })().catch((error) => {
+      console.error("[DRep Delegator Sync] Unhandled error in async processing:", error);
     });
   } catch (error) {
-    console.error("[DRep Delegator Sync] Error:", error);
+    console.error("[DRep Delegator Sync] Setup error:", error);
 
-    const errorMessage =
-      error instanceof Error ? error.message : "Unknown error";
+    const errorMessage = error instanceof Error ? error.message : "Unknown error";
 
-    // Mark sync as failed
+    // Mark sync as failed (only if lock was acquired)
     try {
-      await prisma.syncStatus.update({
-        where: { jobName: JOB_NAME },
-        data: {
-          isRunning: false,
-          completedAt: new Date(),
-          lastResult: "failed",
-          expiresAt: null,
-          errorMessage: errorMessage,
-        },
-      });
+      const status = await prisma.syncStatus.findUnique({ where: { jobName: JOB_NAME } });
+      if (status?.isRunning) {
+        await prisma.syncStatus.update({
+          where: { jobName: JOB_NAME },
+          data: {
+            isRunning: false,
+            completedAt: new Date(),
+            lastResult: "failed",
+            expiresAt: null,
+            errorMessage: errorMessage,
+          },
+        });
+      }
     } catch (updateError) {
-      console.error(
-        "[DRep Delegator Sync] Failed to update sync status:",
-        updateError
-      );
+      console.error("[DRep Delegator Sync] Failed to update sync status:", updateError);
     }
 
     res.status(500).json({
       success: false,
-      error: "Failed to sync DRep delegators",
+      error: "Failed to start DRep delegator sync",
       message: errorMessage,
     });
   }

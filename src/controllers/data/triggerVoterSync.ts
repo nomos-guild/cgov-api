@@ -76,57 +76,84 @@ export const postTriggerVoterSync = async (_req: Request, res: Response) => {
 
     console.log("[Manual Voter Sync] Triggered via API endpoint");
 
-    // Run the sync
-    const results = await syncAllVoterVotingPower(prisma);
-
-    // Mark sync as completed
-    await prisma.syncStatus.update({
-      where: { jobName: JOB_NAME },
-      data: {
-        isRunning: false,
-        completedAt: new Date(),
-        lastResult: "success",
-        itemsProcessed: results.dreps.updated + results.spos.updated,
-        expiresAt: null,
-        errorMessage: null,
-      },
-    });
-
-    console.log("[Manual Voter Sync] Completed successfully");
-
+    // ✅ Respond immediately to avoid Cloud Scheduler timeout
     res.json({
       success: true,
-      message: "Voter power sync completed",
-      results,
+      message: "Voter power sync started",
+      jobName: JOB_NAME,
+    });
+
+    // ✅ Process asynchronously
+    (async () => {
+      try {
+        // Run the sync
+        const results = await syncAllVoterVotingPower(prisma);
+
+        // Mark sync as completed
+        await prisma.syncStatus.update({
+          where: { jobName: JOB_NAME },
+          data: {
+            isRunning: false,
+            completedAt: new Date(),
+            lastResult: "success",
+            itemsProcessed: results.dreps.updated + results.spos.updated,
+            expiresAt: null,
+            errorMessage: null,
+          },
+        });
+
+        console.log("[Manual Voter Sync] Completed successfully:", results);
+      } catch (error) {
+        console.error("[Manual Voter Sync] Async processing error:", error);
+
+        const errorMessage = error instanceof Error ? error.message : "Unknown error";
+
+        // Mark sync as failed
+        try {
+          await prisma.syncStatus.update({
+            where: { jobName: JOB_NAME },
+            data: {
+              isRunning: false,
+              completedAt: new Date(),
+              lastResult: "failed",
+              expiresAt: null,
+              errorMessage: errorMessage,
+            },
+          });
+        } catch (updateError) {
+          console.error("[Manual Voter Sync] Failed to update sync status:", updateError);
+        }
+      }
+    })().catch((error) => {
+      console.error("[Manual Voter Sync] Unhandled error in async processing:", error);
     });
   } catch (error) {
-    console.error("[Manual Voter Sync] Error:", error);
+    console.error("[Manual Voter Sync] Setup error:", error);
 
-    const errorMessage =
-      error instanceof Error ? error.message : "Unknown error";
+    const errorMessage = error instanceof Error ? error.message : "Unknown error";
 
-    // Mark sync as failed
+    // Mark sync as failed (only if lock was acquired)
     try {
-      await prisma.syncStatus.update({
-        where: { jobName: JOB_NAME },
-        data: {
-          isRunning: false,
-          completedAt: new Date(),
-          lastResult: "failed",
-          expiresAt: null,
-          errorMessage: errorMessage,
-        },
-      });
+      const status = await prisma.syncStatus.findUnique({ where: { jobName: JOB_NAME } });
+      if (status?.isRunning) {
+        await prisma.syncStatus.update({
+          where: { jobName: JOB_NAME },
+          data: {
+            isRunning: false,
+            completedAt: new Date(),
+            lastResult: "failed",
+            expiresAt: null,
+            errorMessage: errorMessage,
+          },
+        });
+      }
     } catch (updateError) {
-      console.error(
-        "[Manual Voter Sync] Failed to update sync status:",
-        updateError
-      );
+      console.error("[Manual Voter Sync] Failed to update sync status:", updateError);
     }
 
     res.status(500).json({
       success: false,
-      error: "Failed to sync voter power",
+      error: "Failed to start voter power sync",
       message: errorMessage,
     });
   }

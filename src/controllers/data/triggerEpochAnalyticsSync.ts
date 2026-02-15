@@ -83,91 +83,101 @@ export const postTriggerEpochAnalyticsSync = async (
 
     console.log("[Epoch Analytics Sync] Triggered via API endpoint");
 
-    // Run the sync
-    const result = await syncGovernanceAnalyticsForPreviousAndCurrentEpoch(
-      prisma
-    );
-
-    // Backfill missing epoch totals
-    const backfill = await syncMissingEpochAnalytics(prisma);
-
-    // Calculate items processed
-    const previous = result.previousEpoch;
-    let itemsProcessed = 0;
-    if (previous.dreps) itemsProcessed += previous.dreps.created;
-    if (previous.drepInfo) itemsProcessed += previous.drepInfo.updated;
-    if (previous.drepLifecycle)
-      itemsProcessed += previous.drepLifecycle.eventsIngested;
-    if (previous.poolGroups) itemsProcessed += previous.poolGroups.created;
-    itemsProcessed += backfill.totals.synced.length;
-
-    // Mark sync as completed
-    await prisma.syncStatus.update({
-      where: { jobName: JOB_NAME },
-      data: {
-        isRunning: false,
-        completedAt: new Date(),
-        lastResult: "success",
-        itemsProcessed,
-        expiresAt: null,
-        errorMessage: null,
-      },
-    });
-
-    console.log("[Epoch Analytics Sync] Completed successfully");
-
+    // ✅ Respond immediately to avoid Cloud Scheduler timeout
     res.json({
       success: true,
-      message: "Epoch analytics sync completed",
-      results: {
-        currentEpoch: result.currentEpoch,
-        previousEpoch: {
-          epoch: previous.epoch,
-          dreps: previous.dreps ?? { skipped: true },
-          drepInfo: previous.drepInfo ?? { skipped: true },
-          // Only include summary fields from totals (BigInt values like
-          // circulation/treasury/supply cannot be JSON-serialized)
-          totals: previous.totals
-            ? { epoch: previous.totals.epoch, upserted: previous.totals.upserted }
-            : { skipped: true },
-          drepLifecycle: previous.drepLifecycle ?? { skipped: true },
-          poolGroups: previous.poolGroups ?? { skipped: true },
-        },
-        backfill: {
-          missing: backfill.totals.missing.length,
-          synced: backfill.totals.synced.length,
-          failed: backfill.totals.failed.length,
-        },
-      },
+      message: "Epoch analytics sync started",
+      jobName: JOB_NAME,
+    });
+
+    // ✅ Process asynchronously
+    (async () => {
+      try {
+        // Run the sync
+        const result = await syncGovernanceAnalyticsForPreviousAndCurrentEpoch(prisma);
+
+        // Backfill missing epoch totals
+        const backfill = await syncMissingEpochAnalytics(prisma);
+
+        // Calculate items processed
+        const previous = result.previousEpoch;
+        let itemsProcessed = 0;
+        if (previous.dreps) itemsProcessed += previous.dreps.created;
+        if (previous.drepInfo) itemsProcessed += previous.drepInfo.updated;
+        if (previous.drepLifecycle) itemsProcessed += previous.drepLifecycle.eventsIngested;
+        if (previous.poolGroups) itemsProcessed += previous.poolGroups.created;
+        itemsProcessed += backfill.totals.synced.length;
+
+        // Mark sync as completed
+        await prisma.syncStatus.update({
+          where: { jobName: JOB_NAME },
+          data: {
+            isRunning: false,
+            completedAt: new Date(),
+            lastResult: "success",
+            itemsProcessed,
+            expiresAt: null,
+            errorMessage: null,
+          },
+        });
+
+        console.log("[Epoch Analytics Sync] Completed successfully:", {
+          currentEpoch: result.currentEpoch,
+          previousEpoch: previous.epoch,
+          itemsProcessed,
+          backfillSynced: backfill.totals.synced.length,
+        });
+      } catch (error) {
+        console.error("[Epoch Analytics Sync] Async processing error:", error);
+
+        const errorMessage = error instanceof Error ? error.message : "Unknown error";
+
+        // Mark sync as failed
+        try {
+          await prisma.syncStatus.update({
+            where: { jobName: JOB_NAME },
+            data: {
+              isRunning: false,
+              completedAt: new Date(),
+              lastResult: "failed",
+              expiresAt: null,
+              errorMessage: errorMessage,
+            },
+          });
+        } catch (updateError) {
+          console.error("[Epoch Analytics Sync] Failed to update sync status:", updateError);
+        }
+      }
+    })().catch((error) => {
+      console.error("[Epoch Analytics Sync] Unhandled error in async processing:", error);
     });
   } catch (error) {
-    console.error("[Epoch Analytics Sync] Error:", error);
+    console.error("[Epoch Analytics Sync] Setup error:", error);
 
-    const errorMessage =
-      error instanceof Error ? error.message : "Unknown error";
+    const errorMessage = error instanceof Error ? error.message : "Unknown error";
 
-    // Mark sync as failed
+    // Mark sync as failed (only if lock was acquired)
     try {
-      await prisma.syncStatus.update({
-        where: { jobName: JOB_NAME },
-        data: {
-          isRunning: false,
-          completedAt: new Date(),
-          lastResult: "failed",
-          expiresAt: null,
-          errorMessage: errorMessage,
-        },
-      });
+      const status = await prisma.syncStatus.findUnique({ where: { jobName: JOB_NAME } });
+      if (status?.isRunning) {
+        await prisma.syncStatus.update({
+          where: { jobName: JOB_NAME },
+          data: {
+            isRunning: false,
+            completedAt: new Date(),
+            lastResult: "failed",
+            expiresAt: null,
+            errorMessage: errorMessage,
+          },
+        });
+      }
     } catch (updateError) {
-      console.error(
-        "[Epoch Analytics Sync] Failed to update sync status:",
-        updateError
-      );
+      console.error("[Epoch Analytics Sync] Failed to update sync status:", updateError);
     }
 
     res.status(500).json({
       success: false,
-      error: "Failed to sync epoch analytics",
+      error: "Failed to start epoch analytics sync",
       message: errorMessage,
     });
   }
