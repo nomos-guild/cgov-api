@@ -534,6 +534,7 @@ enum ProposalStatus {
   RATIFIED
   ENACTED
   EXPIRED
+  DROPPED
   CLOSED
 
   @@map("proposal_status")

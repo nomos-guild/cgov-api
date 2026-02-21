@@ -17,6 +17,7 @@ import {
  * - page: Page number (optional; when omitted along with pageSize, returns all proposals)
  * - pageSize: Items per page (optional; max: 100)
  * - status: Filter by proposal status (optional, comma-separated)
+ * - proposalId: Filter by specific proposal ID (optional)
  */
 export const getCCAgreementRate = async (req: Request, res: Response) => {
   try {
@@ -31,11 +32,15 @@ export const getCCAgreementRate = async (req: Request, res: Response) => {
       ? Math.min(100, Math.max(1, parseInt(pageSizeParam ?? "20") || 20))
       : undefined;
     const statusFilter = (req.query.status as string)?.split(",").filter(Boolean);
+    const proposalId = (req.query.proposalId as string)?.trim();
 
     // Build where clause
     const whereClause: any = {};
     if (statusFilter && statusFilter.length > 0) {
       whereClause.status = { in: statusFilter };
+    }
+    if (proposalId) {
+      whereClause.proposalId = proposalId;
     }
 
     // Get total count and proposals

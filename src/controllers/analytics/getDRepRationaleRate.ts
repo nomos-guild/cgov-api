@@ -14,6 +14,7 @@ import {
  * - page: Page number (default: 1)
  * - pageSize: Items per page (default: 20, max: 100)
  * - activeOnly: If true, only return active DReps (default: true; pass false to include inactive)
+ * - drepId: Filter to a specific DRep (optional)
  * - sortBy: Sort by "rationaleRate" | "totalVotes" | "name" (default: rationaleRate)
  * - sortOrder: Sort direction (asc, desc) (default: desc)
  *
@@ -32,12 +33,14 @@ export const getDRepRationaleRate = async (req: Request, res: Response) => {
     );
     const sortBy = (req.query.sortBy as string) || "rationaleRate";
     const sortOrder = (req.query.sortOrder as string) === "asc" ? "asc" : "desc";
+    const drepId = (req.query.drepId as string | undefined)?.trim();
 
     // Get DReps (not marked as do-not-list); optionally filter to active only.
     const dreps = await prisma.drep.findMany({
       where: {
         OR: [{ doNotList: false }, { doNotList: null }],
         ...(activeOnly ? { active: true } : {}),
+        ...(drepId ? { drepId } : {}),
       },
       select: { drepId: true, name: true },
     });

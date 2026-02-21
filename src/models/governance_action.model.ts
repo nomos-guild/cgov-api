@@ -58,7 +58,7 @@ export interface GovernanceAction {
   hash: string; // txHash:certIndex format
   title: string;
   type: string;
-  status: "Active" | "Ratified" | "Enacted" | "Expired" | "Closed";
+  status: "Active" | "Ratified" | "Enacted" | "Expired" | "Dropped" | "Closed";
   constitutionality: string;
   drep: GovernanceActionVoteInfo;
   spo?: GovernanceActionVoteInfo;

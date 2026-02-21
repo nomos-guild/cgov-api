@@ -36,8 +36,9 @@ export interface ProposalIngestionResult {
   stats: VoteIngestionStats;
   /**
    * The intended final status for the proposal.
-   * When deferExpiredStatus is true and the proposal should be EXPIRED/CLOSED,
-   * status will be ACTIVE but intendedStatus will be EXPIRED/CLOSED.
+   * When deferExpiredStatus is true and the proposal should be
+   * EXPIRED/DROPPED/CLOSED, status will be ACTIVE but intendedStatus will be
+   * EXPIRED/DROPPED/CLOSED.
    * The caller should update the status after successful sync completion.
    */
   intendedStatus?: ProposalStatus;
@@ -69,8 +70,9 @@ export interface IngestProposalOptions {
   useCache?: boolean;
   /**
    * When true, keeps the proposal status as ACTIVE during ingestion even if
-   * the derived status would be EXPIRED/CLOSED. The intended final status is
-   * returned in the result so the caller can update it after successful sync.
+   * the derived status would be EXPIRED/DROPPED/CLOSED. The intended final
+   * status is returned in the result so the caller can update it after
+   * successful sync.
    * This ensures interrupted syncs will retry on the next read.
    * (Ideal for sync-on-read to ensure data is fully synced before marking expired)
    */
@@ -121,15 +123,16 @@ export async function ingestProposalData(
     // When deferExpiredStatus is true, keep the proposal ACTIVE during ingestion
     // so that if the sync is interrupted, it will retry on the next read.
     // The intended status is returned so the caller can update it after successful sync.
-    const isExpiredOrClosed =
+    const isTerminalStatus =
       derivedStatus === ProposalStatus.EXPIRED ||
+      derivedStatus === ProposalStatus.DROPPED ||
       derivedStatus === ProposalStatus.CLOSED;
     const status =
-      deferExpiredStatus && isExpiredOrClosed
+      deferExpiredStatus && isTerminalStatus
         ? ProposalStatus.ACTIVE
         : derivedStatus;
     const intendedStatus =
-      deferExpiredStatus && isExpiredOrClosed ? derivedStatus : undefined;
+      deferExpiredStatus && isTerminalStatus ? derivedStatus : undefined;
 
     // 4. Extract metadata (from meta_json or fetch from meta_url)
     const { title, description, rationale, metadata } =
@@ -467,6 +470,7 @@ export async function getCurrentEpoch(): Promise<number> {
  * - RATIFIED: Passed voting, waiting for enactment (non-INFO actions)
  * - ENACTED: Applied to the chain (non-INFO actions)
  * - EXPIRED: Voting period ended without ratification/approval (non-INFO actions)
+ * - DROPPED: Invalidated before natural expiration (non-INFO actions)
  * - CLOSED: Expired INFO action (INFO actions don't get ratified/enacted)
  */
 function deriveProposalStatus(
@@ -485,15 +489,20 @@ function deriveProposalStatus(
     return ProposalStatus.RATIFIED;
   }
 
+  // If dropped before natural expiration, classify as DROPPED.
+  const droppedBeforeExpiration =
+    proposal.dropped_epoch != null &&
+    proposal.dropped_epoch <= currentEpoch &&
+    (proposal.expired_epoch == null ||
+      proposal.dropped_epoch < proposal.expired_epoch);
+  if (droppedBeforeExpiration) {
+    // INFO actions use CLOSED status when dropped
+    return isInfoAction ? ProposalStatus.CLOSED : ProposalStatus.DROPPED;
+  }
+
   // If expired
   if (proposal.expired_epoch && proposal.expired_epoch <= currentEpoch) {
     // INFO actions use CLOSED status when expired
-    return isInfoAction ? ProposalStatus.CLOSED : ProposalStatus.EXPIRED;
-  }
-
-  // If dropped
-  if (proposal.dropped_epoch && proposal.dropped_epoch <= currentEpoch) {
-    // INFO actions use CLOSED status when dropped
     return isInfoAction ? ProposalStatus.CLOSED : ProposalStatus.EXPIRED;
   }
 

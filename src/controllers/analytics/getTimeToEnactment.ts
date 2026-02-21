@@ -23,6 +23,7 @@ function percentile(sortedValues: number[], p: number): number | null {
  * - pageSize: Items per page (optional; if omitted and page omitted, returns all results; max: 100 when paginating)
  * - status: Filter by proposal status (optional, comma-separated)
  * - governanceActionType: Filter by action type (optional, comma-separated)
+ * - proposalId: Filter by specific proposal ID (optional)
  * - enactedOnly: If "true", only return enacted proposals (default: false)
  */
 export const getTimeToEnactment = async (req: Request, res: Response) => {
@@ -40,6 +41,7 @@ export const getTimeToEnactment = async (req: Request, res: Response) => {
     const typeFilter = (req.query.governanceActionType as string)
       ?.split(",")
       .filter(Boolean);
+    const proposalId = (req.query.proposalId as string)?.trim();
     const enactedOnly = req.query.enactedOnly === "true";
 
     // Build where clause
@@ -49,6 +51,9 @@ export const getTimeToEnactment = async (req: Request, res: Response) => {
     }
     if (typeFilter && typeFilter.length > 0) {
       whereClause.governanceActionType = { in: typeFilter };
+    }
+    if (proposalId) {
+      whereClause.proposalId = proposalId;
     }
     if (enactedOnly) {
       whereClause.enactedEpoch = { not: null };
