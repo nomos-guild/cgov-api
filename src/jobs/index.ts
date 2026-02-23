@@ -10,7 +10,12 @@ import { startSyncGithubActivityJob } from "./sync-github-activity.job";
 import { startAggregateGithubJob } from "./aggregate-github.job";
 import { startBackfillGithubJob } from "./backfill-github.job";
 import { startSnapshotGithubJob } from "./snapshot-github.job";
-import { startEpochAnalyticsSyncJob } from "./sync-epoch-analytics.job";
+import { startDrepInventorySyncJob } from "./sync-drep-inventory.job";
+import { startDrepInfoSyncJob } from "./sync-drep-info.job";
+import { startEpochTotalsSyncJob } from "./sync-epoch-totals.job";
+import { startDrepLifecycleSyncJob } from "./sync-drep-lifecycle.job";
+import { startPoolGroupsSyncJob } from "./sync-pool-groups.job";
+import { startMissingEpochsSyncJob } from "./sync-missing-epochs.job";
 import { startDrepDelegatorSyncJob } from "./sync-drep-delegators.job";
 
 /**
@@ -41,10 +46,27 @@ export const startAllJobs = () => {
   // Start GitHub daily snapshot job (stars/forks for all repos)
   startSnapshotGithubJob();
 
-  // Start governance analytics epoch sync job (DRep inventory + epoch snapshots)
-  startEpochAnalyticsSyncJob();
+  // --- Governance analytics epoch sync jobs (split for timeout isolation) ---
 
-  // Start DRep delegation change sync job
+  // DRep inventory + epoch snapshot (hourly at :05)
+  startDrepInventorySyncJob();
+
+  // DRep info full refresh (hourly at :15) — slowest step, isolated
+  startDrepInfoSyncJob();
+
+  // Epoch totals for previous + current epoch (hourly at :10)
+  startEpochTotalsSyncJob();
+
+  // DRep lifecycle events (hourly at :25)
+  startDrepLifecycleSyncJob();
+
+  // Pool group mappings (hourly at :30)
+  startPoolGroupsSyncJob();
+
+  // Missing epochs backfill (every 6 hours)
+  startMissingEpochsSyncJob();
+
+  // DRep delegation change sync (hourly at :40)
   startDrepDelegatorSyncJob();
 
   console.log("[Cron] All cron jobs initialized");
