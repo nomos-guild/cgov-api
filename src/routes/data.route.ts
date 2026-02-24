@@ -17,7 +17,12 @@ import {
   postTriggerGithubAggregate,
 } from "../controllers/data/triggerGithub";
 import { developmentController } from "../controllers";
-import { postTriggerEpochAnalyticsSync } from "../controllers/data/triggerEpochAnalyticsSync";
+import { postTriggerDrepInventorySync } from "../controllers/data/triggerDrepInventorySync";
+import { postTriggerDrepInfoSync } from "../controllers/data/triggerDrepInfoSync";
+import { postTriggerEpochTotalsSync } from "../controllers/data/triggerEpochTotalsSync";
+import { postTriggerDrepLifecycleSync } from "../controllers/data/triggerDrepLifecycleSync";
+import { postTriggerPoolGroupsSync } from "../controllers/data/triggerPoolGroupsSync";
+import { postTriggerMissingEpochsSync } from "../controllers/data/triggerMissingEpochsSync";
 import { postTriggerDrepDelegatorSync } from "../controllers/data/triggerDrepDelegatorSync";
 
 const router = express.Router();
@@ -223,21 +228,111 @@ router.post("/trigger-voter-sync", postTriggerVoterSync);
 
 /**
  * @openapi
- * /data/trigger-epoch-analytics-sync:
+ * /data/trigger-drep-inventory-sync:
  *   post:
- *     summary: Manually trigger epoch analytics sync
- *     description: Triggers a full sync of epoch analytics data including DRep inventory, DRep info, epoch totals, DRep lifecycle events, and pool groups. Used for manual testing and by Cloud Scheduler cron jobs.
+ *     summary: Trigger DRep inventory + epoch snapshot sync
+ *     description: Inventories all DReps from Koios /drep_list and creates per-epoch snapshots. Used by Cloud Scheduler.
  *     tags:
  *       - Data Ingestion
  *     responses:
  *       200:
- *         description: Sync completed successfully
+ *         description: Sync started
  *       409:
  *         description: Sync already running
  *       500:
  *         description: Sync failed
  */
-router.post("/trigger-epoch-analytics-sync", postTriggerEpochAnalyticsSync);
+router.post("/trigger-drep-inventory-sync", postTriggerDrepInventorySync);
+
+/**
+ * @openapi
+ * /data/trigger-drep-info-sync:
+ *   post:
+ *     summary: Trigger full DRep info refresh
+ *     description: Refreshes all DRep metadata from Koios /drep_info + /drep_updates. This is the slowest step, isolated for timeout safety. Used by Cloud Scheduler.
+ *     tags:
+ *       - Data Ingestion
+ *     responses:
+ *       200:
+ *         description: Sync started
+ *       409:
+ *         description: Sync already running
+ *       500:
+ *         description: Sync failed
+ */
+router.post("/trigger-drep-info-sync", postTriggerDrepInfoSync);
+
+/**
+ * @openapi
+ * /data/trigger-epoch-totals-sync:
+ *   post:
+ *     summary: Trigger epoch totals sync (previous + current)
+ *     description: Syncs epoch denominators (circulation, treasury, delegated power, pool voting power) and timestamps. Previous epoch is checkpointed; current epoch always refreshes. Used by Cloud Scheduler.
+ *     tags:
+ *       - Data Ingestion
+ *     responses:
+ *       200:
+ *         description: Sync started
+ *       409:
+ *         description: Sync already running
+ *       500:
+ *         description: Sync failed
+ */
+router.post("/trigger-epoch-totals-sync", postTriggerEpochTotalsSync);
+
+/**
+ * @openapi
+ * /data/trigger-drep-lifecycle-sync:
+ *   post:
+ *     summary: Trigger DRep lifecycle events sync
+ *     description: Syncs DRep registration, deregistration, and update events from Koios /drep_updates. Used by Cloud Scheduler.
+ *     tags:
+ *       - Data Ingestion
+ *     responses:
+ *       200:
+ *         description: Sync started
+ *       409:
+ *         description: Sync already running
+ *       500:
+ *         description: Sync failed
+ */
+router.post("/trigger-drep-lifecycle-sync", postTriggerDrepLifecycleSync);
+
+/**
+ * @openapi
+ * /data/trigger-pool-groups-sync:
+ *   post:
+ *     summary: Trigger pool groups sync
+ *     description: Syncs multi-pool operator groupings from Koios /pool_groups. Used by Cloud Scheduler.
+ *     tags:
+ *       - Data Ingestion
+ *     responses:
+ *       200:
+ *         description: Sync started
+ *       409:
+ *         description: Sync already running
+ *       500:
+ *         description: Sync failed
+ */
+router.post("/trigger-pool-groups-sync", postTriggerPoolGroupsSync);
+
+/**
+ * @openapi
+ * /data/trigger-missing-epochs-sync:
+ *   post:
+ *     summary: Trigger missing epochs backfill
+ *     description: Finds epochs missing from EpochTotals table and backfills them from Koios. Used by Cloud Scheduler.
+ *     tags:
+ *       - Data Ingestion
+ *     responses:
+ *       200:
+ *         description: Backfill started
+ *       409:
+ *         description: Backfill already running
+ *       500:
+ *         description: Backfill failed
+ */
+router.post("/trigger-missing-epochs-sync", postTriggerMissingEpochsSync);
 
 /**
  * @openapi

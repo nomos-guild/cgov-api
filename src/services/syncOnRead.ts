@@ -19,6 +19,7 @@ import { prisma } from "./prisma";
 import { koiosGet } from "./koios";
 import {
   ingestProposalData,
+  finalizeProposalStatusAfterVoteSync,
   getCurrentEpoch,
 } from "./ingestion/proposal.service";
 import type {
@@ -126,11 +127,13 @@ async function doOverviewSync(): Promise<void> {
     // Ingest new proposals (without using global vote cache)
     for (const proposal of newProposals) {
       try {
-        await ingestProposalData(proposal, {
+        const result = await ingestProposalData(proposal, {
           currentEpoch,
           minVotesEpoch: proposal.proposed_epoch,
           useCache: false, // Don't use global cache for on-demand sync
+          deferExpiredStatus: true,
         });
+        await finalizeProposalStatusAfterVoteSync(result, "[Sync-on-Read]");
         console.log(
           `[Sync-on-Read] ✓ Ingested new proposal ${proposal.proposal_tx_hash}`
         );
@@ -290,7 +293,7 @@ async function doProposalSync(identifier: string): Promise<void> {
   if (hasVoteCountChange || hasVotingPowerChange) {
     console.log(
       `[Sync-on-Read] Changes detected for ${dbProposal.proposalId}:` +
-        ` voteCount=${hasVoteCountChange}, votingPower=${hasVotingPowerChange}`
+      ` voteCount=${hasVoteCountChange}, votingPower=${hasVotingPowerChange}`
     );
 
     // Re-ingest the proposal to get updated votes
@@ -307,15 +310,14 @@ async function doProposalSync(identifier: string): Promise<void> {
         deferExpiredStatus: true, // Keep ACTIVE until sync completes
       });
 
-      // After successful sync, update to the intended status if different
-      // This ensures the proposal is only marked EXPIRED after all data is synced
-      if (result.intendedStatus && result.intendedStatus !== result.proposal.status) {
-        await prisma.proposal.update({
-          where: { proposalId: dbProposal.proposalId },
-          data: { status: result.intendedStatus },
-        });
+      const finalized = await finalizeProposalStatusAfterVoteSync(
+        result,
+        "[Sync-on-Read]"
+      );
+
+      if (finalized.proposal.status !== result.proposal.status) {
         console.log(
-          `[Sync-on-Read] ✓ Re-synced proposal ${dbProposal.proposalId} and updated status to ${result.intendedStatus}`
+          `[Sync-on-Read] ✓ Re-synced proposal ${dbProposal.proposalId} and updated status to ${finalized.proposal.status}`
         );
       } else {
         console.log(
@@ -470,10 +472,12 @@ async function tryIngestNewProposal(identifier: string): Promise<void> {
     }
 
     if (koiosProposal) {
-      await ingestProposalData(koiosProposal, {
+      const result = await ingestProposalData(koiosProposal, {
         minVotesEpoch: koiosProposal.proposed_epoch,
         useCache: false,
+        deferExpiredStatus: true,
       });
+      await finalizeProposalStatusAfterVoteSync(result, "[Sync-on-Read]");
       console.log(
         `[Sync-on-Read] ✓ Ingested new proposal ${koiosProposal.proposal_tx_hash}`
       );

@@ -66,6 +66,73 @@ export interface SyncMissingEpochsResult {
   };
 }
 
+export const EPOCH_TOTALS_SELF_HEALING_AFTER_EPOCH = 508;
+
+const EPOCH_TOTALS_NULL_FIELD_FILTER: Prisma.EpochTotalsWhereInput[] = [
+  { circulation: null },
+  { treasury: null },
+  { reward: null },
+  { supply: null },
+  { reserves: null },
+  { delegatedDrepPower: null },
+  { totalPoolVotePower: null },
+  { drepAlwaysNoConfidenceDelegatorCount: null },
+  { drepAlwaysNoConfidenceVotingPower: null },
+  { drepAlwaysAbstainDelegatorCount: null },
+  { drepAlwaysAbstainVotingPower: null },
+  { startTime: null },
+  { endTime: null },
+  { firstBlockTime: null },
+  { lastBlockTime: null },
+  { blockCount: null },
+  { txCount: null },
+];
+
+export function shouldRequireCompleteEpochTotals(epochNo: number): boolean {
+  return epochNo > EPOCH_TOTALS_SELF_HEALING_AFTER_EPOCH;
+}
+
+export function isEpochTotalsResultComplete(
+  totals: SyncEpochTotalsResult
+): boolean {
+  return (
+    totals.circulation != null &&
+    totals.treasury != null &&
+    totals.reward != null &&
+    totals.supply != null &&
+    totals.reserves != null &&
+    totals.delegatedDrepPower != null &&
+    totals.totalPoolVotePower != null &&
+    totals.drepAlwaysNoConfidenceDelegatorCount != null &&
+    totals.drepAlwaysNoConfidenceVotingPower != null &&
+    totals.drepAlwaysAbstainDelegatorCount != null &&
+    totals.drepAlwaysAbstainVotingPower != null &&
+    totals.startTime != null &&
+    totals.endTime != null &&
+    totals.blockCount != null &&
+    totals.txCount != null
+  );
+}
+
+export async function hasIncompleteEpochTotals(
+  prisma: Prisma.TransactionClient,
+  epochNo: number
+): Promise<boolean> {
+  if (!shouldRequireCompleteEpochTotals(epochNo)) {
+    return false;
+  }
+
+  const row = await prisma.epochTotals.findFirst({
+    where: {
+      epoch: epochNo,
+      OR: EPOCH_TOTALS_NULL_FIELD_FILTER,
+    },
+    select: { epoch: true },
+  });
+
+  return !!row;
+}
+
 // ============================================================
 // Private Helpers
 // ============================================================
@@ -92,35 +159,35 @@ async function sumPoolVotingPowerForEpoch(epochNo: number): Promise<bigint> {
         Array<{ pool_id_bech32: string; epoch_no: number; amount: string }>
       >
     > = [
-      // Prefer PostgREST horizontal filtering when available.
-      () =>
-        koiosGet("/pool_voting_power_history", {
-          epoch_no: `eq.${epochNo}`,
-          order: "pool_id_bech32.asc",
-          limit: pageSize,
-          offset,
-        }),
-      () =>
-        koiosGet("/pool_voting_power_history", {
-          epoch_no: `eq.${epochNo}`,
-          limit: pageSize,
-          offset,
-        }),
-      // Fallback to Koios function-style filtering.
-      () =>
-        koiosGet("/pool_voting_power_history", {
-          _epoch_no: epochNo,
-          order: "pool_id_bech32.asc",
-          limit: pageSize,
-          offset,
-        }),
-      () =>
-        koiosGet("/pool_voting_power_history", {
-          _epoch_no: epochNo,
-          limit: pageSize,
-          offset,
-        }),
-    ];
+        // Prefer PostgREST horizontal filtering when available.
+        () =>
+          koiosGet("/pool_voting_power_history", {
+            epoch_no: `eq.${epochNo}`,
+            order: "pool_id_bech32.asc",
+            limit: pageSize,
+            offset,
+          }),
+        () =>
+          koiosGet("/pool_voting_power_history", {
+            epoch_no: `eq.${epochNo}`,
+            limit: pageSize,
+            offset,
+          }),
+        // Fallback to Koios function-style filtering.
+        () =>
+          koiosGet("/pool_voting_power_history", {
+            _epoch_no: epochNo,
+            order: "pool_id_bech32.asc",
+            limit: pageSize,
+            offset,
+          }),
+        () =>
+          koiosGet("/pool_voting_power_history", {
+            _epoch_no: epochNo,
+            limit: pageSize,
+            offset,
+          }),
+      ];
 
     let lastError: any;
     for (const attempt of attempts) {
@@ -325,13 +392,13 @@ export async function syncEpochTotals(
     drepAlwaysAbstainAgg,
     drepAlwaysNoConfidenceAgg,
   ] = await Promise.all([
-      fetchRowForEpoch<KoiosTotals>("/totals"),
-      fetchRowForEpoch<KoiosDrepEpochSummary>("/drep_epoch_summary"),
-      fetchRowForEpoch<KoiosEpochInfo>("/epoch_info"),
-      sumPoolVotingPowerForEpoch(epochNo),
-      getSpecialDrepAggregatesForEpoch(epochNo, "drep_always_abstain"),
-      getSpecialDrepAggregatesForEpoch(epochNo, "drep_always_no_confidence"),
-    ]);
+    fetchRowForEpoch<KoiosTotals>("/totals"),
+    fetchRowForEpoch<KoiosDrepEpochSummary>("/drep_epoch_summary"),
+    fetchRowForEpoch<KoiosEpochInfo>("/epoch_info"),
+    sumPoolVotingPowerForEpoch(epochNo),
+    getSpecialDrepAggregatesForEpoch(epochNo, "drep_always_abstain"),
+    getSpecialDrepAggregatesForEpoch(epochNo, "drep_always_no_confidence"),
+  ]);
 
   // Financial totals
   const circulation = toBigIntOrNull(totals?.circulation);
@@ -439,7 +506,7 @@ export async function syncMissingEpochAnalytics(
   }
 
   const startEpoch = 0;
-  const [totalsRows, syncStates] = await Promise.all([
+  const [totalsRows, syncStates, incompleteTotalsRows] = await Promise.all([
     prisma.epochTotals.findMany({
       where: { epoch: { gte: startEpoch, lte: endEpoch } },
       select: { epoch: true },
@@ -447,17 +514,29 @@ export async function syncMissingEpochAnalytics(
     prisma.epochAnalyticsSync.findMany({
       where: { epoch: { gte: startEpoch, lte: endEpoch } },
     }),
+    prisma.epochTotals.findMany({
+      where: {
+        epoch: {
+          gt: EPOCH_TOTALS_SELF_HEALING_AFTER_EPOCH,
+          gte: startEpoch,
+          lte: endEpoch,
+        },
+        OR: EPOCH_TOTALS_NULL_FIELD_FILTER,
+      },
+      select: { epoch: true },
+    }),
   ]);
 
   const totalsSet = new Set(totalsRows.map((row) => row.epoch));
   const syncStateMap = new Map(syncStates.map((row) => [row.epoch, row]));
+  const incompleteSet = new Set(incompleteTotalsRows.map((row) => row.epoch));
 
   const totalsMissing: number[] = [];
 
   for (let epoch = startEpoch; epoch <= endEpoch; epoch += 1) {
     const state = syncStateMap.get(epoch);
 
-    if (!totalsSet.has(epoch) || !state?.totalsSyncedAt) {
+    if (!totalsSet.has(epoch) || !state?.totalsSyncedAt || incompleteSet.has(epoch)) {
       totalsMissing.push(epoch);
     }
   }
@@ -476,7 +555,18 @@ export async function syncMissingEpochAnalytics(
         update: {},
         create: { epoch },
       });
-      await syncEpochTotals(prisma, epoch);
+
+      const totals = await syncEpochTotals(prisma, epoch);
+
+      if (
+        shouldRequireCompleteEpochTotals(epoch) &&
+        !isEpochTotalsResultComplete(totals)
+      ) {
+        throw new Error(
+          `Epoch ${epoch} totals still incomplete after sync (one or more required fields are null)`
+        );
+      }
+
       await prisma.epochAnalyticsSync.update({
         where: { epoch },
         data: { totalsSyncedAt: new Date() },

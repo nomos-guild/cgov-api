@@ -58,7 +58,13 @@ export {
 
 // Import for orchestration
 import { syncAllDrepsInventory, syncAllDrepsInfo, snapshotDrepEpoch, type SyncDrepInventoryResult, type SyncDrepInfoResult, type SnapshotDrepEpochResult } from "./drep-sync.service";
-import { syncEpochTotals, type SyncEpochTotalsResult } from "./epoch-totals.service";
+import {
+  hasIncompleteEpochTotals,
+  isEpochTotalsResultComplete,
+  shouldRequireCompleteEpochTotals,
+  syncEpochTotals,
+  type SyncEpochTotalsResult,
+} from "./epoch-totals.service";
 import { syncDrepLifecycleEvents, type SyncDrepLifecycleResult } from "./drep-lifecycle.service";
 import { syncPoolGroups, type SyncPoolGroupsResult } from "./pool-groups.service";
 
@@ -89,6 +95,48 @@ export interface SyncGovernanceAnalyticsPreviousAndCurrentResult {
   currentEpoch: number;
   previousEpoch: SyncGovernanceAnalyticsEpochResult;
   currentEpochTotals: SyncEpochTotalsResult;
+}
+
+// ============================================================
+// Per-Step Result Types (for individual jobs)
+// ============================================================
+
+export interface StepDrepInventoryResult {
+  currentEpoch: number;
+  epochToSync: number;
+  inventory?: SyncDrepInventoryResult;
+  snapshot?: SnapshotDrepEpochResult;
+  skippedInventory: boolean;
+  skippedSnapshot: boolean;
+}
+
+export interface StepDrepInfoResult {
+  currentEpoch: number;
+  epochToSync: number;
+  drepInfo?: SyncDrepInfoResult;
+  skipped: boolean;
+}
+
+export interface StepEpochTotalsResult {
+  currentEpoch: number;
+  epochToSync: number;
+  previousEpochTotals?: SyncEpochTotalsResult;
+  currentEpochTotals: SyncEpochTotalsResult;
+  skippedPrevious: boolean;
+}
+
+export interface StepDrepLifecycleResult {
+  currentEpoch: number;
+  epochToSync: number;
+  drepLifecycle?: SyncDrepLifecycleResult;
+  skipped: boolean;
+}
+
+export interface StepPoolGroupsResult {
+  currentEpoch: number;
+  epochToSync: number;
+  poolGroups?: SyncPoolGroupsResult;
+  skipped: boolean;
 }
 
 // ============================================================
@@ -195,10 +243,10 @@ async function syncGovernanceAnalyticsForEpoch(
     } else {
       console.error(
         `[Epoch Analytics] DRep lifecycle sync appears to have fetched 0 updates total for epoch ${epochToSync}; ` +
-          `not marking drepLifecycleSyncedAt so it can retry next run. ` +
-          `(drepsAttempted=${res.drepLifecycle.drepsAttempted}, drepsProcessed=${res.drepLifecycle.drepsProcessed}, ` +
-          `drepsWithNoUpdates=${res.drepLifecycle.drepsWithNoUpdates}, updatesFetched=${res.drepLifecycle.totalUpdatesFetched}, ` +
-          `eventsIngested=${res.drepLifecycle.eventsIngested}, failed=${res.drepLifecycle.failed.length})`
+        `not marking drepLifecycleSyncedAt so it can retry next run. ` +
+        `(drepsAttempted=${res.drepLifecycle.drepsAttempted}, drepsProcessed=${res.drepLifecycle.drepsProcessed}, ` +
+        `drepsWithNoUpdates=${res.drepLifecycle.drepsWithNoUpdates}, updatesFetched=${res.drepLifecycle.totalUpdatesFetched}, ` +
+        `eventsIngested=${res.drepLifecycle.eventsIngested}, failed=${res.drepLifecycle.failed.length})`
       );
     }
   }
@@ -232,8 +280,7 @@ export async function syncGovernanceAnalyticsForPreviousEpoch(
  * Sync governance analytics for the previous epoch (checkpointed) AND
  * always upsert current epoch totals/timestamps on every run.
  *
- * Rationale: current epoch totals evolve as the chain progresses, so we want
- * to keep the current epoch row up-to-date until the epoch rolls over.
+ * @deprecated Use the individual step functions instead for better timeout isolation.
  */
 export async function syncGovernanceAnalyticsForPreviousAndCurrentEpoch(
   prisma: Prisma.TransactionClient
@@ -254,4 +301,232 @@ export async function syncGovernanceAnalyticsForPreviousAndCurrentEpoch(
     previousEpoch,
     currentEpochTotals,
   };
+}
+
+// ============================================================
+// Per-Step Checkpoint Functions (for individual cron jobs)
+// ============================================================
+
+/**
+ * Ensures the EpochAnalyticsSync checkpoint row exists for the given epoch.
+ * Returns the current state of the checkpoint.
+ */
+async function ensureEpochCheckpoint(
+  prisma: Prisma.TransactionClient,
+  epochToSync: number
+) {
+  return prisma.epochAnalyticsSync.upsert({
+    where: { epoch: epochToSync },
+    update: {},
+    create: { epoch: epochToSync },
+  });
+}
+
+/**
+ * Step: DRep inventory + epoch snapshot.
+ * Fetches new DReps from Koios /drep_list and snapshots all DReps for the epoch.
+ */
+export async function syncDrepInventoryStep(
+  prisma: Prisma.TransactionClient
+): Promise<StepDrepInventoryResult> {
+  const currentEpoch = await getKoiosCurrentEpoch();
+  const epochToSync = currentEpoch - 1;
+
+  if (epochToSync < 0) {
+    return { currentEpoch, epochToSync, skippedInventory: true, skippedSnapshot: true };
+  }
+
+  const state = await ensureEpochCheckpoint(prisma, epochToSync);
+  const result: StepDrepInventoryResult = {
+    currentEpoch,
+    epochToSync,
+    skippedInventory: !!state.drepsSyncedAt,
+    skippedSnapshot: !!state.drepSnapshotSyncedAt,
+  };
+
+  if (!state.drepsSyncedAt) {
+    result.inventory = await syncAllDrepsInventory(prisma);
+    await prisma.epochAnalyticsSync.update({
+      where: { epoch: epochToSync },
+      data: { drepsSyncedAt: new Date() },
+    });
+  }
+
+  if (!state.drepSnapshotSyncedAt) {
+    result.snapshot = await snapshotDrepEpoch(prisma, epochToSync);
+    await prisma.epochAnalyticsSync.update({
+      where: { epoch: epochToSync },
+      data: { drepSnapshotSyncedAt: new Date() },
+    });
+  }
+
+  return result;
+}
+
+/**
+ * Step: Full DRep info refresh.
+ * Updates ALL DReps from Koios /drep_info + /drep_updates metadata.
+ * This is the slowest step — isolated to avoid timing out other steps.
+ */
+export async function syncDrepInfoStep(
+  prisma: Prisma.TransactionClient
+): Promise<StepDrepInfoResult> {
+  const currentEpoch = await getKoiosCurrentEpoch();
+  const epochToSync = currentEpoch - 1;
+
+  if (epochToSync < 0) {
+    return { currentEpoch, epochToSync, skipped: true };
+  }
+
+  const state = await ensureEpochCheckpoint(prisma, epochToSync);
+
+  if (state.drepInfoSyncedAt) {
+    return { currentEpoch, epochToSync, skipped: true };
+  }
+
+  const drepInfo = await syncAllDrepsInfo(prisma);
+  await prisma.epochAnalyticsSync.update({
+    where: { epoch: epochToSync },
+    data: { drepInfoSyncedAt: new Date() },
+  });
+
+  return { currentEpoch, epochToSync, drepInfo, skipped: false };
+}
+
+/**
+ * Step: Epoch totals for previous + current epoch.
+ * Previous epoch totals are checkpointed; current epoch totals always refresh.
+ */
+export async function syncEpochTotalsStep(
+  prisma: Prisma.TransactionClient
+): Promise<StepEpochTotalsResult> {
+  const currentEpoch = await getKoiosCurrentEpoch();
+  const epochToSync = currentEpoch - 1;
+
+  const result: StepEpochTotalsResult = {
+    currentEpoch,
+    epochToSync,
+    skippedPrevious: false,
+    currentEpochTotals: undefined as unknown as SyncEpochTotalsResult,
+  };
+
+  if (epochToSync >= 0) {
+    const state = await ensureEpochCheckpoint(prisma, epochToSync);
+    const requiresCompleteness = shouldRequireCompleteEpochTotals(epochToSync);
+
+    if (state.totalsSyncedAt) {
+      const hasIncomplete = await hasIncompleteEpochTotals(prisma, epochToSync);
+
+      if (hasIncomplete) {
+        result.previousEpochTotals = await syncEpochTotals(prisma, epochToSync);
+
+        if (requiresCompleteness && !isEpochTotalsResultComplete(result.previousEpochTotals)) {
+          console.warn(
+            `[Epoch Totals] Previous epoch ${epochToSync} is still incomplete after retry; leaving totalsSyncedAt unchanged so it retries next run.`
+          );
+        } else {
+          await prisma.epochAnalyticsSync.update({
+            where: { epoch: epochToSync },
+            data: { totalsSyncedAt: new Date() },
+          });
+        }
+
+        result.skippedPrevious = false;
+      } else {
+        result.skippedPrevious = true;
+      }
+    } else {
+      result.previousEpochTotals = await syncEpochTotals(prisma, epochToSync);
+
+      if (requiresCompleteness && !isEpochTotalsResultComplete(result.previousEpochTotals)) {
+        console.warn(
+          `[Epoch Totals] Previous epoch ${epochToSync} is incomplete after sync; not setting totalsSyncedAt so it retries next run.`
+        );
+      } else {
+        await prisma.epochAnalyticsSync.update({
+          where: { epoch: epochToSync },
+          data: { totalsSyncedAt: new Date() },
+        });
+      }
+    }
+  } else {
+    result.skippedPrevious = true;
+  }
+
+  // Always refresh current epoch totals (they change throughout the epoch).
+  result.currentEpochTotals = await syncEpochTotals(prisma, currentEpoch);
+
+  return result;
+}
+
+/**
+ * Step: DRep lifecycle events (registrations, deregistrations, updates).
+ * Uses conditional checkpoint — only marks done if Koios returned meaningful data.
+ */
+export async function syncDrepLifecycleStep(
+  prisma: Prisma.TransactionClient
+): Promise<StepDrepLifecycleResult> {
+  const currentEpoch = await getKoiosCurrentEpoch();
+  const epochToSync = currentEpoch - 1;
+
+  if (epochToSync < 0) {
+    return { currentEpoch, epochToSync, skipped: true };
+  }
+
+  const state = await ensureEpochCheckpoint(prisma, epochToSync);
+
+  if (state.drepLifecycleSyncedAt) {
+    return { currentEpoch, epochToSync, skipped: true };
+  }
+
+  const drepLifecycle = await syncDrepLifecycleEvents(prisma);
+
+  // Mark checkpoint only if we successfully talked to Koios
+  const fetchedAnyUpdates = drepLifecycle.totalUpdatesFetched > 0;
+  const hadAnySuccess = drepLifecycle.drepsProcessed > 0;
+
+  if (hadAnySuccess && (drepLifecycle.eventsIngested > 0 || fetchedAnyUpdates)) {
+    await prisma.epochAnalyticsSync.update({
+      where: { epoch: epochToSync },
+      data: { drepLifecycleSyncedAt: new Date() },
+    });
+  } else {
+    console.error(
+      `[Epoch Analytics] DRep lifecycle sync appears to have fetched 0 updates total for epoch ${epochToSync}; ` +
+      `not marking drepLifecycleSyncedAt so it can retry next run. ` +
+      `(drepsAttempted=${drepLifecycle.drepsAttempted}, drepsProcessed=${drepLifecycle.drepsProcessed}, ` +
+      `drepsWithNoUpdates=${drepLifecycle.drepsWithNoUpdates}, updatesFetched=${drepLifecycle.totalUpdatesFetched}, ` +
+      `eventsIngested=${drepLifecycle.eventsIngested}, failed=${drepLifecycle.failed.length})`
+    );
+  }
+
+  return { currentEpoch, epochToSync, drepLifecycle, skipped: false };
+}
+
+/**
+ * Step: Pool groups (multi-pool operator mappings).
+ */
+export async function syncPoolGroupsStep(
+  prisma: Prisma.TransactionClient
+): Promise<StepPoolGroupsResult> {
+  const currentEpoch = await getKoiosCurrentEpoch();
+  const epochToSync = currentEpoch - 1;
+
+  if (epochToSync < 0) {
+    return { currentEpoch, epochToSync, skipped: true };
+  }
+
+  const state = await ensureEpochCheckpoint(prisma, epochToSync);
+
+  if (state.poolGroupsSyncedAt) {
+    return { currentEpoch, epochToSync, skipped: true };
+  }
+
+  const poolGroups = await syncPoolGroups(prisma);
+  await prisma.epochAnalyticsSync.update({
+    where: { epoch: epochToSync },
+    data: { poolGroupsSyncedAt: new Date() },
+  });
+
+  return { currentEpoch, epochToSync, poolGroups, skipped: false };
 }
