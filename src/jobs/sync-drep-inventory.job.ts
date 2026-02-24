@@ -13,7 +13,7 @@ import { syncDrepInventoryStep } from "../services/ingestion/epoch-analytics.ser
 let isRunning = false;
 
 export const startDrepInventorySyncJob = () => {
-  const schedule = process.env.DREP_INVENTORY_SYNC_SCHEDULE || "5 * * * *";
+  const schedule = process.env.DREP_INVENTORY_SYNC_SCHEDULE || "2 * * * *";
   const enabled = process.env.ENABLE_CRON_JOBS !== "false";
 
   if (!enabled) {
@@ -25,9 +25,9 @@ export const startDrepInventorySyncJob = () => {
 
   if (!cron.validate(schedule)) {
     console.error(
-      `[Cron] Invalid cron schedule: ${schedule}. Using default: 5 * * * *`
+      `[Cron] Invalid cron schedule: ${schedule}. Using default: 2 * * * *`
     );
-    return startDrepInventorySyncJobWithSchedule("5 * * * *");
+    return startDrepInventorySyncJobWithSchedule("2 * * * *");
   }
 
   startDrepInventorySyncJobWithSchedule(schedule);

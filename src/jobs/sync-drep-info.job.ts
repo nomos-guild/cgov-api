@@ -13,7 +13,7 @@ import { syncDrepInfoStep } from "../services/ingestion/epoch-analytics.service"
 let isRunning = false;
 
 export const startDrepInfoSyncJob = () => {
-  const schedule = process.env.DREP_INFO_SYNC_SCHEDULE || "15 * * * *";
+  const schedule = process.env.DREP_INFO_SYNC_SCHEDULE || "22 * * * *";
   const enabled = process.env.ENABLE_CRON_JOBS !== "false";
 
   if (!enabled) {
@@ -25,9 +25,9 @@ export const startDrepInfoSyncJob = () => {
 
   if (!cron.validate(schedule)) {
     console.error(
-      `[Cron] Invalid cron schedule: ${schedule}. Using default: 15 * * * *`
+      `[Cron] Invalid cron schedule: ${schedule}. Using default: 22 * * * *`
     );
-    return startDrepInfoSyncJobWithSchedule("15 * * * *");
+    return startDrepInfoSyncJobWithSchedule("22 * * * *");
   }
 
   startDrepInfoSyncJobWithSchedule(schedule);

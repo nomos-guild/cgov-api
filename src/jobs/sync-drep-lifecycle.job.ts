@@ -13,7 +13,7 @@ import { syncDrepLifecycleStep } from "../services/ingestion/epoch-analytics.ser
 let isRunning = false;
 
 export const startDrepLifecycleSyncJob = () => {
-  const schedule = process.env.DREP_LIFECYCLE_SYNC_SCHEDULE || "25 * * * *";
+  const schedule = process.env.DREP_LIFECYCLE_SYNC_SCHEDULE || "37 * * * *";
   const enabled = process.env.ENABLE_CRON_JOBS !== "false";
 
   if (!enabled) {
@@ -25,9 +25,9 @@ export const startDrepLifecycleSyncJob = () => {
 
   if (!cron.validate(schedule)) {
     console.error(
-      `[Cron] Invalid cron schedule: ${schedule}. Using default: 25 * * * *`
+      `[Cron] Invalid cron schedule: ${schedule}. Using default: 37 * * * *`
     );
-    return startDrepLifecycleSyncJobWithSchedule("25 * * * *");
+    return startDrepLifecycleSyncJobWithSchedule("37 * * * *");
   }
 
   startDrepLifecycleSyncJobWithSchedule(schedule);
@@ -59,10 +59,10 @@ function startDrepLifecycleSyncJobWithSchedule(schedule: string) {
         const lc = result.drepLifecycle;
         console.log(
           `  Lifecycle: attempted=${lc.drepsAttempted}, processed=${lc.drepsProcessed}, ` +
-            `noUpdates=${lc.drepsWithNoUpdates}, updatesFetched=${lc.totalUpdatesFetched}, ` +
-            `events=${lc.eventsIngested} (reg=${lc.eventsByType.registration}, ` +
-            `dereg=${lc.eventsByType.deregistration}, update=${lc.eventsByType.update}), ` +
-            `failed=${lc.failed.length}`
+          `noUpdates=${lc.drepsWithNoUpdates}, updatesFetched=${lc.totalUpdatesFetched}, ` +
+          `events=${lc.eventsIngested} (reg=${lc.eventsByType.registration}, ` +
+          `dereg=${lc.eventsByType.deregistration}, update=${lc.eventsByType.update}), ` +
+          `failed=${lc.failed.length}`
         );
         if (lc.failed.length > 0) {
           console.error(

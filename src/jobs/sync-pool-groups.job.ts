@@ -12,7 +12,7 @@ import { syncPoolGroupsStep } from "../services/ingestion/epoch-analytics.servic
 let isRunning = false;
 
 export const startPoolGroupsSyncJob = () => {
-  const schedule = process.env.POOL_GROUPS_SYNC_SCHEDULE || "30 * * * *";
+  const schedule = process.env.POOL_GROUPS_SYNC_SCHEDULE || "47 * * * *";
   const enabled = process.env.ENABLE_CRON_JOBS !== "false";
 
   if (!enabled) {
@@ -24,9 +24,9 @@ export const startPoolGroupsSyncJob = () => {
 
   if (!cron.validate(schedule)) {
     console.error(
-      `[Cron] Invalid cron schedule: ${schedule}. Using default: 30 * * * *`
+      `[Cron] Invalid cron schedule: ${schedule}. Using default: 47 * * * *`
     );
-    return startPoolGroupsSyncJobWithSchedule("30 * * * *");
+    return startPoolGroupsSyncJobWithSchedule("47 * * * *");
   }
 
   startPoolGroupsSyncJobWithSchedule(schedule);

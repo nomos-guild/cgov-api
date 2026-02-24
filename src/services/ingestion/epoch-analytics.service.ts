@@ -58,7 +58,13 @@ export {
 
 // Import for orchestration
 import { syncAllDrepsInventory, syncAllDrepsInfo, snapshotDrepEpoch, type SyncDrepInventoryResult, type SyncDrepInfoResult, type SnapshotDrepEpochResult } from "./drep-sync.service";
-import { syncEpochTotals, type SyncEpochTotalsResult } from "./epoch-totals.service";
+import {
+  hasIncompleteEpochTotals,
+  isEpochTotalsResultComplete,
+  shouldRequireCompleteEpochTotals,
+  syncEpochTotals,
+  type SyncEpochTotalsResult,
+} from "./epoch-totals.service";
 import { syncDrepLifecycleEvents, type SyncDrepLifecycleResult } from "./drep-lifecycle.service";
 import { syncPoolGroups, type SyncPoolGroupsResult } from "./pool-groups.service";
 
@@ -237,10 +243,10 @@ async function syncGovernanceAnalyticsForEpoch(
     } else {
       console.error(
         `[Epoch Analytics] DRep lifecycle sync appears to have fetched 0 updates total for epoch ${epochToSync}; ` +
-          `not marking drepLifecycleSyncedAt so it can retry next run. ` +
-          `(drepsAttempted=${res.drepLifecycle.drepsAttempted}, drepsProcessed=${res.drepLifecycle.drepsProcessed}, ` +
-          `drepsWithNoUpdates=${res.drepLifecycle.drepsWithNoUpdates}, updatesFetched=${res.drepLifecycle.totalUpdatesFetched}, ` +
-          `eventsIngested=${res.drepLifecycle.eventsIngested}, failed=${res.drepLifecycle.failed.length})`
+        `not marking drepLifecycleSyncedAt so it can retry next run. ` +
+        `(drepsAttempted=${res.drepLifecycle.drepsAttempted}, drepsProcessed=${res.drepLifecycle.drepsProcessed}, ` +
+        `drepsWithNoUpdates=${res.drepLifecycle.drepsWithNoUpdates}, updatesFetched=${res.drepLifecycle.totalUpdatesFetched}, ` +
+        `eventsIngested=${res.drepLifecycle.eventsIngested}, failed=${res.drepLifecycle.failed.length})`
       );
     }
   }
@@ -406,15 +412,42 @@ export async function syncEpochTotalsStep(
 
   if (epochToSync >= 0) {
     const state = await ensureEpochCheckpoint(prisma, epochToSync);
+    const requiresCompleteness = shouldRequireCompleteEpochTotals(epochToSync);
 
     if (state.totalsSyncedAt) {
-      result.skippedPrevious = true;
+      const hasIncomplete = await hasIncompleteEpochTotals(prisma, epochToSync);
+
+      if (hasIncomplete) {
+        result.previousEpochTotals = await syncEpochTotals(prisma, epochToSync);
+
+        if (requiresCompleteness && !isEpochTotalsResultComplete(result.previousEpochTotals)) {
+          console.warn(
+            `[Epoch Totals] Previous epoch ${epochToSync} is still incomplete after retry; leaving totalsSyncedAt unchanged so it retries next run.`
+          );
+        } else {
+          await prisma.epochAnalyticsSync.update({
+            where: { epoch: epochToSync },
+            data: { totalsSyncedAt: new Date() },
+          });
+        }
+
+        result.skippedPrevious = false;
+      } else {
+        result.skippedPrevious = true;
+      }
     } else {
       result.previousEpochTotals = await syncEpochTotals(prisma, epochToSync);
-      await prisma.epochAnalyticsSync.update({
-        where: { epoch: epochToSync },
-        data: { totalsSyncedAt: new Date() },
-      });
+
+      if (requiresCompleteness && !isEpochTotalsResultComplete(result.previousEpochTotals)) {
+        console.warn(
+          `[Epoch Totals] Previous epoch ${epochToSync} is incomplete after sync; not setting totalsSyncedAt so it retries next run.`
+        );
+      } else {
+        await prisma.epochAnalyticsSync.update({
+          where: { epoch: epochToSync },
+          data: { totalsSyncedAt: new Date() },
+        });
+      }
     }
   } else {
     result.skippedPrevious = true;
@@ -460,10 +493,10 @@ export async function syncDrepLifecycleStep(
   } else {
     console.error(
       `[Epoch Analytics] DRep lifecycle sync appears to have fetched 0 updates total for epoch ${epochToSync}; ` +
-        `not marking drepLifecycleSyncedAt so it can retry next run. ` +
-        `(drepsAttempted=${drepLifecycle.drepsAttempted}, drepsProcessed=${drepLifecycle.drepsProcessed}, ` +
-        `drepsWithNoUpdates=${drepLifecycle.drepsWithNoUpdates}, updatesFetched=${drepLifecycle.totalUpdatesFetched}, ` +
-        `eventsIngested=${drepLifecycle.eventsIngested}, failed=${drepLifecycle.failed.length})`
+      `not marking drepLifecycleSyncedAt so it can retry next run. ` +
+      `(drepsAttempted=${drepLifecycle.drepsAttempted}, drepsProcessed=${drepLifecycle.drepsProcessed}, ` +
+      `drepsWithNoUpdates=${drepLifecycle.drepsWithNoUpdates}, updatesFetched=${drepLifecycle.totalUpdatesFetched}, ` +
+      `eventsIngested=${drepLifecycle.eventsIngested}, failed=${drepLifecycle.failed.length})`
     );
   }
 

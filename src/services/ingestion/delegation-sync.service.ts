@@ -515,8 +515,8 @@ export async function syncDrepDelegationChanges(
   const forceBackfillEnabled = process.env.FORCE_DREP_DELEGATION_BACKFILL === "true";
   const forceBackfillStatus = forceBackfillEnabled
     ? await (prisma as any).syncStatus.findUnique({
-        where: { jobName: FORCE_DREP_DELEGATION_BACKFILL_JOB_NAME },
-      })
+      where: { jobName: FORCE_DREP_DELEGATION_BACKFILL_JOB_NAME },
+    })
     : null;
   const shouldForceBackfill =
     forceBackfillEnabled && !forceBackfillStatus?.backfillCompletedAt;

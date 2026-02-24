@@ -48,25 +48,25 @@ export const startAllJobs = () => {
 
   // --- Governance analytics epoch sync jobs (split for timeout isolation) ---
 
-  // DRep inventory + epoch snapshot (hourly at :05)
+  // DRep inventory + epoch snapshot (hourly at :02)
   startDrepInventorySyncJob();
 
-  // DRep info full refresh (hourly at :15) — slowest step, isolated
+  // DRep info full refresh (hourly at :22) — slowest step, isolated
   startDrepInfoSyncJob();
 
-  // Epoch totals for previous + current epoch (hourly at :10)
+  // Epoch totals for previous + current epoch (hourly at :12)
   startEpochTotalsSyncJob();
 
-  // DRep lifecycle events (hourly at :25)
+  // DRep lifecycle events (hourly at :37)
   startDrepLifecycleSyncJob();
 
-  // Pool group mappings (hourly at :30)
+  // Pool group mappings (hourly at :47)
   startPoolGroupsSyncJob();
 
-  // Missing epochs backfill (every 6 hours)
+  // Missing epochs backfill (every 6 hours at :33)
   startMissingEpochsSyncJob();
 
-  // DRep delegation change sync (hourly at :40)
+  // DRep delegation change sync (hourly at :57)
   startDrepDelegatorSyncJob();
 
   console.log("[Cron] All cron jobs initialized");

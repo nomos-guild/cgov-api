@@ -13,7 +13,7 @@ import { syncMissingEpochAnalytics } from "../services/ingestion/epoch-analytics
 let isRunning = false;
 
 export const startMissingEpochsSyncJob = () => {
-  const schedule = process.env.MISSING_EPOCHS_SYNC_SCHEDULE || "0 */6 * * *";
+  const schedule = process.env.MISSING_EPOCHS_SYNC_SCHEDULE || "33 */6 * * *";
   const enabled = process.env.ENABLE_CRON_JOBS !== "false";
 
   if (!enabled) {
@@ -25,9 +25,9 @@ export const startMissingEpochsSyncJob = () => {
 
   if (!cron.validate(schedule)) {
     console.error(
-      `[Cron] Invalid cron schedule: ${schedule}. Using default: 0 */6 * * *`
+      `[Cron] Invalid cron schedule: ${schedule}. Using default: 33 */6 * * *`
     );
-    return startMissingEpochsSyncJobWithSchedule("0 */6 * * *");
+    return startMissingEpochsSyncJobWithSchedule("33 */6 * * *");
   }
 
   startMissingEpochsSyncJobWithSchedule(schedule);
