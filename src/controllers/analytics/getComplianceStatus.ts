@@ -53,6 +53,7 @@ function determineConstitutionalStatus(
  * - page: Page number (optional; if omitted with pageSize, returns all proposals)
  * - pageSize: Items per page (optional, max: 100; if omitted with page, returns all proposals)
  * - status: Filter by proposal status (optional, comma-separated)
+ * - proposalId: Filter by specific proposal ID (optional)
  */
 export const getComplianceStatus = async (req: Request, res: Response) => {
   try {
@@ -67,11 +68,15 @@ export const getComplianceStatus = async (req: Request, res: Response) => {
       ? Math.min(100, Math.max(1, parseInt(pageSizeQuery || "20")))
       : 0;
     const statusFilter = (req.query.status as string)?.split(",").filter(Boolean);
+    const proposalId = (req.query.proposalId as string)?.trim();
 
     // Build where clause
     const whereClause: any = {};
     if (statusFilter && statusFilter.length > 0) {
       whereClause.status = { in: statusFilter };
+    }
+    if (proposalId) {
+      whereClause.proposalId = proposalId;
     }
 
     // Get committee state for eligible members count

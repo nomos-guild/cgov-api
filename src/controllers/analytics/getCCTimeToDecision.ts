@@ -26,6 +26,7 @@ function percentile(sortedValues: number[], p: number): number | null {
  * - page: Page number (default: 1)
  * - pageSize: Items per page (default: 20, max: 100)
  * - status: Filter by proposal status (optional, comma-separated)
+ * - proposalId: Filter by specific proposal ID (optional)
  */
 export const getCCTimeToDecision = async (req: Request, res: Response) => {
   try {
@@ -35,11 +36,15 @@ export const getCCTimeToDecision = async (req: Request, res: Response) => {
       Math.max(1, parseInt(req.query.pageSize as string) || 20)
     );
     const statusFilter = (req.query.status as string)?.split(",").filter(Boolean);
+    const proposalId = (req.query.proposalId as string)?.trim();
 
     // Build where clause
     const whereClause: any = {};
     if (statusFilter && statusFilter.length > 0) {
       whereClause.status = { in: statusFilter };
+    }
+    if (proposalId) {
+      whereClause.proposalId = proposalId;
     }
 
     // Get total count and proposals

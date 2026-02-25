@@ -39,6 +39,11 @@ const router = express.Router();
  *         description: Filter by governance action type (comma-separated)
  *         schema:
  *           type: string
+ *       - name: proposalId
+ *         in: query
+ *         description: Filter by specific proposal
+ *         schema:
+ *           type: string
  *       - name: epochStart
  *         in: query
  *         description: Filter proposals by submission epoch >= epochStart
@@ -247,7 +252,7 @@ router.get("/gini", analyticsController.getGiniCoefficient);
  * /analytics/drep-activity-rate:
  *   get:
  *     summary: Get DRep activity rate
- *     description: Returns DRep activity rate (unique proposals voted / proposals in scope since each DRep's registration epoch) and includes registrationEpoch, totalProposals (all in-scope), totalProposalsSinceRegistration, activityRateAllTimePct, totalVotesCast (raw vote rows), aggregateActivityRatePct, and aggregateActivityRateAllTimePct. If no query parameters are provided, returns all active DReps (no pagination).
+ *     description: Returns DRep activity rate (unique proposals voted / proposals in scope since each DRep's registration epoch) and includes registrationEpoch, totalProposals (all in-scope), totalProposalsSinceRegistration, activityRateAllTimePct, totalVotesCast (raw vote rows), aggregateActivityRatePct, and aggregateActivityRateAllTimePct. Aggregates are computed on the filtered DRep result set. If no query parameters are provided, returns all active DReps (no pagination).
  *     tags:
  *       - Governance Analytics
  *     parameters:
@@ -281,6 +286,11 @@ router.get("/gini", analyticsController.getGiniCoefficient);
  *         schema:
  *           type: boolean
  *           default: true
+ *       - name: drepId
+ *         in: query
+ *         description: Filter to a specific DRep ID
+ *         schema:
+ *           type: string
  *       - name: sortBy
  *         in: query
  *         schema:
@@ -327,6 +337,11 @@ router.get("/drep-activity-rate", analyticsController.getDRepActivityRate);
  *         schema:
  *           type: boolean
  *           default: true
+ *       - name: drepId
+ *         in: query
+ *         description: Filter to a specific DRep ID
+ *         schema:
+ *           type: string
  *       - name: sortBy
  *         in: query
  *         schema:
@@ -419,6 +434,25 @@ router.get("/drep-correlation", analyticsController.getDRepCorrelation);
  */
 router.get("/drep-lifecycle-rate", analyticsController.getDRepLifecycleRate);
 
+/**
+ * @openapi
+ * /analytics/drep-concentration-history:
+ *   get:
+ *     summary: Get DRep concentration history by epoch
+ *     description: Returns top-10/top-20/top-50 concentration trends for DRep voting power and delegator counts across epochs.
+ *     tags:
+ *       - Governance Analytics
+ *     responses:
+ *       200:
+ *         description: Successfully retrieved DRep concentration history
+ *       500:
+ *         description: Server error
+ */
+router.get(
+  "/drep-concentration-history",
+  analyticsController.getDRepConcentrationHistory
+);
+
 // ============================================
 // Category 3 – SPO Governance Participation
 // ============================================
@@ -446,6 +480,11 @@ router.get("/drep-lifecycle-rate", analyticsController.getDRepLifecycleRate);
  *           default: 20
  *       - name: status
  *         in: query
+ *         schema:
+ *           type: string
+ *       - name: proposalId
+ *         in: query
+ *         description: Filter by specific proposal
  *         schema:
  *           type: string
  *       - name: epochStart
@@ -487,6 +526,11 @@ router.get("/spo-silent-stake", analyticsController.getSpoSilentStake);
  *           default: 20
  *       - name: status
  *         in: query
+ *         schema:
+ *           type: string
+ *       - name: proposalId
+ *         in: query
+ *         description: Filter by specific proposal
  *         schema:
  *           type: string
  *       - name: epochStart
@@ -551,6 +595,11 @@ router.get("/entity-concentration", analyticsController.getEntityConcentration);
  *           default: 20
  *       - name: status
  *         in: query
+ *         schema:
+ *           type: string
+ *       - name: proposalId
+ *         in: query
+ *         description: Filter by specific proposal
  *         schema:
  *           type: string
  *       - name: epochStart
@@ -632,6 +681,11 @@ router.get("/action-volume", analyticsController.getActionVolume);
  *           type: string
  *       - name: governanceActionType
  *         in: query
+ *         schema:
+ *           type: string
+ *       - name: proposalId
+ *         in: query
+ *         description: Filter by specific proposal
  *         schema:
  *           type: string
  *       - name: epochStart
@@ -716,6 +770,11 @@ router.get("/treasury-rate", analyticsController.getTreasuryRate);
  *         in: query
  *         schema:
  *           type: string
+ *       - name: proposalId
+ *         in: query
+ *         description: Filter by specific proposal
+ *         schema:
+ *           type: string
  *       - name: enactedOnly
  *         in: query
  *         description: Only return enacted proposals
@@ -754,6 +813,11 @@ router.get("/time-to-enactment", analyticsController.getTimeToEnactment);
  *         description: Filter by proposal status (comma-separated)
  *         schema:
  *           type: string
+ *       - name: proposalId
+ *         in: query
+ *         description: Filter by specific proposal
+ *         schema:
+ *           type: string
  *     responses:
  *       200:
  *         description: Successfully retrieved compliance status data
@@ -787,6 +851,11 @@ router.get("/compliance-status", analyticsController.getComplianceStatus);
  *           default: 20
  *       - name: status
  *         in: query
+ *         schema:
+ *           type: string
+ *       - name: proposalId
+ *         in: query
+ *         description: Filter by specific proposal
  *         schema:
  *           type: string
  *     responses:
@@ -844,6 +913,11 @@ router.get("/cc-participation", analyticsController.getCCParticipation);
  *         description: Filter proposals by status (comma-separated)
  *         schema:
  *           type: string
+ *       - name: proposalId
+ *         in: query
+ *         description: Filter by specific proposal
+ *         schema:
+ *           type: string
  *     responses:
  *       200:
  *         description: Successfully retrieved CC abstain rate data
@@ -875,6 +949,11 @@ router.get("/cc-abstain-rate", analyticsController.getCCAbstainRate);
  *       - name: status
  *         in: query
  *         description: Filter proposals by status (comma-separated)
+ *         schema:
+ *           type: string
+ *       - name: proposalId
+ *         in: query
+ *         description: Filter by specific proposal
  *         schema:
  *           type: string
  *     responses:
@@ -913,6 +992,11 @@ router.get("/cc-agreement-rate", analyticsController.getCCAgreementRate);
  *       - name: status
  *         in: query
  *         description: Filter by proposal status (comma-separated)
+ *         schema:
+ *           type: string
+ *       - name: proposalId
+ *         in: query
+ *         description: Filter by specific proposal
  *         schema:
  *           type: string
  *     responses:

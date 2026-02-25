@@ -36,11 +36,46 @@ export interface ProposalIngestionResult {
   stats: VoteIngestionStats;
   /**
    * The intended final status for the proposal.
-   * When deferExpiredStatus is true and the proposal should be EXPIRED/CLOSED,
-   * status will be ACTIVE but intendedStatus will be EXPIRED/CLOSED.
+   * When deferExpiredStatus is true and the proposal should be
+   * EXPIRED/DROPPED/CLOSED, status will be ACTIVE but intendedStatus will be
+   * EXPIRED/DROPPED/CLOSED.
    * The caller should update the status after successful sync completion.
    */
   intendedStatus?: ProposalStatus;
+}
+
+/**
+ * Finalizes deferred proposal status after a successful full sync.
+ *
+ * When ingestProposalData is called with deferExpiredStatus=true for terminal
+ * statuses, the proposal is kept ACTIVE during ingestion and intendedStatus is
+ * returned. This helper applies that intended status only after votes (and
+ * related proposal data) were synced successfully.
+ */
+export async function finalizeProposalStatusAfterVoteSync(
+  result: ProposalIngestionResult,
+  logPrefix = "[Proposal Sync]"
+): Promise<ProposalIngestionResult> {
+  if (!result.intendedStatus || result.intendedStatus === result.proposal.status) {
+    return result;
+  }
+
+  await prisma.proposal.update({
+    where: { proposalId: result.proposal.proposalId },
+    data: { status: result.intendedStatus },
+  });
+
+  console.log(
+    `${logPrefix} Updated status for ${result.proposal.proposalId} to ${result.intendedStatus} after successful vote sync`
+  );
+
+  return {
+    ...result,
+    proposal: {
+      ...result.proposal,
+      status: result.intendedStatus,
+    },
+  };
 }
 
 /**
@@ -69,8 +104,9 @@ export interface IngestProposalOptions {
   useCache?: boolean;
   /**
    * When true, keeps the proposal status as ACTIVE during ingestion even if
-   * the derived status would be EXPIRED/CLOSED. The intended final status is
-   * returned in the result so the caller can update it after successful sync.
+   * the derived status would be EXPIRED/DROPPED/CLOSED. The intended final
+   * status is returned in the result so the caller can update it after
+   * successful sync.
    * This ensures interrupted syncs will retry on the next read.
    * (Ideal for sync-on-read to ensure data is fully synced before marking expired)
    */
@@ -121,26 +157,70 @@ export async function ingestProposalData(
     // When deferExpiredStatus is true, keep the proposal ACTIVE during ingestion
     // so that if the sync is interrupted, it will retry on the next read.
     // The intended status is returned so the caller can update it after successful sync.
-    const isExpiredOrClosed =
+    const isTerminalStatus =
       derivedStatus === ProposalStatus.EXPIRED ||
+      derivedStatus === ProposalStatus.DROPPED ||
       derivedStatus === ProposalStatus.CLOSED;
     const status =
-      deferExpiredStatus && isExpiredOrClosed
+      deferExpiredStatus && isTerminalStatus
         ? ProposalStatus.ACTIVE
         : derivedStatus;
     const intendedStatus =
-      deferExpiredStatus && isExpiredOrClosed ? derivedStatus : undefined;
+      deferExpiredStatus && isTerminalStatus ? derivedStatus : undefined;
 
-    // 4. Extract metadata (from meta_json or fetch from meta_url)
-    const { title, description, rationale, metadata } =
-      await extractProposalMetadata(koiosProposal);
-
-    // 5. Check if proposal exists to determine if creating or updating
+    // 4. Check if proposal exists to determine if creating or updating
     const existingProposal = await prisma.proposal.findUnique({
       where: { proposalId: koiosProposal.proposal_id },
+      select: {
+        title: true,
+        description: true,
+        rationale: true,
+        status: true,
+      },
     });
 
     const isUpdate = !!existingProposal;
+
+    const shouldBackfillMissingMetadataFields =
+      !!existingProposal &&
+      existingProposal.status === ProposalStatus.ACTIVE &&
+      hasMissingProposalInfoFields(existingProposal);
+
+    // 5. Extract metadata (from meta_json or fetch from meta_url)
+    const { title, description, rationale, metadata } =
+      await extractProposalMetadata(koiosProposal, {
+        preferMetaUrlForMissingFields: shouldBackfillMissingMetadataFields,
+        retryMetaUrlFetch: shouldBackfillMissingMetadataFields,
+      });
+
+    const updateInfoFields: {
+      title?: string;
+      description?: string;
+      rationale?: string;
+    } = {};
+
+    if (shouldBackfillMissingMetadataFields && existingProposal) {
+      if (
+        !isMeaningfulTitle(existingProposal.title) &&
+        isMeaningfulTitle(title)
+      ) {
+        updateInfoFields.title = title;
+      }
+
+      if (
+        isMissingText(existingProposal.description) &&
+        isMeaningfulText(description)
+      ) {
+        updateInfoFields.description = description as string;
+      }
+
+      if (
+        isMissingText(existingProposal.rationale) &&
+        isMeaningfulText(rationale)
+      ) {
+        updateInfoFields.rationale = rationale as string;
+      }
+    }
 
     // 6. Upsert proposal (single atomic DB operation, no long transaction)
     const proposal = await prisma.proposal.upsert({
@@ -175,15 +255,15 @@ export async function ingestProposalData(
         expiredEpoch: koiosProposal.expired_epoch,
         expirationEpoch: koiosProposal.expiration,
         metadata,
+        ...updateInfoFields,
       },
     });
 
     console.log(
       `[Proposal Ingest] ${isUpdate ? "Updated" : "Created"} proposal - ` +
-        `proposalId: ${proposal.proposalId}, ` +
-        `type: ${governanceActionType || "null"}, koios_type: "${
-          koiosProposal.proposal_type
-        }"`
+      `proposalId: ${proposal.proposalId}, ` +
+      `type: ${governanceActionType || "null"}, koios_type: "${koiosProposal.proposal_type
+      }"`
     );
 
     // 7. Ingest all votes for this proposal using the root Prisma client.
@@ -283,12 +363,15 @@ export async function ingestProposal(
 
   // 3. Ingest the proposal data (let it fetch current epoch itself) and
   //    only fetch votes from this proposal's submission epoch onward.
-  return ingestProposalData(koiosProposal, {
+  const result = await ingestProposalData(koiosProposal, {
     minVotesEpoch: koiosProposal.proposed_epoch,
     // For single-proposal ingestion we prefer the per-proposal fetch path so
     // it matches sync-on-read semantics and avoids cross-proposal paging drift.
     useCache: false,
+    deferExpiredStatus: true,
   });
+
+  return finalizeProposalStatusAfterVoteSync(result, "[Ingest Proposal]");
 }
 
 /**
@@ -377,8 +460,7 @@ export async function syncAllProposals(): Promise<SyncAllProposalsResult> {
   });
 
   console.log(
-    `[Proposal Sync] Processing proposals from epoch ${
-      sortedProposals[0]?.proposed_epoch
+    `[Proposal Sync] Processing proposals from epoch ${sortedProposals[0]?.proposed_epoch
     } to ${sortedProposals[sortedProposals.length - 1]?.proposed_epoch}`
   );
 
@@ -397,11 +479,15 @@ export async function syncAllProposals(): Promise<SyncAllProposalsResult> {
   // 6. Process each proposal sequentially
   for (const koiosProposal of sortedProposals) {
     try {
-      await ingestProposalData(koiosProposal, {
+      const result = await ingestProposalData(koiosProposal, {
         currentEpoch,
         minVotesEpoch,
         useCache: true, // Use cache for bulk sync
+        deferExpiredStatus: true, // Apply terminal status only after successful vote sync
       });
+
+      await finalizeProposalStatusAfterVoteSync(result, "[Proposal Sync]");
+
       results.success++;
       console.log(
         `[Proposal Sync] ✓ Synced ${koiosProposal.proposal_tx_hash} (${results.success}/${results.total})`
@@ -467,6 +553,7 @@ export async function getCurrentEpoch(): Promise<number> {
  * - RATIFIED: Passed voting, waiting for enactment (non-INFO actions)
  * - ENACTED: Applied to the chain (non-INFO actions)
  * - EXPIRED: Voting period ended without ratification/approval (non-INFO actions)
+ * - DROPPED: Invalidated before natural expiration (non-INFO actions)
  * - CLOSED: Expired INFO action (INFO actions don't get ratified/enacted)
  */
 function deriveProposalStatus(
@@ -485,15 +572,20 @@ function deriveProposalStatus(
     return ProposalStatus.RATIFIED;
   }
 
+  // If dropped before natural expiration, classify as DROPPED.
+  const droppedBeforeExpiration =
+    proposal.dropped_epoch != null &&
+    proposal.dropped_epoch <= currentEpoch &&
+    (proposal.expired_epoch == null ||
+      proposal.dropped_epoch < proposal.expired_epoch);
+  if (droppedBeforeExpiration) {
+    // INFO actions use CLOSED status when dropped
+    return isInfoAction ? ProposalStatus.CLOSED : ProposalStatus.DROPPED;
+  }
+
   // If expired
   if (proposal.expired_epoch && proposal.expired_epoch <= currentEpoch) {
     // INFO actions use CLOSED status when expired
-    return isInfoAction ? ProposalStatus.CLOSED : ProposalStatus.EXPIRED;
-  }
-
-  // If dropped
-  if (proposal.dropped_epoch && proposal.dropped_epoch <= currentEpoch) {
-    // INFO actions use CLOSED status when dropped
     return isInfoAction ? ProposalStatus.CLOSED : ProposalStatus.EXPIRED;
   }
 
@@ -504,53 +596,68 @@ function deriveProposalStatus(
 /**
  * Extracts proposal metadata from meta_json or fetches from meta_url
  */
-async function extractProposalMetadata(proposal: KoiosProposal): Promise<{
+interface ExtractProposalMetadataOptions {
+  preferMetaUrlForMissingFields?: boolean;
+  retryMetaUrlFetch?: boolean;
+}
+
+async function extractProposalMetadata(
+  proposal: KoiosProposal,
+  options?: ExtractProposalMetadataOptions
+): Promise<{
   title: string;
   description: string | null;
   rationale: string | null;
   metadata: string | null;
 }> {
+  const preferMetaUrlForMissingFields =
+    options?.preferMetaUrlForMissingFields ?? false;
+  const retryMetaUrlFetch = options?.retryMetaUrlFetch ?? false;
+
   // Try to get from meta_json first
   if (proposal.meta_json?.body) {
     const body = proposal.meta_json.body;
-    return {
+    const fromBody = {
       title: body.title || "Untitled Proposal",
       description: body.abstract || null,
       rationale: body.rationale || null,
       metadata: JSON.stringify(proposal.meta_json),
     };
+
+    if (
+      preferMetaUrlForMissingFields &&
+      hasMissingExtractedMetadataFields(fromBody) &&
+      proposal.meta_url
+    ) {
+      const fromUrl = await fetchMetadataFromUrl(proposal.meta_url, retryMetaUrlFetch);
+      if (fromUrl) {
+        return {
+          title:
+            isMeaningfulTitle(fromBody.title) &&
+              !isMissingText(fromBody.title)
+              ? fromBody.title
+              : fromUrl.title,
+          description:
+            !isMissingText(fromBody.description)
+              ? fromBody.description
+              : fromUrl.description,
+          rationale:
+            !isMissingText(fromBody.rationale)
+              ? fromBody.rationale
+              : fromUrl.rationale,
+          metadata: fromUrl.metadata ?? fromBody.metadata,
+        };
+      }
+    }
+
+    return fromBody;
   }
 
   // Fallback to fetching from meta_url
   if (proposal.meta_url) {
-    try {
-      // Convert IPFS URLs to use an HTTP gateway
-      let fetchUrl = proposal.meta_url;
-      if (proposal.meta_url.startsWith("ipfs://")) {
-        const ipfsHash = proposal.meta_url.replace("ipfs://", "");
-        fetchUrl = `https://ipfs.io/ipfs/${ipfsHash}`;
-        console.log(`[Metadata] Converting IPFS URL to gateway: ${fetchUrl}`);
-      }
-
-      const axios = (await import("axios")).default;
-      const response = await axios.get(fetchUrl, { timeout: 10000 });
-      const metaData = response.data;
-
-      return {
-        title: metaData?.body?.title || "Untitled Proposal",
-        description: metaData?.body?.abstract || null,
-        rationale: metaData?.body?.rationale || null,
-        metadata: JSON.stringify(metaData),
-      };
-    } catch (error: any) {
-      const status = error.response?.status;
-      const errorMsg =
-        status === 404
-          ? `Metadata URL not found (404): ${proposal.meta_url}`
-          : `Failed to fetch metadata from ${proposal.meta_url}`;
-
-      console.warn(`[Metadata] ${errorMsg}`);
-      // Continue with default values instead of failing
+    const fromUrl = await fetchMetadataFromUrl(proposal.meta_url, retryMetaUrlFetch);
+    if (fromUrl) {
+      return fromUrl;
     }
   }
 
@@ -561,6 +668,93 @@ async function extractProposalMetadata(proposal: KoiosProposal): Promise<{
     rationale: null,
     metadata: null,
   };
+}
+
+async function fetchMetadataFromUrl(
+  metaUrl: string,
+  retryMetaUrlFetch: boolean
+): Promise<{
+  title: string;
+  description: string | null;
+  rationale: string | null;
+  metadata: string | null;
+} | null> {
+  try {
+    let fetchUrl = metaUrl;
+    if (metaUrl.startsWith("ipfs://")) {
+      const ipfsHash = metaUrl.replace("ipfs://", "");
+      fetchUrl = `https://ipfs.io/ipfs/${ipfsHash}`;
+      console.log(`[Metadata] Converting IPFS URL to gateway: ${fetchUrl}`);
+    }
+
+    const axios = (await import("axios")).default;
+
+    const fetchOnce = async () => {
+      const response = await axios.get(fetchUrl, { timeout: 10000 });
+      const metaData = response.data;
+      return {
+        title: metaData?.body?.title || "Untitled Proposal",
+        description: metaData?.body?.abstract || null,
+        rationale: metaData?.body?.rationale || null,
+        metadata: JSON.stringify(metaData),
+      };
+    };
+
+    if (!retryMetaUrlFetch) {
+      return fetchOnce();
+    }
+
+    return withRetry(fetchOnce, {
+      maxRetries: 1,
+      baseDelay: 1000,
+      maxDelay: 2000,
+    });
+  } catch (error: any) {
+    const status = error.response?.status;
+    const errorMsg =
+      status === 404
+        ? `Metadata URL not found (404): ${metaUrl}`
+        : `Failed to fetch metadata from ${metaUrl}`;
+
+    console.warn(`[Metadata] ${errorMsg}`);
+    return null;
+  }
+}
+
+function isMissingText(value: string | null | undefined): boolean {
+  return value == null || value.trim() === "";
+}
+
+function isMeaningfulTitle(value: string | null | undefined): boolean {
+  return !isMissingText(value) && value !== "Untitled Proposal";
+}
+
+function isMeaningfulText(value: string | null | undefined): boolean {
+  return !isMissingText(value);
+}
+
+function hasMissingExtractedMetadataFields(fields: {
+  title: string;
+  description: string | null;
+  rationale: string | null;
+}): boolean {
+  return (
+    !isMeaningfulTitle(fields.title) ||
+    isMissingText(fields.description) ||
+    isMissingText(fields.rationale)
+  );
+}
+
+function hasMissingProposalInfoFields(fields: {
+  title: string;
+  description: string | null;
+  rationale: string | null;
+}): boolean {
+  return (
+    !isMeaningfulTitle(fields.title) ||
+    isMissingText(fields.description) ||
+    isMissingText(fields.rationale)
+  );
 }
 
 /**

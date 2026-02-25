@@ -12,6 +12,7 @@ export * from "./getDRepActivityRate";
 export * from "./getDRepRationaleRate";
 export * from "./getDRepCorrelation";
 export * from "./getDRepLifecycleRate";
+export * from "./getDRepConcentrationHistory";
 
 // Category 3 – SPO Governance Participation
 export * from "./getSpoSilentStake";

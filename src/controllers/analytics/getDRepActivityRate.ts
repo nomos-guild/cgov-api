@@ -23,8 +23,11 @@ import {
  * - epochEnd: Filter proposals by submission epoch <= epochEnd
  * - status: Filter proposals by status (comma-separated, default: all)
  * - activeOnly: If true, only return active DReps (default: true; pass false to include inactive)
+ * - drepId: Filter to a specific DRep (optional)
  * - sortBy: Sort by "activityRate" | "proposalsVoted" | "name" (default: activityRate)
  * - sortOrder: Sort direction (asc, desc) (default: desc)
+ *
+ * Note: Aggregate rates are computed on the filtered DRep result set.
  */
 export const getDRepActivityRate = async (req: Request, res: Response) => {
   try {
@@ -42,6 +45,7 @@ export const getDRepActivityRate = async (req: Request, res: Response) => {
       : null;
     const statusFilter = (req.query.status as string)?.split(",").filter(Boolean);
     const activeOnly = req.query.activeOnly !== "false";
+    const drepId = (req.query.drepId as string | undefined)?.trim();
     const sortBy = (req.query.sortBy as string) || "activityRate";
     const sortOrder = (req.query.sortOrder as string) === "asc" ? "asc" : "desc";
 
@@ -112,6 +116,7 @@ export const getDRepActivityRate = async (req: Request, res: Response) => {
       where: {
         OR: [{ doNotList: false }, { doNotList: null }],
         ...(activeOnly ? { active: true } : {}),
+        ...(drepId ? { drepId } : {}),
       },
       select: { drepId: true, name: true },
     });
@@ -253,12 +258,6 @@ export const getDRepActivityRate = async (req: Request, res: Response) => {
       dreps: paginatedDreps,
       aggregateActivityRatePct,
       aggregateActivityRateAllTimePct,
-      filter: {
-        epochStart,
-        epochEnd,
-        statuses: statusFilter || [],
-        activeOnly,
-      },
       pagination: {
         page,
         pageSize,

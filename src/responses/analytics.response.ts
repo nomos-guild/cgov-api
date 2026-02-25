@@ -258,17 +258,10 @@ export interface DRepActivitySummary {
 
 export interface GetDRepActivityRateResponse {
   dreps: DRepActivitySummary[];
-  /** Aggregate activity rate across all DReps */
+  /** Aggregate activity rate across the filtered DRep result set */
   aggregateActivityRatePct: number;
-  /** Aggregate activity rate across all DReps vs all in-scope proposals */
+  /** Aggregate activity rate across the filtered DRep result set vs all in-scope proposals */
   aggregateActivityRateAllTimePct: number;
-  /** Filter criteria used */
-  filter: {
-    epochStart: number | null;
-    epochEnd: number | null;
-    statuses: string[];
-    activeOnly: boolean;
-  };
   pagination: {
     page: number;
     pageSize: number;
@@ -376,6 +369,33 @@ export interface GetDRepLifecycleRateResponse {
     deregistrations: number;
     updates: number;
   };
+}
+
+/**
+ * 2.6 DRep Concentration History
+ */
+export interface DRepConcentrationHistoryPoint {
+  epoch: number;
+  /** Top-N DReps share of total voting power (0-100) */
+  top10VpPct: number;
+  top20VpPct: number;
+  top50VpPct: number;
+  /** Top-N DReps share of total delegators (0-100) */
+  top10DelPct: number;
+  top20DelPct: number;
+  top50DelPct: number;
+  /** Top-N DReps voting power in ADA */
+  top10VpAda: number;
+  top20VpAda: number;
+  top50VpAda: number;
+  /** Top-N DReps delegator counts */
+  top10Del: number;
+  top20Del: number;
+  top50Del: number;
+}
+
+export interface GetDRepConcentrationHistoryResponse {
+  history: DRepConcentrationHistoryPoint[];
 }
 
 // ============================================

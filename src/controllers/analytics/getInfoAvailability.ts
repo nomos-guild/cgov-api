@@ -16,6 +16,7 @@ import {
  * - page: Page number (optional). If omitted (and pageSize omitted), returns all proposals.
  * - pageSize: Items per page (optional, max: 100). If omitted (and page omitted), returns all proposals.
  * - status: Filter by proposal status (optional, comma-separated)
+ * - proposalId: Filter by specific proposal ID (optional)
  */
 export const getInfoAvailability = async (req: Request, res: Response) => {
   try {
@@ -30,11 +31,15 @@ export const getInfoAvailability = async (req: Request, res: Response) => {
       ? Math.min(100, Math.max(1, parseInt(req.query.pageSize as string) || 20))
       : undefined;
     const statusFilter = (req.query.status as string)?.split(",").filter(Boolean);
+    const proposalId = (req.query.proposalId as string)?.trim();
 
     // Build where clause
     const whereClause: any = {};
     if (statusFilter && statusFilter.length > 0) {
       whereClause.status = { in: statusFilter };
+    }
+    if (proposalId) {
+      whereClause.proposalId = proposalId;
     }
 
     const dbProposals = await prisma.proposal.findMany({

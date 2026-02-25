@@ -96,6 +96,7 @@ const statusLabelMap: Record<ProposalStatus, GovernanceAction["status"]> = {
   RATIFIED: "Ratified",
   ENACTED: "Enacted",
   EXPIRED: "Expired",
+  DROPPED: "Dropped",
   CLOSED: "Closed",
 };
 

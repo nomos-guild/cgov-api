@@ -43,6 +43,7 @@ function calculateContention(
  * - pageSize: Items per page (optional; max: 100)
  * - status: Filter by proposal status (optional, comma-separated)
  * - governanceActionType: Filter by action type (optional, comma-separated)
+ * - proposalId: Filter by specific proposal ID (optional)
  * - epochStart: Filter proposals by submission epoch >= epochStart
  * - epochEnd: Filter proposals by submission epoch <= epochEnd
  * - contentiousOnly: If "true", only return contentious proposals
@@ -62,6 +63,7 @@ export const getContentionRate = async (req: Request, res: Response) => {
     const typeFilter = (req.query.governanceActionType as string)
       ?.split(",")
       .filter(Boolean);
+    const proposalId = (req.query.proposalId as string)?.trim();
     const epochStart = req.query.epochStart
       ? parseInt(req.query.epochStart as string)
       : null;
@@ -77,6 +79,9 @@ export const getContentionRate = async (req: Request, res: Response) => {
     }
     if (typeFilter && typeFilter.length > 0) {
       whereClause.governanceActionType = { in: typeFilter };
+    }
+    if (proposalId) {
+      whereClause.proposalId = proposalId;
     }
     if (epochStart !== null) {
       whereClause.submissionEpoch = { ...whereClause.submissionEpoch, gte: epochStart };
