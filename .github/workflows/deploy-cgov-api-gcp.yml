@@ -104,10 +104,6 @@ jobs:
             --time-zone="UTC" \
             --description="Sync DRep and SPO voting power from Koios API every 24 hours"
 
-      - name: Delete Old Monolithic Epoch Analytics Sync Job (if exists)
-        run: |
-          gcloud scheduler jobs delete epoch-analytics-sync --location=${{ env.REGION }} --quiet || true
-
       - name: Create/Update DRep Inventory Sync Scheduler Job
         run: |
           gcloud scheduler jobs delete drep-inventory-sync --location=${{ env.REGION }} --quiet || true
@@ -152,13 +148,13 @@ jobs:
           gcloud scheduler jobs delete drep-lifecycle-sync --location=${{ env.REGION }} --quiet || true
           gcloud scheduler jobs create http drep-lifecycle-sync \
             --location=${{ env.REGION }} \
-            --schedule="37 * * * *" \
+            --schedule="42 * * * *" \
             --uri="${{ steps.url.outputs.url }}/data/trigger-drep-lifecycle-sync" \
             --http-method=POST \
             --headers="X-API-Key=${{ secrets.SERVER_API_KEY }}" \
             --attempt-deadline=900s \
             --time-zone="UTC" \
-            --description="Sync DRep lifecycle events (registrations, deregistrations) every hour at minute 37"
+            --description="Sync DRep lifecycle events (registrations, deregistrations) every hour at minute 42"
 
       - name: Create/Update Pool Groups Sync Scheduler Job
         run: |
@@ -211,10 +207,6 @@ jobs:
             --attempt-deadline=900s \
             --time-zone="UTC" \
             --description="Discover GitHub repositories weekly (Sunday 03:00 UTC)"
-
-      - name: Delete Old Unified Sync Job (if exists)
-        run: |
-          gcloud scheduler jobs delete github-sync --location=${{ env.REGION }} --quiet || true
 
       - name: Create/Update GitHub Active Repos Sync Job
         run: |
@@ -294,13 +286,13 @@ jobs:
           gcloud scheduler jobs delete github-aggregate --location=${{ env.REGION }} --quiet || true
           gcloud scheduler jobs create http github-aggregate \
             --location=${{ env.REGION }} \
-            --schedule="0 5 * * *" \
+            --schedule="0 4 * * *" \
             --uri="${{ steps.url.outputs.url }}/data/github/aggregate" \
             --http-method=POST \
             --headers="X-API-Key=${{ secrets.SERVER_API_KEY }}" \
             --attempt-deadline=900s \
             --time-zone="UTC" \
-            --description="Aggregate GitHub activity daily (05:00 UTC)"
+            --description="Aggregate GitHub activity daily (04:00 UTC)"
 
       - name: Deployment Summary
         run: |
@@ -319,7 +311,7 @@ jobs:
           echo "| drep-inventory-sync | \`2 * * * *\` | POST /data/trigger-drep-inventory-sync |" >> $GITHUB_STEP_SUMMARY
           echo "| drep-info-sync | \`22 * * * *\` | POST /data/trigger-drep-info-sync |" >> $GITHUB_STEP_SUMMARY
           echo "| epoch-totals-sync | \`12 * * * *\` | POST /data/trigger-epoch-totals-sync |" >> $GITHUB_STEP_SUMMARY
-          echo "| drep-lifecycle-sync | \`37 * * * *\` | POST /data/trigger-drep-lifecycle-sync |" >> $GITHUB_STEP_SUMMARY
+          echo "| drep-lifecycle-sync | \`42 * * * *\` | POST /data/trigger-drep-lifecycle-sync |" >> $GITHUB_STEP_SUMMARY
           echo "| pool-groups-sync | \`47 * * * *\` | POST /data/trigger-pool-groups-sync |" >> $GITHUB_STEP_SUMMARY
           echo "| missing-epochs-sync | \`33 */6 * * *\` | POST /data/trigger-missing-epochs-sync |" >> $GITHUB_STEP_SUMMARY
           echo "| drep-delegator-sync | \`57 * * * *\` | POST /data/trigger-drep-delegator-sync |" >> $GITHUB_STEP_SUMMARY
@@ -329,4 +321,4 @@ jobs:
           echo "| github-sync-dormant | \`0 5 * * 0\` | POST /data/github/sync?tier=dormant |" >> $GITHUB_STEP_SUMMARY
           echo "| github-backfill | \`15 */2 * * *\` | POST /data/github/backfill?limit=10 |" >> $GITHUB_STEP_SUMMARY
           echo "| github-snapshot | \`0 1 * * *\` | POST /data/github/snapshot |" >> $GITHUB_STEP_SUMMARY
-          echo "| github-aggregate | \`0 5 * * *\` | POST /data/github/aggregate |" >> $GITHUB_STEP_SUMMARY
+          echo "| github-aggregate | \`0 4 * * *\` | POST /data/github/aggregate |" >> $GITHUB_STEP_SUMMARY
