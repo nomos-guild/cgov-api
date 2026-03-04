@@ -7,7 +7,7 @@ import {
 let isRunning = false;
 
 export const startAggregateGithubJob = () => {
-  const schedule = process.env.GITHUB_AGGREGATION_SCHEDULE || "0 5 * * *"; // Daily 5am UTC
+  const schedule = process.env.GITHUB_AGGREGATION_SCHEDULE || "0 4 * * *"; // Daily 5am UTC
   const enabled = process.env.ENABLE_CRON_JOBS !== "false";
 
   if (!enabled) {
@@ -17,7 +17,7 @@ export const startAggregateGithubJob = () => {
 
   if (!cron.validate(schedule)) {
     console.error(`[Cron] Invalid aggregation schedule: ${schedule}. Using default.`);
-    return startWithSchedule("0 5 * * *");
+    return startWithSchedule("0 4 * * *");
   }
 
   startWithSchedule(schedule);
