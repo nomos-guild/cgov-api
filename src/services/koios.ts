@@ -27,6 +27,7 @@ export const getKoiosService = (): AxiosInstance => {
       "Content-Type": "application/json",
     },
     timeout: 30000, // 30 second timeout for blockchain data queries
+    responseEncoding: "utf-8" as any, // Ensure UTF-8 decoding of response bodies
   });
 
   // Add response interceptor for common error handling

@@ -193,33 +193,18 @@ export async function ingestProposalData(
         retryMetaUrlFetch: shouldBackfillMissingMetadataFields,
       });
 
+    // Always re-inject text fields for active proposals to ensure
+    // sanitized data from Koios overwrites any corrupted values.
     const updateInfoFields: {
       title?: string;
-      description?: string;
-      rationale?: string;
+      description?: string | null;
+      rationale?: string | null;
     } = {};
 
-    if (shouldBackfillMissingMetadataFields && existingProposal) {
-      if (
-        !isMeaningfulTitle(existingProposal.title) &&
-        isMeaningfulTitle(title)
-      ) {
-        updateInfoFields.title = title;
-      }
-
-      if (
-        isMissingText(existingProposal.description) &&
-        isMeaningfulText(description)
-      ) {
-        updateInfoFields.description = description as string;
-      }
-
-      if (
-        isMissingText(existingProposal.rationale) &&
-        isMeaningfulText(rationale)
-      ) {
-        updateInfoFields.rationale = rationale as string;
-      }
+    if (existingProposal && existingProposal.status === ProposalStatus.ACTIVE) {
+      updateInfoFields.title = title;
+      updateInfoFields.description = description;
+      updateInfoFields.rationale = rationale;
     }
 
     // 6. Upsert proposal (single atomic DB operation, no long transaction)
@@ -262,8 +247,7 @@ export async function ingestProposalData(
     console.log(
       `[Proposal Ingest] ${isUpdate ? "Updated" : "Created"} proposal - ` +
       `proposalId: ${proposal.proposalId}, ` +
-      `type: ${governanceActionType || "null"}, koios_type: "${koiosProposal.proposal_type
-      }"`
+      `type: ${governanceActionType || "null"}, koios_type: "${koiosProposal.proposal_type}"`
     );
 
     // 7. Ingest all votes for this proposal using the root Prisma client.
@@ -618,9 +602,9 @@ async function extractProposalMetadata(
   if (proposal.meta_json?.body) {
     const body = proposal.meta_json.body;
     const fromBody = {
-      title: body.title || "Untitled Proposal",
-      description: body.abstract || null,
-      rationale: body.rationale || null,
+      title: sanitizeText(body.title) || "Untitled Proposal",
+      description: sanitizeText(body.abstract),
+      rationale: sanitizeText(body.rationale),
       metadata: JSON.stringify(proposal.meta_json),
     };
 
@@ -690,12 +674,15 @@ async function fetchMetadataFromUrl(
     const axios = (await import("axios")).default;
 
     const fetchOnce = async () => {
-      const response = await axios.get(fetchUrl, { timeout: 10000 });
+      const response = await axios.get(fetchUrl, {
+        timeout: 10000,
+        responseEncoding: "utf-8" as any,
+      });
       const metaData = response.data;
       return {
-        title: metaData?.body?.title || "Untitled Proposal",
-        description: metaData?.body?.abstract || null,
-        rationale: metaData?.body?.rationale || null,
+        title: sanitizeText(metaData?.body?.title) || "Untitled Proposal",
+        description: sanitizeText(metaData?.body?.abstract),
+        rationale: sanitizeText(metaData?.body?.rationale),
         metadata: JSON.stringify(metaData),
       };
     };
@@ -721,16 +708,17 @@ async function fetchMetadataFromUrl(
   }
 }
 
+function sanitizeText(value: string | null | undefined): string | null {
+  if (value == null) return null;
+  return value;
+}
+
 function isMissingText(value: string | null | undefined): boolean {
   return value == null || value.trim() === "";
 }
 
 function isMeaningfulTitle(value: string | null | undefined): boolean {
   return !isMissingText(value) && value !== "Untitled Proposal";
-}
-
-function isMeaningfulText(value: string | null | undefined): boolean {
-  return !isMissingText(value);
 }
 
 function hasMissingExtractedMetadataFields(fields: {
