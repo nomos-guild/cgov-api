@@ -15,7 +15,7 @@ import { syncEpochTotalsStep } from "../services/ingestion/epoch-analytics.servi
 let isRunning = false;
 
 export const startEpochTotalsSyncJob = () => {
-  const schedule = process.env.EPOCH_TOTALS_SYNC_SCHEDULE || "12 * * * *";
+  const schedule = process.env.EPOCH_TOTALS_SYNC_SCHEDULE || "42 * * * *";
   const enabled = process.env.ENABLE_CRON_JOBS !== "false";
 
   if (!enabled) {
@@ -27,9 +27,9 @@ export const startEpochTotalsSyncJob = () => {
 
   if (!cron.validate(schedule)) {
     console.error(
-      `[Cron] Invalid cron schedule: ${schedule}. Using default: 12 * * * *`
+      `[Cron] Invalid cron schedule: ${schedule}. Using default: 42 * * * *`
     );
-    return startEpochTotalsSyncJobWithSchedule("12 * * * *");
+    return startEpochTotalsSyncJobWithSchedule("42 * * * *");
   }
 
   startEpochTotalsSyncJobWithSchedule(schedule);

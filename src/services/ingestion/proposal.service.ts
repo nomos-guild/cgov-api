@@ -9,7 +9,8 @@ import {
   VoterType,
 } from "@prisma/client";
 import { prisma } from "../prisma";
-import { koiosGet, koiosPost } from "../koios";
+import { koiosGet } from "../koios";
+import { getDrepInfoBatch } from "../drep-lookup";
 import {
   ingestVotesForProposal,
   VoteIngestionStats,
@@ -20,7 +21,6 @@ import type {
   KoiosProposal,
   KoiosProposalVotingSummary,
   KoiosDrepEpochSummary,
-  KoiosDrepInfo,
 } from "../../types/koios.types";
 
 /**
@@ -925,45 +925,19 @@ async function fetchInactiveDrepVotingPowerForActiveProposal(
       return BigInt(0);
     }
 
-    // 2. Batch fetch DRep info using POST /drep_info (in batches of 50)
-    // The /drep_info endpoint returns both `active` status and `amount` (voting power)
-    // so we can calculate inactive power directly from this response.
-    // Note: Koios API has a 5120 byte payload limit, and each DRep ID is ~64 bytes
-    // 50 DReps = ~3200 bytes which is safely under the limit
+    // 2. Use DB-first lookup (reads from DB, falls back to Koios for missing DReps)
     let inactivePowerLovelace = BigInt(0);
     let inactiveCount = 0;
     let activeCount = 0;
-    const batchSize = 50;
 
-    for (let i = 0; i < drepIds.length; i += batchSize) {
-      const batch = drepIds.slice(i, i + batchSize);
-      try {
-        const drepInfos = await koiosPost<KoiosDrepInfo[]>("/drep_info", {
-          _drep_ids: batch,
-        });
+    const drepInfos = await getDrepInfoBatch(prisma, drepIds);
 
-        // Check if response is an array (success) or error object
-        if (Array.isArray(drepInfos)) {
-          for (const info of drepInfos) {
-            if (info.active === false && info.amount) {
-              // Sum voting power for inactive DReps directly from drep_info response
-              inactivePowerLovelace += BigInt(info.amount);
-              inactiveCount++;
-            } else if (info.active === true) {
-              activeCount++;
-            }
-          }
-        } else {
-          // API returned an error (e.g., payload too large)
-          console.warn(
-            `[Inactive DRep Power] Unexpected response from /drep_info:`,
-            drepInfos
-          );
-        }
-      } catch (error: any) {
-        console.warn(
-          `[Inactive DRep Power] Failed to fetch drep_info batch: ${error.message}`
-        );
+    for (const info of drepInfos) {
+      if (info.active === false && info.votingPower > BigInt(0)) {
+        inactivePowerLovelace += info.votingPower;
+        inactiveCount++;
+      } else if (info.active === true) {
+        activeCount++;
       }
     }
 
@@ -1102,19 +1076,53 @@ async function fetchInactiveDrepVotingPowerForCompletedProposal(
     }
 
     console.log(
-      `[Inactive DRep Power] ${drepsWithoutVotes.length} DReps haven't voted, checking certificate updates...`
+      `[Inactive DRep Power] ${drepsWithoutVotes.length} DReps haven't voted, checking certificate updates (DB-first)...`
     );
 
-    // // 4. For DReps who haven't voted, check if they updated their certificate in the activity window
-    // // Only fetch updates for specific DReps instead of all DRep updates globally
-    // // Note: /drep_updates API requires bech32 format DRep ID
-    for (const drepId of drepsWithoutVotes) {
+    // 4a. DB-first: one indexed query for DReps with lifecycle events in the activity window
+    const lifecycleActiveRows = await prisma.drepLifecycleEvent.findMany({
+      where: {
+        drepId: { in: drepsWithoutVotes },
+        epochNo: {
+          gte: minActiveEpoch,
+          lte: referenceEpoch,
+        },
+      },
+      select: { drepId: true },
+      distinct: ["drepId"],
+    });
+
+    for (const row of lifecycleActiveRows) {
+      activeDrepIds.add(row.drepId);
+    }
+
+    // 4b. Find DReps that are absent from lifecycle cache entirely.
+    // Only these fall back to Koios /drep_updates.
+    const lifecycleSeenRows = await prisma.drepLifecycleEvent.findMany({
+      where: {
+        drepId: { in: drepsWithoutVotes },
+      },
+      select: { drepId: true },
+      distinct: ["drepId"],
+    });
+    const lifecycleSeenIds = new Set(lifecycleSeenRows.map((row) => row.drepId));
+
+    const drepIdsMissingLifecycle = drepsWithoutVotes.filter(
+      (drepId) => !lifecycleSeenIds.has(drepId)
+    );
+
+    console.log(
+      `[Inactive DRep Power] Lifecycle cache hit for ${drepsWithoutVotes.length - drepIdsMissingLifecycle.length}/${drepsWithoutVotes.length} DReps; ` +
+        `falling back to Koios for ${drepIdsMissingLifecycle.length} DReps missing lifecycle rows`
+    );
+
+    // 4c. Fallback for cold-start / not-yet-synced DReps.
+    for (const drepId of drepIdsMissingLifecycle) {
       try {
-        const updates = await koiosGet<KoiosDrepUpdate[]>(
-          `/drep_updates?_drep_id=${drepId}`
-        );
+        const updates = await koiosGet<KoiosDrepUpdate[]>("/drep_updates", {
+          _drep_id: drepId,
+        });
         if (updates && updates.length > 0) {
-          // Check if any update is within the activity window
           for (const update of updates) {
             const updateEpoch = blockTimeToEpoch(update.block_time);
             if (
@@ -1122,7 +1130,7 @@ async function fetchInactiveDrepVotingPowerForCompletedProposal(
               updateEpoch <= referenceEpoch
             ) {
               activeDrepIds.add(drepId);
-              break; // Found activity, no need to check more updates
+              break;
             }
           }
         }

@@ -54,11 +54,11 @@ export const startAllJobs = () => {
   // DRep info full refresh (hourly at :22) — slowest step, isolated
   startDrepInfoSyncJob();
 
-  // Epoch totals for previous + current epoch (hourly at :12)
-  startEpochTotalsSyncJob();
-
   // DRep lifecycle events (hourly at :37)
   startDrepLifecycleSyncJob();
+
+  // Epoch totals for previous + current epoch (hourly at :42)
+  startEpochTotalsSyncJob();
 
   // Pool group mappings (hourly at :47)
   startPoolGroupsSyncJob();
@@ -66,7 +66,7 @@ export const startAllJobs = () => {
   // Missing epochs backfill (every 6 hours at :33)
   startMissingEpochsSyncJob();
 
-  // DRep delegation change sync (hourly at :57)
+  // DRep delegation change sync (hourly at :52)
   startDrepDelegatorSyncJob();
 
   console.log("[Cron] All cron jobs initialized");

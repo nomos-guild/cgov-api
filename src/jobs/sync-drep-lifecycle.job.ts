@@ -13,7 +13,7 @@ import { syncDrepLifecycleStep } from "../services/ingestion/epoch-analytics.ser
 let isRunning = false;
 
 export const startDrepLifecycleSyncJob = () => {
-  const schedule = process.env.DREP_LIFECYCLE_SYNC_SCHEDULE || "42 * * * *";
+  const schedule = process.env.DREP_LIFECYCLE_SYNC_SCHEDULE || "37 * * * *";
   const enabled = process.env.ENABLE_CRON_JOBS !== "false";
 
   if (!enabled) {
@@ -25,9 +25,9 @@ export const startDrepLifecycleSyncJob = () => {
 
   if (!cron.validate(schedule)) {
     console.error(
-      `[Cron] Invalid cron schedule: ${schedule}. Using default: 42 * * * *`
+      `[Cron] Invalid cron schedule: ${schedule}. Using default: 37 * * * *`
     );
-    return startDrepLifecycleSyncJobWithSchedule("42 * * * *");
+    return startDrepLifecycleSyncJobWithSchedule("37 * * * *");
   }
 
   startDrepLifecycleSyncJobWithSchedule(schedule);

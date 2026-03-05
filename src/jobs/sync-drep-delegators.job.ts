@@ -15,10 +15,10 @@ let isDrepDelegatorSyncRunning = false;
 /**
  * Starts the DRep delegation change sync job.
  * Schedule is configurable via DREP_DELEGATOR_SYNC_SCHEDULE env variable
- * Defaults to every hour at minute 57
+ * Defaults to every hour at minute 52
  */
 export const startDrepDelegatorSyncJob = () => {
-  const schedule = process.env.DREP_DELEGATOR_SYNC_SCHEDULE || "57 * * * *";
+  const schedule = process.env.DREP_DELEGATOR_SYNC_SCHEDULE || "52 * * * *";
   const enabled = process.env.ENABLE_CRON_JOBS !== "false";
 
   if (!enabled) {
@@ -31,9 +31,9 @@ export const startDrepDelegatorSyncJob = () => {
   // Validate cron schedule
   if (!cron.validate(schedule)) {
     console.error(
-      `[Cron] Invalid cron schedule: ${schedule}. Using default: 57 * * * *`
+      `[Cron] Invalid cron schedule: ${schedule}. Using default: 52 * * * *`
     );
-    return startDrepDelegatorSyncJobWithSchedule("57 * * * *");
+    return startDrepDelegatorSyncJobWithSchedule("52 * * * *");
   }
 
   startDrepDelegatorSyncJobWithSchedule(schedule);

@@ -51,6 +51,25 @@ export interface GetDRepStatsResponse {
 }
 
 /**
+ * Per-DRep engagement statistics used by rationale dashboards.
+ */
+export interface DRepEngagementStat {
+  drepId: string;
+  totalVotesCast: number;
+  rationalesProvided: number;
+  proposalParticipationPercent: number;
+  uniqueProposals: number;
+  voteChanges: number;
+}
+
+/**
+ * DRep engagement statistics response.
+ */
+export interface GetDRepEngagementStatsResponse {
+  dreps: DRepEngagementStat[];
+}
+
+/**
  * Vote breakdown counts
  */
 export interface VoteBreakdown {
