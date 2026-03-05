@@ -17,6 +17,7 @@ import {
   extractStringField,
   extractBooleanField,
 } from "./sync-utils";
+import { getDrepInfoBatch } from "../drep-lookup";
 import { processInParallel } from "./parallel";
 import { withRetry } from "./utils";
 
@@ -242,42 +243,17 @@ export async function syncAllDrepsInventory(
   }
 
   // Bulk update (only for the missing IDs we just created).
-  const batchSize = KOIOS_DREP_INFO_BATCH_SIZE;
+  // Uses DB-first lookup: getDrepInfoBatch reads from DB first and only
+  // fetches from Koios for DReps not yet populated, then upserts results.
   let updatedFromInfo = 0;
   let failedInfoBatches = 0;
 
-  for (let i = 0; i < missing.length; i += batchSize) {
-    const batch = missing.slice(i, i + batchSize);
+  if (missing.length > 0) {
     try {
-      const infos = await withRetry(() =>
-        koiosPost<KoiosDrepInfo[]>("/drep_info", {
-          _drep_ids: batch,
-        })
-      );
-
-      if (!Array.isArray(infos)) {
-        failedInfoBatches++;
-        continue;
-      }
-
-      for (const info of infos) {
-        if (!info?.drep_id) continue;
-
-        await prisma.drep.update({
-          where: { drepId: info.drep_id },
-          data: {
-            votingPower: toBigIntOrNull(info.amount) ?? BigInt(0),
-            registered: info.registered ?? undefined,
-            active: info.active ?? undefined,
-            expiresEpoch: info.expires_epoch_no ?? undefined,
-            metaUrl: info.meta_url ?? undefined,
-            metaHash: info.meta_hash ?? undefined,
-          },
-        });
-        updatedFromInfo++;
-      }
+      const results = await getDrepInfoBatch(prisma, missing);
+      updatedFromInfo = results.length;
     } catch {
-      failedInfoBatches++;
+      failedInfoBatches = 1;
     }
   }
 
