@@ -1076,19 +1076,53 @@ async function fetchInactiveDrepVotingPowerForCompletedProposal(
     }
 
     console.log(
-      `[Inactive DRep Power] ${drepsWithoutVotes.length} DReps haven't voted, checking certificate updates...`
+      `[Inactive DRep Power] ${drepsWithoutVotes.length} DReps haven't voted, checking certificate updates (DB-first)...`
     );
 
-    // // 4. For DReps who haven't voted, check if they updated their certificate in the activity window
-    // // Only fetch updates for specific DReps instead of all DRep updates globally
-    // // Note: /drep_updates API requires bech32 format DRep ID
-    for (const drepId of drepsWithoutVotes) {
+    // 4a. DB-first: one indexed query for DReps with lifecycle events in the activity window
+    const lifecycleActiveRows = await prisma.drepLifecycleEvent.findMany({
+      where: {
+        drepId: { in: drepsWithoutVotes },
+        epochNo: {
+          gte: minActiveEpoch,
+          lte: referenceEpoch,
+        },
+      },
+      select: { drepId: true },
+      distinct: ["drepId"],
+    });
+
+    for (const row of lifecycleActiveRows) {
+      activeDrepIds.add(row.drepId);
+    }
+
+    // 4b. Find DReps that are absent from lifecycle cache entirely.
+    // Only these fall back to Koios /drep_updates.
+    const lifecycleSeenRows = await prisma.drepLifecycleEvent.findMany({
+      where: {
+        drepId: { in: drepsWithoutVotes },
+      },
+      select: { drepId: true },
+      distinct: ["drepId"],
+    });
+    const lifecycleSeenIds = new Set(lifecycleSeenRows.map((row) => row.drepId));
+
+    const drepIdsMissingLifecycle = drepsWithoutVotes.filter(
+      (drepId) => !lifecycleSeenIds.has(drepId)
+    );
+
+    console.log(
+      `[Inactive DRep Power] Lifecycle cache hit for ${drepsWithoutVotes.length - drepIdsMissingLifecycle.length}/${drepsWithoutVotes.length} DReps; ` +
+        `falling back to Koios for ${drepIdsMissingLifecycle.length} DReps missing lifecycle rows`
+    );
+
+    // 4c. Fallback for cold-start / not-yet-synced DReps.
+    for (const drepId of drepIdsMissingLifecycle) {
       try {
-        const updates = await koiosGet<KoiosDrepUpdate[]>(
-          `/drep_updates?_drep_id=${drepId}`
-        );
+        const updates = await koiosGet<KoiosDrepUpdate[]>("/drep_updates", {
+          _drep_id: drepId,
+        });
         if (updates && updates.length > 0) {
-          // Check if any update is within the activity window
           for (const update of updates) {
             const updateEpoch = blockTimeToEpoch(update.block_time);
             if (
@@ -1096,7 +1130,7 @@ async function fetchInactiveDrepVotingPowerForCompletedProposal(
               updateEpoch <= referenceEpoch
             ) {
               activeDrepIds.add(drepId);
-              break; // Found activity, no need to check more updates
+              break;
             }
           }
         }

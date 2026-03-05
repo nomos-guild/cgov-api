@@ -88,6 +88,30 @@ router.get("/stats", drepController.getDRepStats);
 
 /**
  * @openapi
+ * /dreps/engagement-stats:
+ *   get:
+ *     summary: Get DRep engagement statistics
+ *     description: Retrieves per-DRep engagement metrics including rationales provided, vote-change counts, and proposal participation percentage.
+ *     tags:
+ *       - DRep Dashboard
+ *     responses:
+ *       200:
+ *         description: Successfully retrieved DRep engagement statistics
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/GetDRepEngagementStatsResponse'
+ *       500:
+ *         description: Server error
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ */
+router.get("/engagement-stats", drepController.getDRepEngagementStats);
+
+/**
+ * @openapi
  * /dreps/{drepId}:
  *   get:
  *     summary: Get DRep details
