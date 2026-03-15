@@ -10,7 +10,7 @@
     "test:endpoints": "PORT=3001 jest --runInBand --testMatch='**/controller.test.ts' --forceExit",
     "test:validation": "PORT=3002 jest --runInBand --testMatch='**/validation.test.ts' --forceExit",
     "test:businessLogic": "PORT=3003 jest --runInBand --testMatch='**/routes.test.ts' --forceExit",
-    "test": "concurrently \"yarn test:endpoints\" \"yarn test:validation\" \"yarn test:businessLogic\"",
+    "test": "concurrently \"npm run test:endpoints\" \"npm run test:validation\" \"npm run test:businessLogic\"",
     "swagger:generate": "node swagger-generator.js",
     "test:sync": "ts-node test-sync.ts",
     "backfill:drep-snapshots": "ts-node src/scripts/backfill-drep-snapshots.ts"

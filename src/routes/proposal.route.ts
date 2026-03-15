@@ -39,6 +39,13 @@ const router = express.Router();
  *             schema:
  *               $ref: '#/components/schemas/ErrorResponse'
  */
+router.get("/:proposal_id/survey", proposalController.getProposalSurvey);
+
+router.get(
+  "/:proposal_id/survey-tally",
+  proposalController.getProposalSurveyTally
+);
+
 router.get("/:proposal_id", proposalController.getProposalDetails);
 
 export default router;

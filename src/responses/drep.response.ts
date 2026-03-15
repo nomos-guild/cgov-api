@@ -177,3 +177,12 @@ export interface GetDRepHistoryResponse {
   drepId: string;
   history: DRepHistoryDataPoint[];
 }
+
+export interface GetDRepVerifyResponse {
+  drepId: string;
+  exists: boolean;
+  isRegistered: boolean;
+  isActive: boolean;
+  expiresEpoch: number | null;
+  source?: "db" | "koios";
+}

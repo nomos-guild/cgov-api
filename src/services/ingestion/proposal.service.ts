@@ -10,6 +10,7 @@ import {
 } from "@prisma/client";
 import { prisma } from "../prisma";
 import { koiosGet } from "../koios";
+import { fetchTxMetadataByHash } from "../txMetadata.service";
 import { getDrepInfoBatch } from "../drep-lookup";
 import {
   ingestVotesForProposal,
@@ -17,6 +18,12 @@ import {
   clearVoteCache,
 } from "./vote.service";
 import { withRetry } from "./utils";
+import {
+  extractSurveyDetails,
+  GOVERNANCE_SURVEY_LINK_KIND,
+  parseGovernanceSurveyLink,
+  type SurveyDetails,
+} from "../../libs/surveyMetadata";
 import type {
   KoiosProposal,
   KoiosProposalVotingSummary,
@@ -192,6 +199,12 @@ export async function ingestProposalData(
         preferMetaUrlForMissingFields: shouldBackfillMissingMetadataFields,
         retryMetaUrlFetch: shouldBackfillMissingMetadataFields,
       });
+    const surveyLink = parseGovernanceSurveyLink(metadata);
+    const linkedSurveyDetails = surveyLink.surveyTxId
+      && surveyLink.kind === GOVERNANCE_SURVEY_LINK_KIND
+      && surveyLink.specVersion === "1.0.0"
+      ? await fetchLinkedSurveyDetails(surveyLink.surveyTxId)
+      : null;
 
     // Always re-inject text fields for active proposals to ensure
     // sanitized data from Koios overwrites any corrupted values.
@@ -226,6 +239,10 @@ export async function ingestProposalData(
         expiredEpoch: koiosProposal.expired_epoch,
         expirationEpoch: koiosProposal.expiration,
         metadata,
+        linkedSurveyTxId: surveyLink.surveyTxId,
+        surveyDetails: linkedSurveyDetails
+          ? JSON.stringify(linkedSurveyDetails)
+          : null,
       },
       update: {
         // Only update mutable fields
@@ -240,6 +257,10 @@ export async function ingestProposalData(
         expiredEpoch: koiosProposal.expired_epoch,
         expirationEpoch: koiosProposal.expiration,
         metadata,
+        linkedSurveyTxId: surveyLink.surveyTxId,
+        surveyDetails: linkedSurveyDetails
+          ? JSON.stringify(linkedSurveyDetails)
+          : null,
         ...updateInfoFields,
       },
     });
@@ -711,6 +732,17 @@ async function fetchMetadataFromUrl(
 function sanitizeText(value: string | null | undefined): string | null {
   if (value == null) return null;
   return value;
+}
+
+async function fetchLinkedSurveyDetails(
+  surveyTxId: string
+): Promise<SurveyDetails | null> {
+  const metadata = await fetchTxMetadataByHash(surveyTxId);
+  if (!metadata) {
+    return null;
+  }
+
+  return extractSurveyDetails(metadata);
 }
 
 function isMissingText(value: string | null | undefined): boolean {
