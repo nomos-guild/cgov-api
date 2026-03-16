@@ -54,6 +54,7 @@ export interface KoiosVote {
   voter_role: "DRep" | "SPO" | "ConstitutionalCommittee"; // Maps to onchain_vote.voter_type
   voter_id: string; // Maps to onchain_vote.drep_id/spo_id/cc_id
   vote: "Yes" | "No" | "Abstain"; // Maps to onchain_vote.vote
+  epoch_no?: number | null; // Maps to onchain_vote.response_epoch
   meta_url?: string | null; // Maps to onchain_vote.anchor_url
   meta_hash?: string | null; // Maps to onchain_vote.anchor_hash
   meta_json?: {
@@ -323,6 +324,22 @@ export interface KoiosTxInfo {
   absolute_slot?: number | null;
   tx_timestamp?: number | null;
   certificates?: KoiosTxInfoCertificate[] | null;
+}
+
+/**
+ * Transaction Metadata from Koios API
+ * Endpoint: POST /tx_metadata
+ */
+export interface KoiosTxMetadata {
+  tx_hash: string;
+  metadata?:
+    | Record<string, unknown>
+    | Array<Record<string, unknown>>
+    | null;
+  json_metadata?:
+    | Record<string, unknown>
+    | Array<Record<string, unknown>>
+    | null;
 }
 
 /**

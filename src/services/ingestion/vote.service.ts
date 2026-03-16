@@ -7,8 +7,12 @@ import { VoteType, VoterType } from "@prisma/client";
 import type { Prisma } from "@prisma/client";
 import { prisma } from "../prisma";
 import { koiosGet } from "../koios";
+import { fetchTxMetadataByHash } from "../txMetadata.service";
 import { ensureVoterExists, fetchJsonWithBrowserLikeClient } from "./voter.service";
 import type { KoiosVote } from "../../types/koios.types";
+import {
+  extractSurveyResponse,
+} from "../../libs/surveyMetadata";
 
 // Cache all votes at module level to avoid fetching multiple times during sync
 let cachedVotes: KoiosVote[] | null = null;
@@ -18,6 +22,7 @@ let cachedVotesMinEpoch: number | undefined = undefined;
 
 // Cache for vote metadata JSON keyed by anchor URL to avoid duplicate fetches
 const voteMetadataCache = new Map<string, string | null>();
+const voteTxMetadataCache = new Map<string, Record<string, unknown> | Array<Record<string, unknown>> | null>();
 
 /**
  * Fetches and serialises vote metadata JSON for a Koios vote.
@@ -108,6 +113,7 @@ export interface VoteIngestionStats {
 export function clearVoteCache() {
   cachedVotes = null;
   cachedVotesMinEpoch = undefined;
+  voteTxMetadataCache.clear();
 }
 
 /**
@@ -356,6 +362,15 @@ async function ingestSingleVote(
 
   // 6. Fetch vote rationale/metadata JSON (stored as string in DB)
   const rationaleJson = await getVoteRationaleJson(koiosVote);
+  let txMetadata = voteTxMetadataCache.get(koiosVote.vote_tx_hash);
+  if (txMetadata === undefined) {
+    txMetadata = await fetchTxMetadataByHash(koiosVote.vote_tx_hash);
+    voteTxMetadataCache.set(koiosVote.vote_tx_hash, txMetadata);
+  }
+  const surveyResponse = txMetadata ? extractSurveyResponse(txMetadata) : null;
+  const surveyResponseJson = surveyResponse
+    ? JSON.stringify(surveyResponse)
+    : undefined;
 
   // 7. Check if this specific vote transaction already exists
   // Each vote is a separate on-chain transaction, so we check by txHash
@@ -378,9 +393,13 @@ async function ingestSingleVote(
       data: {
         vote: voteType,
         votingPower: votingPower,
+        responseEpoch: koiosVote.epoch_no ?? undefined,
         anchorUrl: koiosVote.meta_url,
         anchorHash: koiosVote.meta_hash,
         rationale: rationaleJson ?? undefined,
+        surveyResponse: surveyResponseJson,
+        surveyResponseSurveyTxId: surveyResponse?.surveyTxId,
+        surveyResponseResponderRole: surveyResponse?.responderRole,
         votedAt: koiosVote.block_time
           ? new Date(koiosVote.block_time * 1000)
           : undefined,
@@ -403,9 +422,13 @@ async function ingestSingleVote(
         vote: voteType,
         voterType: voterType,
         votingPower: votingPower,
+        responseEpoch: koiosVote.epoch_no ?? undefined,
         anchorUrl: koiosVote.meta_url,
         anchorHash: koiosVote.meta_hash,
         rationale: rationaleJson ?? undefined,
+        surveyResponse: surveyResponseJson,
+        surveyResponseSurveyTxId: surveyResponse?.surveyTxId,
+        surveyResponseResponderRole: surveyResponse?.responderRole,
         votedAt: koiosVote.block_time
           ? new Date(koiosVote.block_time * 1000) // Convert Unix timestamp to Date
           : undefined,

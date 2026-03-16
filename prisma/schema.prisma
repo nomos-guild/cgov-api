@@ -278,9 +278,13 @@ model OnchainVote {
   vote        VoteType?
   voterType   VoterType @map("voter_type")
   votingPower BigInt?   @map("voting_power")
+  responseEpoch Int?    @map("response_epoch")
   anchorUrl   String?   @map("anchor_url")
   anchorHash  String?   @map("anchor_hash")
   rationale   String?
+  surveyResponse              String?   @map("survey_response")
+  surveyResponseSurveyTxId    String?   @map("survey_response_survey_tx_id")
+  surveyResponseResponderRole String?   @map("survey_response_responder_role")
   votedAt     DateTime? @default(now()) @map("voted_at")
   createdAt   DateTime? @default(now()) @map("created_at")
   updatedAt   DateTime? @map("updated_at")
@@ -328,6 +332,8 @@ model Proposal {
   spoAlwaysNoConfidencePower  BigInt?         @map("spo_always_no_confidence_power")
   spoNoVotePower              BigInt?         @map("spo_no_vote_power") // Koios pool_no_vote_power (includes notVoted)
   metadata                    String?
+  linkedSurveyTxId            String?         @map("linked_survey_tx_id")
+  surveyDetails               String?         @map("survey_details")
   createdAt                   DateTime?       @default(now()) @map("created_at")
   updatedAt                   DateTime?       @map("updated_at")
   onchainVotes                OnchainVote[]

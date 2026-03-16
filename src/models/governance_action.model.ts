@@ -1,3 +1,13 @@
+import type {
+  ProposalSurveyResponse as SharedProposalSurveyResponse,
+  ProposalSurveyTallyResponse as SharedProposalSurveyTallyResponse,
+  ProposalSurveyTallyRoleResult,
+  ResponderRole,
+  SurveyDetails,
+  SurveyQuestion,
+  WeightingMode,
+} from "../types/survey.types";
+
 /**
  * Voting threshold requirements per voter type
  * null means this voter type does not participate in ratification for this action type
@@ -134,6 +144,17 @@ export interface GovernanceActionDetail extends GovernanceAction {
   ccVotes?: VoteRecord[];
   references?: GovernanceActionReference[];
 }
+
+export type {
+  ResponderRole,
+  SurveyDetails,
+  SurveyQuestion,
+  WeightingMode,
+};
+
+export type ProposalSurveyResponse = SharedProposalSurveyResponse;
+export type ProposalSurveyRoleResult = ProposalSurveyTallyRoleResult;
+export type ProposalSurveyTallyResponse = SharedProposalSurveyTallyResponse;
 
 export type GovernanceActionType =
   | "All"

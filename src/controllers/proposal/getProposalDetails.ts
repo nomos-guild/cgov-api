@@ -10,7 +10,7 @@ import { GetProposalInfoResponse } from "../../responses";
 import { syncProposalDetailsOnRead } from "../../services/syncOnRead";
 import { getCachedEligibleCCInfo } from "../../services/ingestion/voter.service";
 
-const buildProposalLookup = (
+export const buildProposalLookup = (
   identifier: string
 ): Prisma.ProposalWhereInput | null => {
   const trimmed = identifier.trim();

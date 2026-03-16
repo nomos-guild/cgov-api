@@ -110,6 +110,8 @@ router.get("/stats", drepController.getDRepStats);
  */
 router.get("/engagement-stats", drepController.getDRepEngagementStats);
 
+router.get("/:drepId/verify", drepController.getDRepVerify);
+
 /**
  * @openapi
  * /dreps/{drepId}:

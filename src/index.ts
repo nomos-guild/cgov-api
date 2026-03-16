@@ -73,8 +73,12 @@ if (process.env.DISABLE_CRON_IN_API !== "true") {
 
 // Start the server
 const port = parseInt(process.env.PORT || "3000");
-app.listen(port, () => {
-  console.log(`Server is running on http://localhost:${port}`);
-});
+const server =
+  require.main === module
+    ? app.listen(port, () => {
+        console.log(`Server is running on http://localhost:${port}`);
+      })
+    : null;
 
+export { server };
 export default app;
