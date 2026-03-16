@@ -6,6 +6,7 @@ import { buildProposalLookup } from "./getProposalDetails";
 import {
   buildSurveyTally,
   emptySurveyTally,
+  normalizeSurveyDetails,
   parseGovernanceSurveyLink,
   validateLinkedSurvey,
   type SurveyDetails,
@@ -143,9 +144,21 @@ export const getProposalSurveyTally = async (req: Request, res: Response) => {
       surveyPayload.linkValidation.linkedRoleWeighting ??
       surveyPayload.surveyDetails.roleWeighting;
     const currentEpoch = await getCurrentEpoch();
+    const fallbackGovActionIx = parseGovActionIx(proposal.certIndex);
+    if (!surveyPayload.linkValidation.linkedActionId && fallbackGovActionIx === null) {
+      const tally = emptySurveyTally();
+      tally.surveyTxId = proposal.linkedSurveyTxId;
+      tally.errors = [
+        ...new Set([
+          ...tally.errors,
+          "Invalid proposal certIndex; expected a non-negative integer.",
+        ]),
+      ];
+      return res.json(tally);
+    }
     const linkedActionId = surveyPayload.linkValidation.linkedActionId ?? {
       txId: proposal.txHash,
-      govActionIx: Number(proposal.certIndex),
+      govActionIx: fallbackGovActionIx as number,
     };
 
     const enrichedVotes = await enrichSurveyTallyVotes(tallyVotes, linkedActionId);
@@ -230,8 +243,13 @@ function parseStoredSurveyDetails(
   }
 
   try {
-    return JSON.parse(surveyDetails) as SurveyDetails;
+    return normalizeSurveyDetails(JSON.parse(surveyDetails)) as SurveyDetails | null;
   } catch {
     return null;
   }
+}
+
+function parseGovActionIx(certIndex: string): number | null {
+  const parsed = Number(certIndex);
+  return Number.isInteger(parsed) && parsed >= 0 ? parsed : null;
 }

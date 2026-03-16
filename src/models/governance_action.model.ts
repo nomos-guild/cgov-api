@@ -1,3 +1,13 @@
+import type {
+  ProposalSurveyResponse as SharedProposalSurveyResponse,
+  ProposalSurveyTallyResponse as SharedProposalSurveyTallyResponse,
+  ProposalSurveyTallyRoleResult,
+  ResponderRole,
+  SurveyDetails,
+  SurveyQuestion,
+  WeightingMode,
+} from "../types/survey.types";
+
 /**
  * Voting threshold requirements per voter type
  * null means this voter type does not participate in ratification for this action type
@@ -135,85 +145,16 @@ export interface GovernanceActionDetail extends GovernanceAction {
   references?: GovernanceActionReference[];
 }
 
-export type ResponderRole = "DRep" | "SPO" | "CC" | "Stakeholder";
-export type WeightingMode =
-  | "CredentialBased"
-  | "StakeBased"
-  | "PledgeBased";
+export type {
+  ResponderRole,
+  SurveyDetails,
+  SurveyQuestion,
+  WeightingMode,
+};
 
-export interface SurveyQuestion {
-  questionId: string;
-  question: string;
-  methodType: string;
-  options?: string[];
-  maxSelections?: number;
-  numericConstraints?: {
-    minValue: number;
-    maxValue: number;
-    step?: number;
-  };
-  methodSchemaUri?: string;
-  methodSchemaHash?: string;
-}
-
-export interface SurveyDetails {
-  specVersion: string;
-  title: string;
-  description: string;
-  questions: SurveyQuestion[];
-  roleWeighting: Partial<Record<ResponderRole, WeightingMode>>;
-  endEpoch: number;
-}
-
-export interface ProposalSurveyResponse {
-  linked: boolean;
-  surveyTxId: string | null;
-  linkValidation: {
-    valid: boolean;
-    errors: string[];
-    actionEligibility?: ResponderRole[];
-    linkedRoleWeighting?: Partial<Record<ResponderRole, WeightingMode>> | null;
-    linkedActionId?: {
-      txId: string;
-      govActionIx: number;
-    };
-  };
-  surveyDetails: SurveyDetails | null;
-  surveyDetailsValidation: {
-    valid: boolean;
-    errors: string[];
-  };
-}
-
-export interface ProposalSurveyRoleResult {
-  responderRole: ResponderRole;
-  weightingMode: WeightingMode;
-  totals: {
-    totalSeen: number;
-    valid: number;
-    invalid: number;
-    deduped: number;
-    uniqueResponders: number;
-  };
-  methodResults: Record<string, unknown>[];
-}
-
-export interface ProposalSurveyTallyResponse {
-  surveyTxId: string | null;
-  phase: "provisional" | "finalization_pending" | "finalized";
-  asOfEpoch: number | null;
-  finalizationEpoch: number | null;
-  totals: {
-    totalSeen: number;
-    valid: number;
-    invalid: number;
-    deduped: number;
-    uniqueResponders: number;
-  };
-  roleResults: ProposalSurveyRoleResult[];
-  errors: string[];
-  warnings: string[];
-}
+export type ProposalSurveyResponse = SharedProposalSurveyResponse;
+export type ProposalSurveyRoleResult = ProposalSurveyTallyRoleResult;
+export type ProposalSurveyTallyResponse = SharedProposalSurveyTallyResponse;
 
 export type GovernanceActionType =
   | "All"

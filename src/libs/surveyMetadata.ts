@@ -1,137 +1,38 @@
 import { GovernanceType, VoterType } from "@prisma/client";
 import { getVotingThreshold } from "./proposalMapper";
+import type {
+  ProposalSurveyResponse as ProposalSurveyPayload,
+  ProposalSurveyTallyPhase,
+  ProposalSurveyTallyRoleResult,
+  ProposalSurveyTallyResponse,
+  ResponderRole,
+  SurveyAnswer,
+  SurveyDetails,
+  SurveyLinkedActionId,
+  SurveyLinkedVoteEvidence,
+  SurveyQuestion,
+  SurveyResponse,
+  SurveyTallyVote,
+  WeightingMode,
+} from "../types/survey.types";
 
 export const SURVEY_SPEC_VERSION = "1.0.0";
 export const GOVERNANCE_SURVEY_LINK_KIND = "cardano-governance-survey-link";
-
-export type ResponderRole = "DRep" | "SPO" | "CC" | "Stakeholder";
-export type WeightingMode =
-  | "CredentialBased"
-  | "StakeBased"
-  | "PledgeBased";
-
-export interface SurveyQuestion {
-  questionId: string;
-  question: string;
-  methodType: string;
-  options?: string[];
-  maxSelections?: number;
-  numericConstraints?: {
-    minValue: number;
-    maxValue: number;
-    step?: number;
-  };
-  methodSchemaUri?: string;
-  methodSchemaHash?: string;
-}
-
-export interface SurveyDetails {
-  specVersion: string;
-  title: string;
-  description: string;
-  questions: SurveyQuestion[];
-  roleWeighting: Partial<Record<ResponderRole, WeightingMode>>;
-  endEpoch: number;
-}
-
-export interface SurveyAnswer {
-  questionId: string;
-  selection?: number[];
-  numericValue?: number;
-  customValue?: unknown;
-}
-
-export interface SurveyResponse {
-  specVersion: string;
-  surveyTxId: string;
-  responderRole: ResponderRole;
-  answers: SurveyAnswer[];
-}
-
-export interface SurveyLinkedActionId {
-  txId: string;
-  govActionIx: number;
-}
-
-export interface ProposalSurveyPayload {
-  linked: boolean;
-  surveyTxId: string | null;
-  linkValidation: {
-    valid: boolean;
-    errors: string[];
-    actionEligibility?: ResponderRole[];
-    linkedRoleWeighting?: Partial<Record<ResponderRole, WeightingMode>> | null;
-    linkedActionId?: SurveyLinkedActionId;
-  };
-  surveyDetails: SurveyDetails | null;
-  surveyDetailsValidation: {
-    valid: boolean;
-    errors: string[];
-  };
-}
-
-export interface SurveyLinkedVoteEvidence {
-  valid: boolean;
-  errors: string[];
-  warnings?: string[];
-  responderRole?: ResponderRole | null;
-  responseCredential?: string | null;
-  linkedActionId?: SurveyLinkedActionId | null;
-}
-
-export type ProposalSurveyTallyPhase =
-  | "provisional"
-  | "finalization_pending"
-  | "finalized";
-
-export interface ProposalSurveyTallyRoleResult {
-  responderRole: ResponderRole;
-  weightingMode: WeightingMode;
-  totals: {
-    totalSeen: number;
-    valid: number;
-    invalid: number;
-    deduped: number;
-    uniqueResponders: number;
-  };
-  methodResults: Record<string, unknown>[];
-}
-
-export interface ProposalSurveyTallyResponse {
-  surveyTxId: string | null;
-  phase: ProposalSurveyTallyPhase;
-  asOfEpoch: number | null;
-  finalizationEpoch: number | null;
-  totals: {
-    totalSeen: number;
-    valid: number;
-    invalid: number;
-    deduped: number;
-    uniqueResponders: number;
-  };
-  roleResults: ProposalSurveyTallyRoleResult[];
-  errors: string[];
-  warnings: string[];
-}
-
-export interface SurveyTallyVote {
-  txHash: string;
-  voterType: VoterType;
-  voterId: string;
-  votingPower?: bigint | null;
-  responseEpoch?: number | null;
-  votedAt?: Date | null;
-  surveyResponse?: string | null;
-  surveyResponseSurveyTxId?: string | null;
-  surveyResponseResponderRole?: string | null;
-  absoluteSlot?: number | null;
-  txBlockIndex?: number | null;
-  metadataPosition?: number | null;
-  responseCredential?: string | null;
-  linkedVoteEvidence?: SurveyLinkedVoteEvidence | null;
-  snapshotWeight?: number | null;
-  snapshotWeightError?: string | null;
-}
+export type {
+  ProposalSurveyPayload,
+  ProposalSurveyTallyPhase,
+  ProposalSurveyTallyRoleResult,
+  ProposalSurveyTallyResponse,
+  ResponderRole,
+  SurveyAnswer,
+  SurveyDetails,
+  SurveyLinkedActionId,
+  SurveyLinkedVoteEvidence,
+  SurveyQuestion,
+  SurveyResponse,
+  SurveyTallyVote,
+  WeightingMode,
+};
 
 const BUILTIN_METHODS = {
   singleChoice: "urn:cardano:poll-method:single-choice:v1",
@@ -310,6 +211,86 @@ function normalizeSurveyQuestion(question: unknown): SurveyQuestion | null {
   };
 }
 
+function normalizeSurveyAnswer(answer: unknown): SurveyAnswer | null {
+  if (!isObject(answer)) {
+    return null;
+  }
+
+  const questionId = normalizeMetadataText(answer.questionId);
+  if (!questionId) {
+    return null;
+  }
+
+  if (answer.selection !== undefined) {
+    if (
+      !Array.isArray(answer.selection) ||
+      !answer.selection.every(
+        (value) => typeof value === "number" && Number.isInteger(value)
+      )
+    ) {
+      return null;
+    }
+  }
+
+  if (
+    answer.numericValue !== undefined &&
+    (typeof answer.numericValue !== "number" || !Number.isFinite(answer.numericValue))
+  ) {
+    return null;
+  }
+
+  return {
+    questionId,
+    ...(answer.selection !== undefined
+      ? { selection: answer.selection as number[] }
+      : {}),
+    ...(answer.numericValue !== undefined
+      ? { numericValue: answer.numericValue as number }
+      : {}),
+    ...(answer.customValue !== undefined ? { customValue: answer.customValue } : {}),
+  };
+}
+
+function normalizeSurveyResponse(response: unknown): SurveyResponse | null {
+  if (!isObject(response)) {
+    return null;
+  }
+
+  const specVersion = normalizeMetadataText(response.specVersion);
+  const surveyTxId = normalizeMetadataText(response.surveyTxId);
+  const responderRole = normalizeMetadataText(response.responderRole);
+  if (
+    !specVersion ||
+    !surveyTxId ||
+    (responderRole !== "DRep" &&
+      responderRole !== "SPO" &&
+      responderRole !== "CC" &&
+      responderRole !== "Stakeholder")
+  ) {
+    return null;
+  }
+
+  if (!Array.isArray(response.answers)) {
+    return null;
+  }
+
+  const answers: SurveyAnswer[] = [];
+  for (const answer of response.answers) {
+    const normalized = normalizeSurveyAnswer(answer);
+    if (!normalized) {
+      return null;
+    }
+    answers.push(normalized);
+  }
+
+  return {
+    specVersion,
+    surveyTxId,
+    responderRole,
+    answers,
+  };
+}
+
 export function normalizeSurveyDetails(
   surveyDetails: unknown
 ): SurveyDetails | null {
@@ -391,9 +372,7 @@ export function extractSurveyResponse(metadata: unknown): SurveyResponse | null 
   }
 
   const surveyResponse = (label17 as Record<string, unknown>).surveyResponse;
-  return isObject(surveyResponse)
-    ? (surveyResponse as unknown as SurveyResponse)
-    : null;
+  return normalizeSurveyResponse(surveyResponse);
 }
 
 export function validateLinkedSurvey(
@@ -438,6 +417,11 @@ export function validateLinkedSurvey(
     );
   }
 
+  const parsedGovActionIx = Number(params.certIndex);
+  if (!Number.isInteger(parsedGovActionIx) || parsedGovActionIx < 0) {
+    linkErrors.push("certIndex must be a non-negative integer.");
+  }
+
   const surveyDetailsValidation = validateSurveyDetails(
     normalizedSurveyDetails,
     actionEligibility,
@@ -466,10 +450,14 @@ export function validateLinkedSurvey(
     errors: linkErrors,
     actionEligibility,
     linkedRoleWeighting,
-    linkedActionId: {
-      txId: params.proposalTxHash,
-      govActionIx: Number(params.certIndex),
-    },
+    ...(Number.isInteger(parsedGovActionIx) && parsedGovActionIx >= 0
+      ? {
+          linkedActionId: {
+            txId: params.proposalTxHash,
+            govActionIx: parsedGovActionIx,
+          },
+        }
+      : {}),
   };
 
   return payload;
@@ -1219,7 +1207,7 @@ function safeParseSurveyResponse(
     return null;
   }
 
-  return extractSurveyResponse(parsed) ?? (parsed as unknown as SurveyResponse);
+  return extractSurveyResponse(parsed);
 }
 
 function safeParseJson(value: string | null | undefined): Record<string, unknown> | null {

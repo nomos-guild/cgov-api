@@ -3,6 +3,7 @@ import { DRepID, PoolId, TxCBOR } from "@meshsdk/core-cst";
 import { prisma } from "./prisma";
 import { getBlockfrostService } from "./blockfrost";
 import { koiosGet, koiosPost } from "./koios";
+import { processInParallel } from "./ingestion/parallel";
 import type {
   ResponderRole,
   SurveyLinkedActionId,
@@ -10,6 +11,27 @@ import type {
   SurveyTallyVote,
   WeightingMode,
 } from "../libs/surveyMetadata";
+
+const DEFAULT_SURVEY_TALLY_KOIOS_CONCURRENCY = 5;
+const MAX_SURVEY_TALLY_KOIOS_CONCURRENCY = 20;
+
+function getSurveyTallyKoiosConcurrency(): number {
+  const rawValue = process.env.SURVEY_TALLY_KOIOS_CONCURRENCY;
+  if (!rawValue) {
+    return DEFAULT_SURVEY_TALLY_KOIOS_CONCURRENCY;
+  }
+
+  const parsed = parseInt(rawValue, 10);
+  if (
+    Number.isInteger(parsed) &&
+    parsed > 0 &&
+    parsed <= MAX_SURVEY_TALLY_KOIOS_CONCURRENCY
+  ) {
+    return parsed;
+  }
+
+  return DEFAULT_SURVEY_TALLY_KOIOS_CONCURRENCY;
+}
 
 interface KoiosTxInfoRow {
   tx_hash: string;
@@ -385,38 +407,46 @@ async function loadDrepWeights(
   }
 
   const missingIds = drepIds.filter((drepId) => !result.has(drepId));
-  await Promise.all(
-    missingIds.map(async (drepId) => {
-      try {
-        const rows = await koiosGet<Array<{ amount?: string | null }>>(
-          "/drep_voting_power_history",
-          {
-            _epoch_no: epochNo,
-            _drep_id: drepId,
-          }
-        );
-        const amount = rows?.[0]?.amount;
-        result.set(drepId, {
-          weight: amount ? Number(BigInt(amount)) / 1_000_000 : 0,
-          error: amount
-            ? undefined
-            : options?.provisional
-            ? undefined
-            : `Missing endEpoch DRep voting power snapshot for ${drepId}.`,
-        });
-      } catch (error) {
-        result.set(drepId, {
-          weight: 0,
-          error:
-            options?.provisional
-              ? undefined
-              : error instanceof Error
-              ? error.message
-              : `Failed to fetch endEpoch DRep voting power for ${drepId}.`,
-        });
-      }
-    })
+  const drepLoadResult = await processInParallel(
+    missingIds,
+    (drepId) => drepId,
+    async (drepId) => {
+      const rows = await koiosGet<Array<{ amount?: string | null }>>(
+        "/drep_voting_power_history",
+        {
+          _epoch_no: epochNo,
+          _drep_id: drepId,
+        }
+      );
+      const amount = rows?.[0]?.amount;
+      return {
+        drepId,
+        weight: amount ? Number(BigInt(amount)) / 1_000_000 : 0,
+        error: amount
+          ? undefined
+          : options?.provisional
+          ? undefined
+          : `Missing endEpoch DRep voting power snapshot for ${drepId}.`,
+      };
+    },
+    getSurveyTallyKoiosConcurrency()
   );
+  for (const loaded of drepLoadResult.successful) {
+    result.set(loaded.drepId, {
+      weight: loaded.weight,
+      error: loaded.error,
+    });
+  }
+  for (const failed of drepLoadResult.failed) {
+    result.set(failed.id, {
+      weight: 0,
+      error:
+        options?.provisional
+          ? undefined
+          : failed.error ||
+            `Failed to fetch endEpoch DRep voting power for ${failed.id}.`,
+    });
+  }
 
   return result;
 }
@@ -444,73 +474,70 @@ async function loadSpoWeights(
     return result;
   }
 
-  await Promise.all(
-    spoIds.map(async (poolId) => {
-      const weightingMode = roleWeighting.SPO;
-      if (!weightingMode || weightingMode === "CredentialBased") {
-        return;
-      }
+  const weightingMode = roleWeighting.SPO;
+  if (!weightingMode || weightingMode === "CredentialBased") {
+    return result;
+  }
 
+  const spoLoadResult = await processInParallel(
+    spoIds,
+    (poolId) => poolId,
+    async (poolId) => {
       if (weightingMode === "StakeBased") {
-        try {
-          const rows = await koiosGet<Array<{ amount?: string | null }>>(
-            "/pool_voting_power_history",
-            {
-              _epoch_no: epochNo,
-              _pool_bech32: poolId,
-            }
-          );
-          const amount = rows?.[0]?.amount;
-          result.set(poolId, {
-            weight: amount ? Number(BigInt(amount)) / 1_000_000 : 0,
-            error: amount
-              ? undefined
-              : options?.provisional
-              ? undefined
-              : `Missing endEpoch SPO voting power snapshot for ${poolId}.`,
-          });
-        } catch (error) {
-          result.set(poolId, {
-            weight: 0,
-            error:
-              options?.provisional
-                ? undefined
-                : error instanceof Error
-                ? error.message
-                : `Failed to fetch endEpoch SPO voting power for ${poolId}.`,
-          });
-        }
-        return;
+        const rows = await koiosGet<Array<{ amount?: string | null }>>(
+          "/pool_voting_power_history",
+          {
+            _epoch_no: epochNo,
+            _pool_bech32: poolId,
+          }
+        );
+        const amount = rows?.[0]?.amount;
+        return {
+          poolId,
+          weight: amount ? Number(BigInt(amount)) / 1_000_000 : 0,
+          error: amount
+            ? undefined
+            : options?.provisional
+            ? undefined
+            : `Missing endEpoch SPO voting power snapshot for ${poolId}.`,
+        };
       }
 
-      try {
-        const rows = await koiosPost<Array<Record<string, unknown>>>("/pool_info", {
-          _pool_bech32_ids: [poolId],
-        });
-        const row = rows?.[0];
-        const rawLivePledge = row?.live_pledge ?? row?.livePledge ?? row?.pledge;
-        const parsed =
-          typeof rawLivePledge === "string" || typeof rawLivePledge === "number"
-            ? Number(rawLivePledge) / 1_000_000
-            : 0;
-        result.set(poolId, {
-          weight: Number.isFinite(parsed) ? parsed : 0,
-          error:
-            options?.provisional || currentEpoch === epochNo
-              ? undefined
-              : "PledgeBased tally uses current live pledge because historical pledge snapshots are unavailable in cgov-api.",
-        });
-      } catch (error) {
-        result.set(poolId, {
-          weight: 0,
-          error:
-            error instanceof Error
-              ? error.message
-              : `Failed to fetch SPO live pledge for ${poolId}.`,
-        });
-      }
-    })
+      const rows = await koiosPost<Array<Record<string, unknown>>>("/pool_info", {
+        _pool_bech32_ids: [poolId],
+      });
+      const row = rows?.[0];
+      const rawLivePledge = row?.live_pledge ?? row?.livePledge ?? row?.pledge;
+      const parsed =
+        typeof rawLivePledge === "string" || typeof rawLivePledge === "number"
+          ? Number(rawLivePledge) / 1_000_000
+          : 0;
+      return {
+        poolId,
+        weight: Number.isFinite(parsed) ? parsed : 0,
+        error:
+          options?.provisional || currentEpoch === epochNo
+            ? undefined
+            : "PledgeBased tally uses current live pledge because historical pledge snapshots are unavailable in cgov-api.",
+      };
+    },
+    getSurveyTallyKoiosConcurrency()
   );
+  for (const loaded of spoLoadResult.successful) {
+    result.set(loaded.poolId, {
+      weight: loaded.weight,
+      error: loaded.error,
+    });
+  }
+  for (const failed of spoLoadResult.failed) {
+    result.set(failed.id, {
+      weight: 0,
+      error:
+        options?.provisional
+          ? undefined
+          : failed.error || `Failed to fetch endEpoch SPO voting power for ${failed.id}.`,
+    });
+  }
 
   return result;
 }

@@ -47,6 +47,25 @@ describe("survey validation", () => {
     });
   });
 
+  it("rejects non-numeric certIndex in linked survey validation", () => {
+    const payload = validateLinkedSurvey({
+      specVersion: SURVEY_SPEC_VERSION,
+      kind: "cardano-governance-survey-link",
+      surveyTxId: "a".repeat(64),
+      surveyDetails: baseSurveyDetails,
+      governanceType: GovernanceType.INFO_ACTION,
+      proposalTxHash: "b".repeat(64),
+      certIndex: "not-a-number",
+      expirationEpoch: 1257,
+    });
+
+    expect(payload.linkValidation.valid).toBe(false);
+    expect(payload.linkValidation.errors).toContain(
+      "certIndex must be a non-negative integer."
+    );
+    expect(payload.linkValidation.linkedActionId).toBeUndefined();
+  });
+
   it("rejects self-referential survey responses", () => {
     const response: SurveyResponse = {
       specVersion: SURVEY_SPEC_VERSION,
@@ -251,5 +270,50 @@ describe("survey validation", () => {
     expect(tally.totals.valid).toBe(0);
     expect(tally.totals.invalid).toBe(1);
     expect(methodResult.optionTotals).toEqual([0, 0]);
+  });
+
+  it("treats malformed surveyResponse payloads as invalid", () => {
+    const votes: SurveyTallyVote[] = [
+      {
+        txHash: "vote-malformed",
+        voterType: VoterType.DREP,
+        voterId: "drep1example",
+        surveyResponse: JSON.stringify({
+          17: {
+            surveyResponse: {
+              specVersion: SURVEY_SPEC_VERSION,
+              surveyTxId: "surveytx",
+              responderRole: "DRep",
+              answers: [{ notQuestionId: "q1" }],
+            },
+          },
+        }),
+        linkedVoteEvidence: {
+          valid: true,
+          errors: [],
+          responderRole: "DRep",
+          responseCredential: "drep1example",
+        },
+      },
+    ];
+
+    const tally = buildSurveyTally(
+      "surveytx",
+      {
+        ...baseSurveyDetails,
+        roleWeighting: { DRep: "CredentialBased" },
+      },
+      { DRep: "CredentialBased" },
+      votes,
+      {
+        phase: "finalized",
+        asOfEpoch: 1257,
+        finalizationEpoch: 1257,
+        enforceLinkedVoteEvidence: true,
+      }
+    );
+
+    expect(tally.totals.valid).toBe(0);
+    expect(tally.totals.invalid).toBe(1);
   });
 });

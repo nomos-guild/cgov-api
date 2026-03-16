@@ -205,6 +205,10 @@ export async function ingestProposalData(
       && surveyLink.specVersion === "1.0.0"
       ? await fetchLinkedSurveyDetails(surveyLink.surveyTxId)
       : null;
+    const serializedLinkedSurveyDetails = linkedSurveyDetails
+      ? JSON.stringify(linkedSurveyDetails)
+      : null;
+    const shouldClearSurveyDetails = !surveyLink.surveyTxId;
 
     // Always re-inject text fields for active proposals to ensure
     // sanitized data from Koios overwrites any corrupted values.
@@ -240,9 +244,7 @@ export async function ingestProposalData(
         expirationEpoch: koiosProposal.expiration,
         metadata,
         linkedSurveyTxId: surveyLink.surveyTxId,
-        surveyDetails: linkedSurveyDetails
-          ? JSON.stringify(linkedSurveyDetails)
-          : null,
+        surveyDetails: serializedLinkedSurveyDetails,
       },
       update: {
         // Only update mutable fields
@@ -258,9 +260,11 @@ export async function ingestProposalData(
         expirationEpoch: koiosProposal.expiration,
         metadata,
         linkedSurveyTxId: surveyLink.surveyTxId,
-        surveyDetails: linkedSurveyDetails
-          ? JSON.stringify(linkedSurveyDetails)
-          : null,
+        ...(serializedLinkedSurveyDetails !== null
+          ? { surveyDetails: serializedLinkedSurveyDetails }
+          : shouldClearSurveyDetails
+          ? { surveyDetails: null }
+          : {}),
         ...updateInfoFields,
       },
     });
