@@ -11,6 +11,7 @@
 import cron from "node-cron";
 import { prisma } from "../services";
 import { syncEpochTotalsStep } from "../services/ingestion/epoch-analytics.service";
+import { applyCronJitter } from "./jitter";
 
 let isRunning = false;
 
@@ -46,6 +47,7 @@ function startEpochTotalsSyncJobWithSchedule(schedule: string) {
     }
 
     isRunning = true;
+    await applyCronJitter("[Cron] Epoch totals sync job");
     const timestamp = new Date().toISOString();
     const startedAt = Date.now();
     console.log(`\n[${timestamp}] Starting epoch totals sync job...`);

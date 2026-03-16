@@ -13,7 +13,6 @@ import type {
   KoiosTxInfo,
 } from "../../types/koios.types";
 import { processInParallel } from "./parallel";
-import { withRetry } from "./utils";
 import {
   KOIOS_DREP_DELEGATORS_PAGE_SIZE,
   DREP_DELEGATOR_MIN_VOTING_POWER,
@@ -62,13 +61,11 @@ async function fetchDelegatorsForDrep(drepId: string): Promise<KoiosDrepDelegato
   const rows: KoiosDrepDelegator[] = [];
 
   while (hasMore) {
-    const page = await withRetry(() =>
-      koiosGet<KoiosDrepDelegator[]>("/drep_delegators", {
-        _drep_id: drepId,
-        limit: pageSize,
-        offset,
-      })
-    );
+    const page = await koiosGet<KoiosDrepDelegator[]>("/drep_delegators", {
+      _drep_id: drepId,
+      limit: pageSize,
+      offset,
+    });
 
     if (page && page.length > 0) {
       rows.push(...page);
@@ -174,11 +171,9 @@ async function fetchAccountUpdateHistoryForStakes(
   // Koios (PostgREST) endpoints cap responses to max 1000; we page explicitly.
   // When batching stake addresses, paging applies to the combined result set.
   while (hasMore) {
-    const page = await withRetry(() =>
-      koiosPost<KoiosAccountUpdateHistoryEntry[]>(
-        `/account_update_history?offset=${offset}&limit=${pageSize}`,
-        { _stake_addresses: stakeAddresses }
-      )
+    const page = await koiosPost<KoiosAccountUpdateHistoryEntry[]>(
+      `/account_update_history?offset=${offset}&limit=${pageSize}`,
+      { _stake_addresses: stakeAddresses }
     );
 
     if (Array.isArray(page) && page.length > 0) {
@@ -247,18 +242,16 @@ async function fetchTxInfoByHashes(txHashes: string[]): Promise<KoiosTxInfo[]> {
   const results: KoiosTxInfo[] = [];
 
   for (const batch of batches) {
-    const page = await withRetry(() =>
-      koiosPost<KoiosTxInfo[]>("/tx_info", {
-        _tx_hashes: batch,
-        _inputs: false,
-        _metadata: false,
-        _assets: false,
-        _withdrawals: false,
-        _certs: true,
-        _scripts: false,
-        _bytecode: false,
-      })
-    );
+    const page = await koiosPost<KoiosTxInfo[]>("/tx_info", {
+      _tx_hashes: batch,
+      _inputs: false,
+      _metadata: false,
+      _assets: false,
+      _withdrawals: false,
+      _certs: true,
+      _scripts: false,
+      _bytecode: false,
+    });
     if (Array.isArray(page) && page.length > 0) {
       results.push(...page);
     }

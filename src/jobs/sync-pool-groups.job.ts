@@ -8,6 +8,7 @@
 import cron from "node-cron";
 import { prisma } from "../services";
 import { syncPoolGroupsStep } from "../services/ingestion/epoch-analytics.service";
+import { applyCronJitter } from "./jitter";
 
 let isRunning = false;
 
@@ -43,6 +44,7 @@ function startPoolGroupsSyncJobWithSchedule(schedule: string) {
     }
 
     isRunning = true;
+    await applyCronJitter("[Cron] Pool groups sync job");
     const timestamp = new Date().toISOString();
     const startedAt = Date.now();
     console.log(`\n[${timestamp}] Starting pool groups sync job...`);

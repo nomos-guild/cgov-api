@@ -7,6 +7,7 @@
 import cron from "node-cron";
 import { prisma } from "../services";
 import { syncAllVoterVotingPower, syncCommitteeState } from "../services/ingestion/voter.service";
+import { applyCronJitter } from "./jitter";
 
 // Simple in-process guard to prevent overlapping runs in a single Node process
 let isVoterPowerSyncRunning = false;
@@ -14,10 +15,10 @@ let isVoterPowerSyncRunning = false;
 /**
  * Starts the voter power sync cron job
  * Schedule is configurable via VOTER_POWER_SYNC_SCHEDULE env variable
- * Defaults to every 6 hours (at minute 30 to offset from proposal sync)
+ * Defaults to once daily at 00:08 UTC
  */
 export const startVoterPowerSyncJob = () => {
-  const schedule = process.env.VOTER_POWER_SYNC_SCHEDULE || "30 */6 * * *";
+  const schedule = process.env.VOTER_POWER_SYNC_SCHEDULE || "8 0 * * *";
   const enabled = process.env.ENABLE_CRON_JOBS !== "false";
 
   if (!enabled) {
@@ -30,9 +31,9 @@ export const startVoterPowerSyncJob = () => {
   // Validate cron schedule
   if (!cron.validate(schedule)) {
     console.error(
-      `[Cron] Invalid cron schedule: ${schedule}. Using default: 30 */6 * * *`
+      `[Cron] Invalid cron schedule: ${schedule}. Using default: 8 0 * * *`
     );
-    return startVoterPowerSyncJobWithSchedule("30 */6 * * *");
+    return startVoterPowerSyncJobWithSchedule("8 0 * * *");
   }
 
   startVoterPowerSyncJobWithSchedule(schedule);
@@ -53,6 +54,7 @@ function startVoterPowerSyncJobWithSchedule(schedule: string) {
     }
 
     isVoterPowerSyncRunning = true;
+    await applyCronJitter("[Cron] Voter power sync job");
     const timestamp = new Date().toISOString();
     console.log(`\n[${timestamp}] Starting voter power sync job...`);
 

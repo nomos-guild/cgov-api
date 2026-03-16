@@ -9,11 +9,12 @@
 import cron from "node-cron";
 import { prisma } from "../services";
 import { syncMissingEpochAnalytics } from "../services/ingestion/epoch-analytics.service";
+import { applyCronJitter } from "./jitter";
 
 let isRunning = false;
 
 export const startMissingEpochsSyncJob = () => {
-  const schedule = process.env.MISSING_EPOCHS_SYNC_SCHEDULE || "33 */6 * * *";
+  const schedule = process.env.MISSING_EPOCHS_SYNC_SCHEDULE || "5 1,13 * * *";
   const enabled = process.env.ENABLE_CRON_JOBS !== "false";
 
   if (!enabled) {
@@ -25,9 +26,9 @@ export const startMissingEpochsSyncJob = () => {
 
   if (!cron.validate(schedule)) {
     console.error(
-      `[Cron] Invalid cron schedule: ${schedule}. Using default: 33 */6 * * *`
+      `[Cron] Invalid cron schedule: ${schedule}. Using default: 5 1,13 * * *`
     );
-    return startMissingEpochsSyncJobWithSchedule("33 */6 * * *");
+    return startMissingEpochsSyncJobWithSchedule("5 1,13 * * *");
   }
 
   startMissingEpochsSyncJobWithSchedule(schedule);
@@ -44,6 +45,7 @@ function startMissingEpochsSyncJobWithSchedule(schedule: string) {
     }
 
     isRunning = true;
+    await applyCronJitter("[Cron] Missing epochs backfill job");
     const timestamp = new Date().toISOString();
     const startedAt = Date.now();
     console.log(`\n[${timestamp}] Starting missing epochs backfill job...`);

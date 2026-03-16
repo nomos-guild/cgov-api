@@ -19,7 +19,6 @@ import {
 } from "./sync-utils";
 import { getDrepInfoBatch } from "../drep-lookup";
 import { processInParallel } from "./parallel";
-import { withRetry } from "./utils";
 
 // ============================================================
 // Result Types
@@ -53,12 +52,10 @@ async function fetchAllKoiosDrepIds(): Promise<string[]> {
   const ids: string[] = [];
 
   while (hasMore) {
-    const page = await withRetry(() =>
-      koiosGet<KoiosDrepListEntry[]>("/drep_list", {
-        limit: pageSize,
-        offset,
-      })
-    );
+    const page = await koiosGet<KoiosDrepListEntry[]>("/drep_list", {
+      limit: pageSize,
+      offset,
+    });
 
     if (page && page.length > 0) {
       for (const row of page) {
@@ -91,27 +88,25 @@ interface DrepMetadata {
 
 async function fetchDrepMetadata(drepId: string): Promise<DrepMetadata> {
   try {
-    const drepUpdates = await withRetry(() =>
-      koiosGet<
-        Array<{
-          meta_json?: {
-            body?: {
-              givenName?: unknown;
-              paymentAddress?: unknown;
-              doNotList?: unknown;
-              image?: {
-                contentUrl?: unknown;
-              };
-              bio?: unknown;
-              motivations?: unknown;
-              objectives?: unknown;
-              qualifications?: unknown;
-              references?: unknown;
+    const drepUpdates = await koiosGet<
+      Array<{
+        meta_json?: {
+          body?: {
+            givenName?: unknown;
+            paymentAddress?: unknown;
+            doNotList?: unknown;
+            image?: {
+              contentUrl?: unknown;
             };
-          } | null;
-        }>
-      >("/drep_updates", { _drep_id: drepId })
-    );
+            bio?: unknown;
+            motivations?: unknown;
+            objectives?: unknown;
+            qualifications?: unknown;
+            references?: unknown;
+          };
+        } | null;
+      }>
+    >("/drep_updates", { _drep_id: drepId });
 
     let name: string | undefined;
     let paymentAddr: string | undefined;
@@ -333,11 +328,9 @@ export async function syncAllDrepsInfo(
   for (let i = 0; i < drepIds.length; i += batchSize) {
     const batch = drepIds.slice(i, i + batchSize);
     try {
-      const infos = await withRetry(() =>
-        koiosPost<KoiosDrepInfo[]>("/drep_info", {
-          _drep_ids: batch,
-        })
-      );
+      const infos = await koiosPost<KoiosDrepInfo[]>("/drep_info", {
+        _drep_ids: batch,
+      });
 
       if (!Array.isArray(infos)) {
         failedBatches++;

@@ -8,6 +8,7 @@
 import cron from "node-cron";
 import { prisma } from "../services";
 import { syncDrepDelegationChanges } from "../services/ingestion/epoch-analytics.service";
+import { applyCronJitter } from "./jitter";
 
 // Simple in-process guard to prevent overlapping runs in a single Node process
 let isDrepDelegatorSyncRunning = false;
@@ -50,6 +51,7 @@ function startDrepDelegatorSyncJobWithSchedule(schedule: string) {
     }
 
     isDrepDelegatorSyncRunning = true;
+    await applyCronJitter("[Cron] DRep delegation change sync job");
     const timestamp = new Date().toISOString();
     const startedAt = Date.now();
     console.log(`\n[${timestamp}] Starting DRep delegation change sync job...`);
