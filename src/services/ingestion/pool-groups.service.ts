@@ -8,7 +8,6 @@
 import type { Prisma } from "@prisma/client";
 import { koiosGet } from "../koios";
 import type { KoiosPoolGroup } from "../../types/koios.types";
-import { withRetry } from "./utils";
 import {
   POOL_GROUPS_DB_UPDATE_CONCURRENCY,
   chunkArray,
@@ -47,9 +46,10 @@ async function fetchAllPoolGroups(): Promise<KoiosPoolGroup[]> {
   const groups: KoiosPoolGroup[] = [];
 
   while (hasMore) {
-    const page = await withRetry(() =>
-      koiosGet<KoiosPoolGroup[]>("/pool_groups", { limit: pageSize, offset })
-    );
+    const page = await koiosGet<KoiosPoolGroup[]>("/pool_groups", {
+      limit: pageSize,
+      offset,
+    });
 
     if (page && page.length > 0) {
       groups.push(...page);

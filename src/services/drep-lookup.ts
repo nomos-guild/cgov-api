@@ -22,13 +22,13 @@ export interface DrepLookupResult {
   metaHash: string | null;
 }
 
-const BATCH_SIZE = 50;
+const BATCH_SIZE = 10;
 
 /**
  * Look up DRep core info, preferring the local DB over Koios.
  *
  * 1. Queries the Drep table for the requested IDs.
- * 2. For any IDs not found, calls POST /drep_info in batches of 50.
+ * 2. For any IDs not found, calls POST /drep_info in batches of 10.
  * 3. Upserts Koios results into the DB for future callers.
  * 4. Returns a unified DrepLookupResult[] for all requested IDs.
  */

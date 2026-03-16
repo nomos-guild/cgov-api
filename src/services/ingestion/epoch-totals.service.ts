@@ -25,7 +25,6 @@ import {
   getKoiosCurrentEpoch,
   EPOCH_TOTALS_BACKFILL_CONCURRENCY,
 } from "./sync-utils";
-import { withRetry } from "./utils";
 import { processInParallel } from "./parallel";
 
 // ============================================================
@@ -192,8 +191,7 @@ async function sumPoolVotingPowerForEpoch(epochNo: number): Promise<bigint> {
     let lastError: any;
     for (const attempt of attempts) {
       try {
-        // koiosGet already has retry; keep this helper simple.
-        return await withRetry(() => attempt());
+        return await attempt();
       } catch (error: any) {
         lastError = error;
         // Try next attempt (some Koios deployments reject certain filter params with 404/400).
@@ -260,18 +258,16 @@ async function getDrepDelegatorAggregatesForEpoch(
   let delegatorCount = 0;
 
   while (hasMore) {
-    const page = await withRetry(() =>
-      koiosGet<KoiosDrepDelegator[]>("/drep_delegators", {
-        _drep_id: drepId,
-        // IMPORTANT:
-        // Koios docs define /drep_delegators with required `_drep_id` only.
-        // Epoch filtering is supported via PostgREST horizontal filtering on `epoch_no`
-        // (e.g. epoch_no=eq.320). Passing `_epoch_no` causes Koios to return 404.
-        epoch_no: `eq.${epochNo}`,
-        limit: pageSize,
-        offset,
-      })
-    );
+    const page = await koiosGet<KoiosDrepDelegator[]>("/drep_delegators", {
+      _drep_id: drepId,
+      // IMPORTANT:
+      // Koios docs define /drep_delegators with required `_drep_id` only.
+      // Epoch filtering is supported via PostgREST horizontal filtering on `epoch_no`
+      // (e.g. epoch_no=eq.320). Passing `_epoch_no` causes Koios to return 404.
+      epoch_no: `eq.${epochNo}`,
+      limit: pageSize,
+      offset,
+    });
 
     if (page && page.length > 0) {
       for (const row of page) {
@@ -296,11 +292,12 @@ async function getDrepVotingPowerForEpoch(
   epochNo: number,
   drepId: string
 ): Promise<bigint> {
-  const history = await withRetry(() =>
-    koiosGet<KoiosDrepVotingPower[]>("/drep_voting_power_history", {
+  const history = await koiosGet<KoiosDrepVotingPower[]>(
+    "/drep_voting_power_history",
+    {
       _epoch_no: epochNo,
       _drep_id: drepId,
-    })
+    }
   );
   const lovelace = history?.[0]?.amount;
   return lovelace ? BigInt(lovelace) : BigInt(0);
@@ -361,11 +358,8 @@ export async function syncEpochTotals(
     endpoint: string
   ): Promise<T | null> {
     const attempts: Array<() => Promise<T[]>> = [
-      () => withRetry(() => koiosGet<T[]>(endpoint, { _epoch_no: epochNo })),
-      () =>
-        withRetry(() =>
-          koiosGet<T[]>(endpoint, { epoch_no: `eq.${epochNo}` })
-        ),
+      () => koiosGet<T[]>(endpoint, { _epoch_no: epochNo }),
+      () => koiosGet<T[]>(endpoint, { epoch_no: `eq.${epochNo}` }),
     ];
 
     for (const attempt of attempts) {

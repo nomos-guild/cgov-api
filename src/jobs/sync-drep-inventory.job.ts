@@ -9,6 +9,7 @@
 import cron from "node-cron";
 import { prisma } from "../services";
 import { syncDrepInventoryStep } from "../services/ingestion/epoch-analytics.service";
+import { applyCronJitter } from "./jitter";
 
 let isRunning = false;
 
@@ -44,6 +45,7 @@ function startDrepInventorySyncJobWithSchedule(schedule: string) {
     }
 
     isRunning = true;
+    await applyCronJitter("[Cron] DRep inventory sync job");
     const timestamp = new Date().toISOString();
     const startedAt = Date.now();
     console.log(`\n[${timestamp}] Starting DRep inventory sync job...`);

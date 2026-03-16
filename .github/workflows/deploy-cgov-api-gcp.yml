@@ -96,13 +96,13 @@ jobs:
           gcloud scheduler jobs delete drep-voter-power-sync --location=${{ env.REGION }} --quiet || true
           gcloud scheduler jobs create http drep-voter-power-sync \
             --location=${{ env.REGION }} \
-            --schedule="0 0 * * *" \
+            --schedule="8 0 * * *" \
             --uri="${{ steps.url.outputs.url }}/data/trigger-voter-sync" \
             --http-method=POST \
             --headers="X-API-Key=${{ secrets.SERVER_API_KEY }}" \
             --attempt-deadline=900s \
             --time-zone="UTC" \
-            --description="Sync DRep and SPO voting power from Koios API every 24 hours"
+            --description="Sync DRep and SPO voting power from Koios API once daily at 00:08 UTC"
 
       - name: Create/Update DRep Inventory Sync Scheduler Job
         run: |
@@ -135,26 +135,26 @@ jobs:
           gcloud scheduler jobs delete epoch-totals-sync --location=${{ env.REGION }} --quiet || true
           gcloud scheduler jobs create http epoch-totals-sync \
             --location=${{ env.REGION }} \
-            --schedule="12 * * * *" \
+            --schedule="42 * * * *" \
             --uri="${{ steps.url.outputs.url }}/data/trigger-epoch-totals-sync" \
             --http-method=POST \
             --headers="X-API-Key=${{ secrets.SERVER_API_KEY }}" \
             --attempt-deadline=900s \
             --time-zone="UTC" \
-            --description="Sync epoch totals (circulation, treasury, delegated power) every hour at minute 12"
+            --description="Sync epoch totals (circulation, treasury, delegated power) every hour at minute 42"
 
       - name: Create/Update DRep Lifecycle Sync Scheduler Job
         run: |
           gcloud scheduler jobs delete drep-lifecycle-sync --location=${{ env.REGION }} --quiet || true
           gcloud scheduler jobs create http drep-lifecycle-sync \
             --location=${{ env.REGION }} \
-            --schedule="42 * * * *" \
+            --schedule="37 * * * *" \
             --uri="${{ steps.url.outputs.url }}/data/trigger-drep-lifecycle-sync" \
             --http-method=POST \
             --headers="X-API-Key=${{ secrets.SERVER_API_KEY }}" \
             --attempt-deadline=900s \
             --time-zone="UTC" \
-            --description="Sync DRep lifecycle events (registrations, deregistrations) every hour at minute 42"
+            --description="Sync DRep lifecycle events (registrations, deregistrations) every hour at minute 37"
 
       - name: Create/Update Pool Groups Sync Scheduler Job
         run: |
@@ -174,26 +174,26 @@ jobs:
           gcloud scheduler jobs delete missing-epochs-sync --location=${{ env.REGION }} --quiet || true
           gcloud scheduler jobs create http missing-epochs-sync \
             --location=${{ env.REGION }} \
-            --schedule="33 */6 * * *" \
+            --schedule="5 1,13 * * *" \
             --uri="${{ steps.url.outputs.url }}/data/trigger-missing-epochs-sync" \
             --http-method=POST \
             --headers="X-API-Key=${{ secrets.SERVER_API_KEY }}" \
             --attempt-deadline=900s \
             --time-zone="UTC" \
-            --description="Backfill missing epoch totals every 6 hours at minute 33"
+            --description="Backfill missing epoch totals twice daily at 01:05 and 13:05 UTC"
 
       - name: Create/Update DRep Delegator Sync Scheduler Job
         run: |
           gcloud scheduler jobs delete drep-delegator-sync --location=${{ env.REGION }} --quiet || true
           gcloud scheduler jobs create http drep-delegator-sync \
             --location=${{ env.REGION }} \
-            --schedule="57 * * * *" \
+            --schedule="52 * * * *" \
             --uri="${{ steps.url.outputs.url }}/data/trigger-drep-delegator-sync" \
             --http-method=POST \
             --headers="X-API-Key=${{ secrets.SERVER_API_KEY }}" \
             --attempt-deadline=900s \
             --time-zone="UTC" \
-            --description="Sync DRep delegation changes every hour at minute 57"
+            --description="Sync DRep delegation changes every hour at minute 52"
 
       - name: Create/Update GitHub Discovery Scheduler Job
         run: |
@@ -307,14 +307,14 @@ jobs:
           echo "| Job | Schedule | Endpoint |" >> $GITHUB_STEP_SUMMARY
           echo "|-----|----------|----------|" >> $GITHUB_STEP_SUMMARY
           echo "| drep-proposal-sync | \`*/5 * * * *\` | POST /data/trigger-sync |" >> $GITHUB_STEP_SUMMARY
-          echo "| drep-voter-power-sync | \`0 0 * * *\` | POST /data/trigger-voter-sync |" >> $GITHUB_STEP_SUMMARY
+          echo "| drep-voter-power-sync | \`8 0 * * *\` | POST /data/trigger-voter-sync |" >> $GITHUB_STEP_SUMMARY
           echo "| drep-inventory-sync | \`2 * * * *\` | POST /data/trigger-drep-inventory-sync |" >> $GITHUB_STEP_SUMMARY
           echo "| drep-info-sync | \`22 * * * *\` | POST /data/trigger-drep-info-sync |" >> $GITHUB_STEP_SUMMARY
-          echo "| epoch-totals-sync | \`12 * * * *\` | POST /data/trigger-epoch-totals-sync |" >> $GITHUB_STEP_SUMMARY
-          echo "| drep-lifecycle-sync | \`42 * * * *\` | POST /data/trigger-drep-lifecycle-sync |" >> $GITHUB_STEP_SUMMARY
+          echo "| epoch-totals-sync | \`42 * * * *\` | POST /data/trigger-epoch-totals-sync |" >> $GITHUB_STEP_SUMMARY
+          echo "| drep-lifecycle-sync | \`37 * * * *\` | POST /data/trigger-drep-lifecycle-sync |" >> $GITHUB_STEP_SUMMARY
           echo "| pool-groups-sync | \`47 * * * *\` | POST /data/trigger-pool-groups-sync |" >> $GITHUB_STEP_SUMMARY
-          echo "| missing-epochs-sync | \`33 */6 * * *\` | POST /data/trigger-missing-epochs-sync |" >> $GITHUB_STEP_SUMMARY
-          echo "| drep-delegator-sync | \`57 * * * *\` | POST /data/trigger-drep-delegator-sync |" >> $GITHUB_STEP_SUMMARY
+          echo "| missing-epochs-sync | \`5 1,13 * * *\` | POST /data/trigger-missing-epochs-sync |" >> $GITHUB_STEP_SUMMARY
+          echo "| drep-delegator-sync | \`52 * * * *\` | POST /data/trigger-drep-delegator-sync |" >> $GITHUB_STEP_SUMMARY
           echo "| github-discover | \`0 3 * * 0\` | POST /data/github/discover |" >> $GITHUB_STEP_SUMMARY
           echo "| github-sync-active | \`*/30 * * * *\` | POST /data/github/sync?tier=active |" >> $GITHUB_STEP_SUMMARY
           echo "| github-sync-moderate | \`0 */4 * * *\` | POST /data/github/sync?tier=moderate |" >> $GITHUB_STEP_SUMMARY

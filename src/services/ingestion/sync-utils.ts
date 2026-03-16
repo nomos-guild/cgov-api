@@ -11,7 +11,8 @@ import { withRetry } from "./utils";
 // ============================================================
 
 export const KOIOS_DREP_LIST_PAGE_SIZE = 1000;
-export const KOIOS_DREP_INFO_BATCH_SIZE = 50;
+// Keep /drep_info payloads under Koios public request-size caps.
+export const KOIOS_DREP_INFO_BATCH_SIZE = 10;
 export const KOIOS_POOL_VP_PAGE_SIZE = 1000;
 export const KOIOS_DREP_DELEGATORS_PAGE_SIZE = 1000;
 export const KOIOS_ACCOUNT_LIST_PAGE_SIZE = 1000;

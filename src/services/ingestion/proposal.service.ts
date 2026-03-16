@@ -96,6 +96,10 @@ export interface IngestProposalOptions {
   currentEpoch?: number;
   /** Optional minimum epoch to fetch votes from */
   minVotesEpoch?: number;
+  /** Optional per-run cache for inactive DRep power (scoped to syncAllProposals run) */
+  inactivePowerRunCache?: Map<string, bigint>;
+  /** Optional metrics collector for inactive DRep power cache behavior */
+  inactivePowerMetrics?: InactivePowerMetrics;
   /**
    * When true (default), vote fetching uses a global in-memory cache.
    * When false, fetches only this proposal's votes directly from Koios
@@ -130,7 +134,14 @@ export async function ingestProposalData(
   koiosProposal: KoiosProposal,
   options?: IngestProposalOptions
 ): Promise<ProposalIngestionResult> {
-  const { currentEpoch: currentEpochOverride, minVotesEpoch: minVotesEpochOverride, useCache, deferExpiredStatus } = options ?? {};
+  const {
+    currentEpoch: currentEpochOverride,
+    minVotesEpoch: minVotesEpochOverride,
+    inactivePowerRunCache,
+    inactivePowerMetrics,
+    useCache,
+    deferExpiredStatus,
+  } = options ?? {};
   // Wrap entire operation in retry logic
   return withRetry(async () => {
     // 1. Get current epoch for status calculation
@@ -307,7 +318,9 @@ export async function ingestProposalData(
       drepTotalPowerEpoch,
       spoTotalPowerEpoch,
       inactivePowerEpoch,
-      isActiveProposal
+      isActiveProposal,
+      inactivePowerRunCache,
+      inactivePowerMetrics
     );
 
     return {
@@ -459,6 +472,8 @@ export async function syncAllProposals(): Promise<SyncAllProposalsResult> {
 
   // 5. Get current epoch once for the whole run and reuse it
   const currentEpoch = await getCurrentEpoch();
+  const inactivePowerRunCache = new Map<string, bigint>();
+  const inactivePowerMetrics = createInactivePowerMetrics();
 
   // 6. Process each proposal sequentially
   for (const koiosProposal of sortedProposals) {
@@ -466,6 +481,8 @@ export async function syncAllProposals(): Promise<SyncAllProposalsResult> {
       const result = await ingestProposalData(koiosProposal, {
         currentEpoch,
         minVotesEpoch,
+        inactivePowerRunCache,
+        inactivePowerMetrics,
         useCache: true, // Use cache for bulk sync
         deferExpiredStatus: true, // Apply terminal status only after successful vote sync
       });
@@ -493,6 +510,7 @@ export async function syncAllProposals(): Promise<SyncAllProposalsResult> {
   console.log(
     `[Proposal Sync] Completed: ${results.success} succeeded, ${results.failed} failed`
   );
+  logInactivePowerMetrics(inactivePowerMetrics);
 
   return results;
 }
@@ -844,6 +862,126 @@ interface KoiosDrepUpdate {
   drep_id: string;
   block_time: number;
   action: string;
+}
+
+type InactivePowerMode = "active" | "completed";
+
+interface InactivePowerCacheEntry {
+  value: bigint;
+  expiresAtMs: number;
+}
+
+interface InactivePowerMetrics {
+  requestsTotal: number;
+  runCacheHits: number;
+  processCacheHits: number;
+  cacheMisses: number;
+  uniqueKeys: Set<string>;
+}
+
+const INACTIVE_ACTIVE_CACHE_TTL_MS =
+  Number(process.env.INACTIVE_POWER_ACTIVE_TTL_MS ?? 15 * 60 * 1000);
+const INACTIVE_COMPLETED_CACHE_TTL_MS =
+  Number(process.env.INACTIVE_POWER_COMPLETED_TTL_MS ?? 24 * 60 * 60 * 1000);
+const inactivePowerProcessCache = new Map<string, InactivePowerCacheEntry>();
+
+function createInactivePowerMetrics(): InactivePowerMetrics {
+  return {
+    requestsTotal: 0,
+    runCacheHits: 0,
+    processCacheHits: 0,
+    cacheMisses: 0,
+    uniqueKeys: new Set<string>(),
+  };
+}
+
+function getInactivePowerCacheKey(
+  epoch: number,
+  mode: InactivePowerMode
+): string {
+  return `inactive:${epoch}:${mode}`;
+}
+
+function getInactivePowerTtlMs(mode: InactivePowerMode): number {
+  return mode === "active"
+    ? INACTIVE_ACTIVE_CACHE_TTL_MS
+    : INACTIVE_COMPLETED_CACHE_TTL_MS;
+}
+
+function getProcessCachedInactivePower(cacheKey: string): bigint | null {
+  const now = Date.now();
+  const cached = inactivePowerProcessCache.get(cacheKey);
+  if (!cached) {
+    return null;
+  }
+  if (cached.expiresAtMs <= now) {
+    inactivePowerProcessCache.delete(cacheKey);
+    return null;
+  }
+  return cached.value;
+}
+
+function setProcessCachedInactivePower(
+  cacheKey: string,
+  value: bigint,
+  ttlMs: number
+): void {
+  inactivePowerProcessCache.set(cacheKey, {
+    value,
+    expiresAtMs: Date.now() + ttlMs,
+  });
+}
+
+function logInactivePowerMetrics(metrics: InactivePowerMetrics): void {
+  console.log(
+    `[Proposal Sync][Inactive Cache] requests=${metrics.requestsTotal} uniqueKeys=${metrics.uniqueKeys.size} runHits=${metrics.runCacheHits} processHits=${metrics.processCacheHits} misses=${metrics.cacheMisses}`
+  );
+}
+
+async function getInactivePowerWithCache(
+  inactivePowerEpoch: number,
+  isActiveProposal: boolean,
+  runCache?: Map<string, bigint>,
+  metrics?: InactivePowerMetrics
+): Promise<bigint> {
+  const mode: InactivePowerMode = isActiveProposal ? "active" : "completed";
+  const cacheKey = getInactivePowerCacheKey(inactivePowerEpoch, mode);
+
+  if (metrics) {
+    metrics.requestsTotal += 1;
+    metrics.uniqueKeys.add(cacheKey);
+  }
+
+  const runCached = runCache?.get(cacheKey);
+  if (runCached != null) {
+    if (metrics) {
+      metrics.runCacheHits += 1;
+    }
+    return runCached;
+  }
+
+  const processCached = getProcessCachedInactivePower(cacheKey);
+  if (processCached != null) {
+    runCache?.set(cacheKey, processCached);
+    if (metrics) {
+      metrics.processCacheHits += 1;
+    }
+    return processCached;
+  }
+
+  if (metrics) {
+    metrics.cacheMisses += 1;
+  }
+
+  const fetchInactivePower = isActiveProposal
+    ? fetchInactiveDrepVotingPowerForActiveProposal
+    : fetchInactiveDrepVotingPowerForCompletedProposal;
+
+  const value = await fetchInactivePower(inactivePowerEpoch);
+  const ttlMs = getInactivePowerTtlMs(mode);
+  runCache?.set(cacheKey, value);
+  setProcessCachedInactivePower(cacheKey, value, ttlMs);
+  return value;
 }
 
 /**
@@ -1208,7 +1346,9 @@ async function updateProposalVotingPower(
   drepTotalPowerEpoch: number,
   spoTotalPowerEpoch: number,
   inactivePowerEpoch: number,
-  isActiveProposal: boolean
+  isActiveProposal: boolean,
+  inactivePowerRunCache?: Map<string, bigint>,
+  inactivePowerMetrics?: InactivePowerMetrics
 ): Promise<void> {
   try {
     // Fetch voting summary for this proposal
@@ -1233,19 +1373,17 @@ async function updateProposalVotingPower(
     const shouldCalculateInactive =
       inactivePowerEpoch >= DREP_INACTIVITY_START_EPOCH;
 
-    // Use different methods for active vs completed proposals:
-    // - Active proposals: Use /drep_info API which has `active` field for current state
-    // - Completed proposals: Use certificate update checking for historical state
-    const fetchInactivePower = isActiveProposal
-      ? fetchInactiveDrepVotingPowerForActiveProposal
-      : fetchInactiveDrepVotingPowerForCompletedProposal;
-
     const [drepTotalVotePower, spoTotalVotePower, drepInactiveVotePower] =
       await Promise.all([
         fetchDrepEpochSummary(drepTotalPowerEpoch),
         fetchSpoTotalVotingPower(spoTotalPowerEpoch),
         shouldCalculateInactive
-          ? fetchInactivePower(inactivePowerEpoch)
+          ? getInactivePowerWithCache(
+              inactivePowerEpoch,
+              isActiveProposal,
+              inactivePowerRunCache,
+              inactivePowerMetrics
+            )
           : Promise.resolve(BigInt(0)),
       ]);
 

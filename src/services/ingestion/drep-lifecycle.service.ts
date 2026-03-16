@@ -13,7 +13,6 @@ import {
   DREP_LIFECYCLE_SYNC_CONCURRENCY,
 } from "./sync-utils";
 import { processInParallel } from "./parallel";
-import { withRetry } from "./utils";
 
 // ============================================================
 // Constants
@@ -99,12 +98,10 @@ async function fetchAllDrepIds(): Promise<string[]> {
   const ids: string[] = [];
 
   while (hasMore) {
-    const page = await withRetry(() =>
-      koiosGet<Array<{ drep_id: string }>>("/drep_list", {
-        limit: pageSize,
-        offset,
-      })
-    );
+    const page = await koiosGet<Array<{ drep_id: string }>>("/drep_list", {
+      limit: pageSize,
+      offset,
+    });
 
     if (page && page.length > 0) {
       for (const row of page) {
@@ -130,13 +127,11 @@ async function fetchDrepUpdates(drepId: string): Promise<KoiosDrepUpdate[]> {
   const updates: KoiosDrepUpdate[] = [];
 
   while (hasMore) {
-    const page = await withRetry(() =>
-      koiosGet<KoiosDrepUpdate[]>("/drep_updates", {
-        _drep_id: drepId,
-        limit: pageSize,
-        offset,
-      })
-    );
+    const page = await koiosGet<KoiosDrepUpdate[]>("/drep_updates", {
+      _drep_id: drepId,
+      limit: pageSize,
+      offset,
+    });
 
     if (page && page.length > 0) {
       updates.push(...page);

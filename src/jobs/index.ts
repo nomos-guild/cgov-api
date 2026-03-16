@@ -28,7 +28,7 @@ export const startAllJobs = () => {
   // Start proposal sync job
   startProposalSyncJob();
 
-  // Start voter power sync job (DRep and SPO voting power updates)
+  // Start voter power sync job (DRep and SPO voting power updates; daily at 00:08 UTC by default)
   startVoterPowerSyncJob();
 
   // Start GitHub discovery job (weekly)
@@ -63,7 +63,7 @@ export const startAllJobs = () => {
   // Pool group mappings (hourly at :47)
   startPoolGroupsSyncJob();
 
-  // Missing epochs backfill (every 6 hours at :33)
+  // Missing epochs backfill (twice daily at 01:05 and 13:05 UTC by default)
   startMissingEpochsSyncJob();
 
   // DRep delegation change sync (hourly at :52)

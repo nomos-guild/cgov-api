@@ -9,6 +9,7 @@
 import cron from "node-cron";
 import { prisma } from "../services";
 import { syncDrepLifecycleStep } from "../services/ingestion/epoch-analytics.service";
+import { applyCronJitter } from "./jitter";
 
 let isRunning = false;
 
@@ -44,6 +45,7 @@ function startDrepLifecycleSyncJobWithSchedule(schedule: string) {
     }
 
     isRunning = true;
+    await applyCronJitter("[Cron] DRep lifecycle sync job");
     const timestamp = new Date().toISOString();
     const startedAt = Date.now();
     console.log(`\n[${timestamp}] Starting DRep lifecycle sync job...`);
