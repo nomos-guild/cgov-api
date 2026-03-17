@@ -103,8 +103,15 @@ async function getVoteRationaleJson(koiosVote: KoiosVote): Promise<string | null
 export interface VoteIngestionStats {
   votesIngested: number;
   votesUpdated: number;
+  votesProcessed: number;
   votersCreated: { dreps: number; spos: number; ccs: number };
   votersUpdated: { dreps: number; spos: number; ccs: number };
+  metadata: {
+    attempts: number;
+    success: number;
+    failed: number;
+    skipped: number;
+  };
 }
 
 /**
@@ -137,11 +144,19 @@ export async function ingestVotesForProposal(
   minEpoch?: number,
   options?: { useCache?: boolean }
 ): Promise<VoteIngestionStats> {
+  const startedAt = Date.now();
   const stats: VoteIngestionStats = {
     votesIngested: 0,
     votesUpdated: 0,
+    votesProcessed: 0,
     votersCreated: { dreps: 0, spos: 0, ccs: 0 },
     votersUpdated: { dreps: 0, spos: 0, ccs: 0 },
+    metadata: {
+      attempts: 0,
+      success: 0,
+      failed: 0,
+      skipped: 0,
+    },
   };
 
   const useCache = options?.useCache !== false;
@@ -194,7 +209,9 @@ export async function ingestVotesForProposal(
             params.epoch_no = `gte.${minEpoch}`;
           }
 
-          const batch = await koiosGet<KoiosVote[]>("/vote_list", params);
+          const batch = await koiosGet<KoiosVote[]>("/vote_list", params, {
+            source: "ingestion.vote.ingest.bulk.vote-list",
+          });
 
           if (!batch || batch.length === 0) {
             hasMore = false;
@@ -255,7 +272,9 @@ export async function ingestVotesForProposal(
           params.epoch_no = `gte.${minEpoch}`;
         }
 
-        const batch = await koiosGet<KoiosVote[]>("/vote_list", params);
+        const batch = await koiosGet<KoiosVote[]>("/vote_list", params, {
+          source: "ingestion.vote.ingest.single.vote-list",
+        });
 
         if (!batch || batch.length === 0) {
           hasMore = false;
@@ -284,9 +303,23 @@ export async function ingestVotesForProposal(
       `[Vote Ingestion] Found ${koiosVotes.length} votes for proposal ${proposalId}`
     );
 
+    const proposalSurveyContext = await tx.proposal.findUnique({
+      where: { proposalId },
+      select: { linkedSurveyTxId: true },
+    });
+    const shouldFetchSurveyMetadata = Boolean(
+      proposalSurveyContext?.linkedSurveyTxId
+    );
+
     // Process each vote
     for (const koiosVote of koiosVotes) {
-      await ingestSingleVote(koiosVote, proposalId, tx, stats);
+      await ingestSingleVote(
+        koiosVote,
+        proposalId,
+        tx,
+        stats,
+        shouldFetchSurveyMetadata
+      );
     }
   } catch (error: any) {
     // If fetching all votes fails, log and return empty stats
@@ -294,6 +327,9 @@ export async function ingestVotesForProposal(
     return stats;
   }
 
+  console.log(
+    `[Vote Ingestion] Summary proposal=${proposalId} durationMs=${Date.now() - startedAt} votesProcessed=${stats.votesProcessed} created=${stats.votesIngested} updated=${stats.votesUpdated} metadataAttempts=${stats.metadata.attempts} metadataSuccess=${stats.metadata.success} metadataFailed=${stats.metadata.failed} metadataSkipped=${stats.metadata.skipped}`
+  );
   return stats;
 }
 
@@ -304,8 +340,10 @@ async function ingestSingleVote(
   koiosVote: KoiosVote,
   proposalId: string,
   tx: Prisma.TransactionClient,
-  stats: VoteIngestionStats
+  stats: VoteIngestionStats,
+  shouldFetchSurveyMetadata: boolean
 ): Promise<void> {
+  stats.votesProcessed++;
   // 1. Ensure voter exists (creates if needed, updates voting power)
   const voterResult = await ensureVoterExists(
     koiosVote.voter_role,
@@ -362,11 +400,42 @@ async function ingestSingleVote(
 
   // 6. Fetch vote rationale/metadata JSON (stored as string in DB)
   const rationaleJson = await getVoteRationaleJson(koiosVote);
-  let txMetadata = voteTxMetadataCache.get(koiosVote.vote_tx_hash);
-  if (txMetadata === undefined) {
-    txMetadata = await fetchTxMetadataByHash(koiosVote.vote_tx_hash);
-    voteTxMetadataCache.set(koiosVote.vote_tx_hash, txMetadata);
+  let txMetadata:
+    | Record<string, unknown>
+    | Array<Record<string, unknown>>
+    | null
+    | undefined;
+  // Guard tx_metadata calls:
+  // 1) proposal must advertise linked survey context, and
+  // 2) vote must have a tx hash.
+  if (shouldFetchSurveyMetadata && koiosVote.vote_tx_hash) {
+    txMetadata = voteTxMetadataCache.get(koiosVote.vote_tx_hash);
+    if (txMetadata === undefined) {
+      stats.metadata.attempts++;
+      try {
+        txMetadata = await fetchTxMetadataByHash(koiosVote.vote_tx_hash);
+        voteTxMetadataCache.set(koiosVote.vote_tx_hash, txMetadata);
+        if (txMetadata) {
+          stats.metadata.success++;
+        } else {
+          // Keep null cached to avoid repeated misses.
+          stats.metadata.failed++;
+        }
+      } catch (error: any) {
+        // Keep null cached to avoid repeated failing calls in this run.
+        voteTxMetadataCache.set(koiosVote.vote_tx_hash, null);
+        stats.metadata.failed++;
+        console.warn(
+          `[Vote Ingestion] Non-fatal tx_metadata failure proposal=${proposalId} tx=${koiosVote.vote_tx_hash}:`,
+          error?.message ?? error
+        );
+        txMetadata = null;
+      }
+    }
+  } else {
+    stats.metadata.skipped++;
   }
+
   const surveyResponse = txMetadata ? extractSurveyResponse(txMetadata) : null;
   const surveyResponseJson = surveyResponse
     ? JSON.stringify(surveyResponse)

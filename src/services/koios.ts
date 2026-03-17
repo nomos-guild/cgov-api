@@ -1,5 +1,5 @@
 import axios, { AxiosInstance } from "axios";
-import { withRetry, type RetryOptions } from "./ingestion/utils";
+import { withRetry, type RetryAttemptContext, type RetryOptions } from "./ingestion/utils";
 
 const BASE_URL = process.env.KOIOS_BASE_URL || "https://api.koios.rest/api/v1";
 
@@ -12,6 +12,11 @@ const KOIOS_RETRY_OPTIONS: RetryOptions = {
   baseDelay: 3000, // 3 seconds
   maxDelay: 30000, // 30 seconds
 };
+const KOIOS_STRICT_TX_METADATA_RETRY_OPTIONS: RetryOptions = {
+  maxRetries: 3,
+  baseDelay: 3000,
+  maxDelay: 30000,
+};
 
 const DEFAULT_KOIOS_MAX_CONCURRENT_REQUESTS = 6;
 const DEFAULT_ENDPOINT_MAX_CONCURRENT = 2;
@@ -21,6 +26,19 @@ const KOIOS_BURST_MAX_REQUESTS = 90;
 const KOIOS_429_COOLDOWN_MS = 60_000;
 const KOIOS_PUBLIC_MAX_BODY_BYTES = 1024;
 const KOIOS_REGISTERED_MAX_BODY_BYTES = 5 * 1024;
+const KOIOS_DEFAULT_TIMEOUT_MS = 30000;
+const KOIOS_TX_METADATA_TIMEOUT_MS = 20000;
+
+type KoiosRetryProfileName = "default" | "tx_metadata_strict";
+interface KoiosRetryProfile {
+  name: KoiosRetryProfileName;
+  retry: RetryOptions;
+  timeoutMs: number;
+}
+
+export interface KoiosRequestContext {
+  source?: string;
+}
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -188,6 +206,10 @@ const globalKoiosBurstLimiter = new BurstLimiter(
 
 const KOIOS_ENDPOINT_LIMITS = new Map<string, number>([
   [
+    "/tx_metadata",
+    getBoundedIntEnv("KOIOS_MAX_CONCURRENT_TX_METADATA", 1, 1, 10),
+  ],
+  [
     "/drep_voting_power_history",
     getBoundedIntEnv(
       "KOIOS_MAX_CONCURRENT_DREP_VOTING_POWER_HISTORY",
@@ -240,6 +262,7 @@ const KOIOS_ENDPOINT_LIMITS = new Map<string, number>([
 ]);
 
 const endpointLimiters = new Map<string, ConcurrencyLimiter>();
+const koiosRetryCounters = new Map<string, number>();
 
 function normalizeKoiosEndpoint(url: string): string {
   const rawPath = (() => {
@@ -252,6 +275,43 @@ function normalizeKoiosEndpoint(url: string): string {
   const withLeadingSlash = rawPath.startsWith("/") ? rawPath : `/${rawPath}`;
   const withoutApiPrefix = withLeadingSlash.replace(/^\/api\/v\d+/, "");
   return withoutApiPrefix || withLeadingSlash;
+}
+
+function getKoiosRetryProfile(url: string): KoiosRetryProfile {
+  const endpoint = normalizeKoiosEndpoint(url);
+  if (endpoint === "/tx_metadata") {
+    return {
+      name: "tx_metadata_strict",
+      retry: KOIOS_STRICT_TX_METADATA_RETRY_OPTIONS,
+      timeoutMs: KOIOS_TX_METADATA_TIMEOUT_MS,
+    };
+  }
+
+  return {
+    name: "default",
+    retry: KOIOS_RETRY_OPTIONS,
+    timeoutMs: KOIOS_DEFAULT_TIMEOUT_MS,
+  };
+}
+
+function incrementRetryCounter(endpoint: string): void {
+  const current = koiosRetryCounters.get(endpoint) ?? 0;
+  koiosRetryCounters.set(endpoint, current + 1);
+}
+
+function onKoiosRetry(
+  url: string,
+  profileName: KoiosRetryProfileName,
+  context?: KoiosRequestContext
+) {
+  const endpoint = normalizeKoiosEndpoint(url);
+  const source = context?.source ?? "unknown";
+  return (context: RetryAttemptContext) => {
+    incrementRetryCounter(endpoint);
+    console.warn(
+      `[Koios Retry] source=${source} endpoint=${endpoint} profile=${profileName} attempt=${context.attempt}/${context.maxRetries} waitMs=${context.delayMs} status=${context.status ?? "unknown"}`
+    );
+  };
 }
 
 function getEndpointLimiter(url: string): ConcurrencyLimiter | undefined {
@@ -470,7 +530,7 @@ export const getKoiosService = (): AxiosInstance => {
       "Authorization": API_KEY ? `Bearer ${API_KEY}` : undefined,
       "Content-Type": "application/json",
     },
-    timeout: 30000, // 30 second timeout for blockchain data queries
+    timeout: KOIOS_DEFAULT_TIMEOUT_MS,
     responseEncoding: "utf-8" as any, // Ensure UTF-8 decoding of response bodies
   });
 
@@ -485,6 +545,7 @@ export const getKoiosService = (): AxiosInstance => {
         );
       }
       console.error("Koios API Error:", {
+        source: error.config?.__koiosSource,
         status: error.response?.status,
         statusText: error.response?.statusText,
         message: error.message,
@@ -503,20 +564,41 @@ export const getKoiosService = (): AxiosInstance => {
  * @param params - Optional query parameters
  * @returns The data from the API response
  */
-export async function koiosGet<T>(url: string, params?: any): Promise<T> {
+export async function koiosGet<T>(
+  url: string,
+  params?: any,
+  context?: KoiosRequestContext
+): Promise<T> {
   const koios = getKoiosService();
   const request = clampKoiosPaginationLimit(url, params);
+  const retryProfile = getKoiosRetryProfile(request.url);
+  const endpoint = normalizeKoiosEndpoint(request.url);
+  const source = context?.source ?? "unknown";
 
-  return withRetry(
-    () =>
-      withKoiosConcurrencyLimit(request.url, async () => {
-        const response = await koios.get<T>(request.url, {
-          params: request.params,
-        });
-        return response.data;
-      }),
-    KOIOS_RETRY_OPTIONS
-  );
+  try {
+    return await withRetry(
+      () =>
+        withKoiosConcurrencyLimit(request.url, async () => {
+          const requestConfig: any = {
+            params: request.params,
+            timeout: retryProfile.timeoutMs,
+            __koiosSource: source,
+          };
+          const response = await koios.get<T>(request.url, requestConfig);
+          return response.data;
+        }),
+      retryProfile.retry,
+      {
+        onRetry: onKoiosRetry(request.url, retryProfile.name, context),
+      }
+    );
+  } catch (error: any) {
+    const retries = koiosRetryCounters.get(endpoint) ?? 0;
+    console.error(
+      `[Koios Request Failed] source=${source} endpoint=${endpoint} profile=${retryProfile.name} timeoutMs=${retryProfile.timeoutMs} retriesSoFar=${retries} message=${error?.message ?? error}`
+    );
+    throw error;
+  }
 }
 
 /**
@@ -525,17 +607,39 @@ export async function koiosGet<T>(url: string, params?: any): Promise<T> {
  * @param data - The request body
  * @returns The data from the API response
  */
-export async function koiosPost<T>(url: string, data?: any): Promise<T> {
+export async function koiosPost<T>(
+  url: string,
+  data?: any,
+  context?: KoiosRequestContext
+): Promise<T> {
   const koios = getKoiosService();
   const request = clampKoiosPaginationLimit(url);
+  const retryProfile = getKoiosRetryProfile(request.url);
+  const endpoint = normalizeKoiosEndpoint(request.url);
+  const source = context?.source ?? "unknown";
   enforceKoiosPayloadLimit(request.url, data);
 
-  return withRetry(
-    () =>
-      withKoiosConcurrencyLimit(request.url, async () => {
-        const response = await koios.post<T>(request.url, data);
-        return response.data;
-      }),
-    KOIOS_RETRY_OPTIONS
-  );
+  try {
+    return await withRetry(
+      () =>
+        withKoiosConcurrencyLimit(request.url, async () => {
+          const requestConfig: any = {
+            timeout: retryProfile.timeoutMs,
+            __koiosSource: source,
+          };
+          const response = await koios.post<T>(request.url, data, requestConfig);
+          return response.data;
+        }),
+      retryProfile.retry,
+      {
+        onRetry: onKoiosRetry(request.url, retryProfile.name, context),
+      }
+    );
+  } catch (error: any) {
+    const retries = koiosRetryCounters.get(endpoint) ?? 0;
+    console.error(
+      `[Koios Request Failed] source=${source} endpoint=${endpoint} profile=${retryProfile.name} timeoutMs=${retryProfile.timeoutMs} retriesSoFar=${retries} message=${error?.message ?? error}`
+    );
+    throw error;
+  }
 }

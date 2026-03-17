@@ -375,7 +375,9 @@ export async function ingestProposal(
   proposalHash: string
 ): Promise<ProposalIngestionResult> {
   // 1. Fetch ALL proposals from Koios (API doesn't support filtering)
-  const allProposals = await koiosGet<KoiosProposal[]>("/proposal_list");
+  const allProposals = await koiosGet<KoiosProposal[]>("/proposal_list", undefined, {
+    source: "ingestion.proposal.ingest.single",
+  });
 
   // 2. Filter in memory to find the specific proposal
   const koiosProposal = allProposals?.find(
@@ -414,6 +416,7 @@ export async function ingestProposal(
  * @returns Summary of sync operation for proposals that were actually processed.
  */
 export async function syncAllProposals(): Promise<SyncAllProposalsResult> {
+  const startedAtMs = Date.now();
   console.log("[Proposal Sync] Starting sync of all proposals...");
 
   // Clear vote cache to ensure fresh data
@@ -432,7 +435,9 @@ export async function syncAllProposals(): Promise<SyncAllProposalsResult> {
   );
 
   // 2. Fetch all proposals from Koios (API does not support server-side filtering)
-  const allProposals = await koiosGet<KoiosProposal[]>("/proposal_list");
+  const allProposals = await koiosGet<KoiosProposal[]>("/proposal_list", undefined, {
+    source: "ingestion.proposal.sync.all",
+  });
 
   if (!allProposals || allProposals.length === 0) {
     console.log("[Proposal Sync] No proposals found in Koios");
@@ -457,10 +462,23 @@ export async function syncAllProposals(): Promise<SyncAllProposalsResult> {
     }
     return false; // Historical proposal that can remain as-is
   });
+  // Guard against duplicate proposal_id rows returned by Koios in the same payload.
+  // Keep the latest occurrence so we don't re-ingest the same proposal multiple times per run.
+  const proposalsById = new Map<string, KoiosProposal>();
+  for (const proposal of proposalsToProcess) {
+    proposalsById.set(proposal.proposal_id, proposal);
+  }
+  const dedupedProposalsToProcess = [...proposalsById.values()];
+  const duplicateCount = proposalsToProcess.length - dedupedProposalsToProcess.length;
+  if (duplicateCount > 0) {
+    console.warn(
+      `[Proposal Sync] Deduplicated ${duplicateCount} duplicate proposal rows from Koios payload`
+    );
+  }
 
   const results: SyncAllProposalsResult = {
     // "total" now reflects how many proposals we are actually processing this run
-    total: proposalsToProcess.length,
+    total: dedupedProposalsToProcess.length,
     success: 0,
     failed: 0,
     errors: [],
@@ -478,7 +496,7 @@ export async function syncAllProposals(): Promise<SyncAllProposalsResult> {
   );
 
   // 4. Sort proposals by submission epoch (oldest first) for consistent DB ordering
-  const sortedProposals = proposalsToProcess.sort((a, b) => {
+  const sortedProposals = dedupedProposalsToProcess.sort((a, b) => {
     const epochA = a.proposed_epoch || 0;
     const epochB = b.proposed_epoch || 0;
     return epochA - epochB;
@@ -502,6 +520,15 @@ export async function syncAllProposals(): Promise<SyncAllProposalsResult> {
   const currentEpoch = await getCurrentEpoch();
   const inactivePowerRunCache = new Map<string, bigint>();
   const inactivePowerMetrics = createInactivePowerMetrics();
+  const voteRunTotals = {
+    processed: 0,
+    created: 0,
+    updated: 0,
+    metadataAttempts: 0,
+    metadataSuccess: 0,
+    metadataFailed: 0,
+    metadataSkipped: 0,
+  };
 
   // 6. Process each proposal sequentially
   for (const koiosProposal of sortedProposals) {
@@ -516,6 +543,13 @@ export async function syncAllProposals(): Promise<SyncAllProposalsResult> {
       });
 
       await finalizeProposalStatusAfterVoteSync(result, "[Proposal Sync]");
+      voteRunTotals.processed += result.stats.votesProcessed;
+      voteRunTotals.created += result.stats.votesIngested;
+      voteRunTotals.updated += result.stats.votesUpdated;
+      voteRunTotals.metadataAttempts += result.stats.metadata.attempts;
+      voteRunTotals.metadataSuccess += result.stats.metadata.success;
+      voteRunTotals.metadataFailed += result.stats.metadata.failed;
+      voteRunTotals.metadataSkipped += result.stats.metadata.skipped;
 
       results.success++;
       console.log(
@@ -537,6 +571,9 @@ export async function syncAllProposals(): Promise<SyncAllProposalsResult> {
 
   console.log(
     `[Proposal Sync] Completed: ${results.success} succeeded, ${results.failed} failed`
+  );
+  console.log(
+    `[Proposal Sync] Run summary durationMs=${Date.now() - startedAtMs} votesProcessed=${voteRunTotals.processed} votesCreated=${voteRunTotals.created} votesUpdated=${voteRunTotals.updated} metadataAttempts=${voteRunTotals.metadataAttempts} metadataSuccess=${voteRunTotals.metadataSuccess} metadataFailed=${voteRunTotals.metadataFailed} metadataSkipped=${voteRunTotals.metadataSkipped}`
   );
   logInactivePowerMetrics(inactivePowerMetrics);
 
@@ -570,7 +607,9 @@ function mapGovernanceType(
  * Gets current epoch from Koios API
  */
 export async function getCurrentEpoch(): Promise<number> {
-  const tip = await koiosGet<Array<{ epoch_no: number }>>("/tip");
+  const tip = await koiosGet<Array<{ epoch_no: number }>>("/tip", undefined, {
+    source: "ingestion.proposal.current-epoch",
+  });
   return tip?.[0]?.epoch_no || 0;
 }
 
@@ -811,7 +850,9 @@ async function fetchProposalVotingSummary(
 ): Promise<KoiosProposalVotingSummary | null> {
   try {
     const summaries = await koiosGet<KoiosProposalVotingSummary[]>(
-      `/proposal_voting_summary?_proposal_id=${proposalId}`
+      `/proposal_voting_summary?_proposal_id=${proposalId}`,
+      undefined,
+      { source: "ingestion.proposal.voting-power.summary" }
     );
     return summaries?.[0] ?? null;
   } catch (error: any) {
@@ -831,7 +872,9 @@ async function fetchProposalVotingSummary(
 async function fetchDrepEpochSummary(epochNo: number): Promise<bigint> {
   try {
     const summaries = await koiosGet<KoiosDrepEpochSummary[]>(
-      `/drep_epoch_summary?_epoch_no=${epochNo}`
+      `/drep_epoch_summary?_epoch_no=${epochNo}`,
+      undefined,
+      { source: "ingestion.proposal.voting-power.drep-epoch-summary" }
     );
     if (summaries?.[0]?.amount) {
       return BigInt(summaries[0].amount);
@@ -864,7 +907,11 @@ async function fetchSpoTotalVotingPower(epochNo: number): Promise<bigint> {
     while (hasMore) {
       const poolPowers = await koiosGet<
         Array<{ pool_id_bech32: string; epoch_no: number; amount: string }>
-      >(`/pool_voting_power_history?_epoch_no=${epochNo}&limit=${pageSize}&offset=${offset}`);
+      >(
+        `/pool_voting_power_history?_epoch_no=${epochNo}&limit=${pageSize}&offset=${offset}`,
+        undefined,
+        { source: "ingestion.proposal.voting-power.pool-history" }
+      );
 
       if (poolPowers && poolPowers.length > 0) {
         for (const pool of poolPowers) {
@@ -1074,7 +1121,9 @@ async function fetchInactiveDrepVotingPowerForActiveProposal(
       const page = await koiosGet<
         Array<{ drep_id: string; epoch_no: number; amount: string }>
       >(
-        `/drep_voting_power_history?_epoch_no=${referenceEpoch}&limit=${pageSize}&offset=${offset}`
+        `/drep_voting_power_history?_epoch_no=${referenceEpoch}&limit=${pageSize}&offset=${offset}`,
+        undefined,
+        { source: "ingestion.proposal.inactive-power.active.drep-history" }
       );
       if (page && page.length > 0) {
         for (const dp of page) {
@@ -1174,7 +1223,9 @@ async function fetchInactiveDrepVotingPowerForCompletedProposal(
       const page = await koiosGet<
         Array<{ drep_id: string; epoch_no: number; amount: string }>
       >(
-        `/drep_voting_power_history?_epoch_no=${referenceEpoch}&limit=${pageSize}&offset=${offset}`
+        `/drep_voting_power_history?_epoch_no=${referenceEpoch}&limit=${pageSize}&offset=${offset}`,
+        undefined,
+        { source: "ingestion.proposal.inactive-power.completed.drep-history" }
       );
       if (page && page.length > 0) {
         for (const dp of page) {
@@ -1298,6 +1349,8 @@ async function fetchInactiveDrepVotingPowerForCompletedProposal(
       try {
         const updates = await koiosGet<KoiosDrepUpdate[]>("/drep_updates", {
           _drep_id: drepId,
+        }, {
+          source: "ingestion.proposal.inactive-power.completed.drep-updates",
         });
         if (updates && updates.length > 0) {
           for (const update of updates) {

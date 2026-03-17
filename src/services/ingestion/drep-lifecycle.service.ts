@@ -101,6 +101,8 @@ async function fetchAllDrepIds(): Promise<string[]> {
     const page = await koiosGet<Array<{ drep_id: string }>>("/drep_list", {
       limit: pageSize,
       offset,
+    }, {
+      source: "ingestion.drep-lifecycle.drep-list",
     });
 
     if (page && page.length > 0) {
@@ -131,6 +133,8 @@ async function fetchDrepUpdates(drepId: string): Promise<KoiosDrepUpdate[]> {
       _drep_id: drepId,
       limit: pageSize,
       offset,
+    }, {
+      source: "ingestion.drep-lifecycle.drep-updates",
     });
 
     if (page && page.length > 0) {

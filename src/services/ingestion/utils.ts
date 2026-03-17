@@ -11,6 +11,18 @@ export interface RetryOptions {
   maxDelay: number;
 }
 
+export interface RetryAttemptContext {
+  attempt: number;
+  maxRetries: number;
+  delayMs: number;
+  status?: number;
+  error: unknown;
+}
+
+export interface RetryHooks {
+  onRetry?: (context: RetryAttemptContext) => void;
+}
+
 /**
  * Default retry configuration
  */
@@ -41,7 +53,8 @@ const DEFAULT_RETRY_OPTIONS: RetryOptions = {
  */
 export async function withRetry<T>(
   operation: () => Promise<T>,
-  options: RetryOptions = DEFAULT_RETRY_OPTIONS
+  options: RetryOptions = DEFAULT_RETRY_OPTIONS,
+  hooks?: RetryHooks
 ): Promise<T> {
   let lastError: Error | undefined;
 
@@ -105,6 +118,14 @@ export async function withRetry<T>(
           `Retry attempt ${attempt + 1}/${options.maxRetries} after ${delay}ms delay...`
         );
       }
+
+      hooks?.onRetry?.({
+        attempt: attempt + 1,
+        maxRetries: options.maxRetries,
+        delayMs: delay,
+        status,
+        error,
+      });
 
       // Wait before retrying
       await new Promise((resolve) => setTimeout(resolve, delay));

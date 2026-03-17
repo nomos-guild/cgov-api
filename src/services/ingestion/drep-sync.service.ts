@@ -55,6 +55,8 @@ async function fetchAllKoiosDrepIds(): Promise<string[]> {
     const page = await koiosGet<KoiosDrepListEntry[]>("/drep_list", {
       limit: pageSize,
       offset,
+    }, {
+      source: "ingestion.drep-sync.drep-list",
     });
 
     if (page && page.length > 0) {
@@ -106,7 +108,9 @@ async function fetchDrepMetadata(drepId: string): Promise<DrepMetadata> {
           };
         } | null;
       }>
-    >("/drep_updates", { _drep_id: drepId });
+    >("/drep_updates", { _drep_id: drepId }, {
+      source: "ingestion.drep-sync.drep-updates",
+    });
 
     let name: string | undefined;
     let paymentAddr: string | undefined;
@@ -330,6 +334,8 @@ export async function syncAllDrepsInfo(
     try {
       const infos = await koiosPost<KoiosDrepInfo[]>("/drep_info", {
         _drep_ids: batch,
+      }, {
+        source: "ingestion.drep-sync.drep-info",
       });
 
       if (!Array.isArray(infos)) {

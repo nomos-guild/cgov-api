@@ -10,8 +10,8 @@
  * new data will be available on the next request after the background sync completes.
  *
  * Throttling/cooldowns are implemented to avoid overwhelming Koios API:
- * - Overview sync: 60 second cooldown
- * - Per-proposal sync: 30 second cooldown per proposal
+ * - Overview sync: default 30 second cooldown (env override supported)
+ * - Per-proposal sync: default 20 second cooldown per proposal (env override supported)
  */
 
 import { ProposalStatus } from "@prisma/client";
@@ -27,9 +27,32 @@ import type {
   KoiosProposalVotingSummary,
 } from "../types/koios.types";
 
+function getCooldownMs(
+  envKey: string,
+  defaultMs: number,
+  minMs = 15_000,
+  maxMs = 60_000
+): number {
+  const raw = process.env[envKey];
+  if (!raw) return defaultMs;
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isFinite(parsed) || parsed < minMs || parsed > maxMs) {
+    return defaultMs;
+  }
+  return parsed;
+}
+
 // Cooldown periods (in milliseconds)
-const OVERVIEW_SYNC_COOLDOWN_MS = 1_000; // 1 second
-const PROPOSAL_SYNC_COOLDOWN_MS = 1_000; // 1 second per proposal
+// Defaults are intentionally conservative to reduce duplicate sync fanout
+// during rapid UI refresh/navigation bursts while still keeping freshness.
+const OVERVIEW_SYNC_COOLDOWN_MS = getCooldownMs(
+  "OVERVIEW_SYNC_COOLDOWN_MS",
+  30_000
+);
+const PROPOSAL_SYNC_COOLDOWN_MS = getCooldownMs(
+  "PROPOSAL_SYNC_COOLDOWN_MS",
+  20_000
+);
 
 // Last sync timestamps
 let lastOverviewSyncTime = 0;

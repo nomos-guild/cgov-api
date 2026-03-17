@@ -119,7 +119,9 @@ export interface EnsureVoterResult {
  * Gets current epoch from Koios API
  */
 async function getCurrentEpoch(): Promise<number> {
-  const tip = await koiosGet<KoiosTip[]>("/tip");
+  const tip = await koiosGet<KoiosTip[]>("/tip", undefined, {
+    source: "ingestion.voter.current-epoch",
+  });
   return tip?.[0]?.epoch_no || 0;
 }
 
@@ -173,6 +175,8 @@ async function ensureDrepExists(
   if (koiosDrep === undefined) {
     const koiosDrepResponse = await koiosPost<KoiosDrepInfo[]>("/drep_info", {
       _drep_ids: [drepId],
+    }, {
+      source: "ingestion.voter.ensure-drep.drep-info",
     });
     koiosDrep = koiosDrepResponse?.[0];
     drepInfoCache.set(drepId, koiosDrep);
@@ -192,7 +196,8 @@ async function ensureDrepExists(
       {
         _epoch_no: currentEpoch,
         _drep_id: drepId,
-      }
+      },
+      { source: "ingestion.voter.ensure-drep.drep-voting-power" }
     );
     const votingPowerLovelace = votingPowerHistory?.[0]?.amount;
     // Store voting power in lovelace as BigInt (1 ADA = 1,000,000 lovelace)
@@ -222,7 +227,9 @@ async function ensureDrepExists(
           };
         } | null;
       }>
-    >("/drep_updates", { _drep_id: drepId });
+    >("/drep_updates", { _drep_id: drepId }, {
+      source: "ingestion.voter.ensure-drep.drep-updates",
+    });
 
     // Find the first record that has usable metadata in meta_json
     for (const update of drepUpdates || []) {
@@ -294,6 +301,8 @@ async function ensureSpoExists(
   if (koiosSpo === undefined) {
     const koiosSpoResponse = await koiosPost<KoiosSpo[]>("/pool_info", {
       _pool_bech32_ids: [poolId],
+    }, {
+      source: "ingestion.voter.ensure-spo.pool-info",
     });
     koiosSpo = koiosSpoResponse?.[0];
     spoInfoCache.set(poolId, koiosSpo);
@@ -310,7 +319,8 @@ async function ensureSpoExists(
       {
         _epoch_no: currentEpoch,
         _pool_bech32: poolId,
-      }
+      },
+      { source: "ingestion.voter.ensure-spo.pool-voting-power" }
     );
     const votingPowerLovelace = votingPowerHistory?.[0]?.amount;
     // Store voting power in lovelace as BigInt (1 ADA = 1,000,000 lovelace)
@@ -652,7 +662,9 @@ async function ensureCcExists(
   }
 
   // Fetch committee info from Koios
-  const committeeInfo = await koiosGet<KoiosCommitteeInfo[]>("/committee_info");
+  const committeeInfo = await koiosGet<KoiosCommitteeInfo[]>("/committee_info", undefined, {
+    source: "ingestion.voter.ensure-cc.committee-info",
+  });
 
   // Find this specific CC member by cc_hot_id
   const ccMember = committeeInfo?.[0]?.members?.find(
@@ -791,7 +803,8 @@ async function syncDrepVotingPower(
         {
           _epoch_no: epoch,
           _drep_id: drep.drepId,
-        }
+        },
+        { source: "ingestion.voter.sync-drep-voting-power" }
       );
 
       const votingPowerLovelace = votingPowerHistory?.[0]?.amount;
@@ -853,7 +866,8 @@ async function syncSpoVotingPower(
         {
           _epoch_no: epoch,
           _pool_bech32: spo.poolId,
-        }
+        },
+        { source: "ingestion.voter.sync-spo-voting-power" }
       );
 
       const votingPowerLovelace = votingPowerHistory?.[0]?.amount;
@@ -911,7 +925,9 @@ const MIN_ELIGIBLE_CC_MEMBERS = 7;
  */
 export async function getEligibleCCInfo(): Promise<EligibleCCInfo> {
   // Fetch committee info from Koios
-  const committeeInfo = await koiosGet<KoiosCommitteeInfo[]>("/committee_info");
+  const committeeInfo = await koiosGet<KoiosCommitteeInfo[]>("/committee_info", undefined, {
+    source: "ingestion.voter.eligible-cc.committee-info",
+  });
 
   if (!committeeInfo || committeeInfo.length === 0 || !committeeInfo[0].members) {
     return {
@@ -927,7 +943,9 @@ export async function getEligibleCCInfo(): Promise<EligibleCCInfo> {
   const members = info.members;
 
   // Get current epoch to check expiration
-  const tip = await koiosGet<KoiosTip[]>("/tip");
+  const tip = await koiosGet<KoiosTip[]>("/tip", undefined, {
+    source: "ingestion.voter.eligible-cc.current-epoch",
+  });
   const currentEpoch = tip?.[0]?.epoch_no ?? 0;
 
   // Calculate eligible members (authorized AND not expired)
@@ -969,7 +987,9 @@ export async function syncCommitteeState(
   const ccInfo = await getEligibleCCInfo();
 
   // Get current epoch
-  const tip = await koiosGet<KoiosTip[]>("/tip");
+  const tip = await koiosGet<KoiosTip[]>("/tip", undefined, {
+    source: "ingestion.voter.sync-committee-state.current-epoch",
+  });
   const currentEpoch = tip?.[0]?.epoch_no ?? 0;
 
   // Upsert to cache table

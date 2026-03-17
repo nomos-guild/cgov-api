@@ -103,7 +103,11 @@ export function chunkArray<T>(items: T[], chunkSize: number): T[][] {
  * Gets the current epoch number from Koios.
  */
 export async function getKoiosCurrentEpoch(): Promise<number> {
-  const tip = await withRetry(() => koiosGet<KoiosTip[]>("/tip"));
+  const tip = await withRetry(() =>
+    koiosGet<KoiosTip[]>("/tip", undefined, {
+      source: "ingestion.sync-utils.current-epoch",
+    })
+  );
   return tip?.[0]?.epoch_no ?? 0;
 }
 

@@ -165,12 +165,16 @@ async function sumPoolVotingPowerForEpoch(epochNo: number): Promise<bigint> {
             order: "pool_id_bech32.asc",
             limit: pageSize,
             offset,
+          }, {
+            source: "ingestion.epoch-totals.pool-voting-power.eq-ordered",
           }),
         () =>
           koiosGet("/pool_voting_power_history", {
             epoch_no: `eq.${epochNo}`,
             limit: pageSize,
             offset,
+          }, {
+            source: "ingestion.epoch-totals.pool-voting-power.eq",
           }),
         // Fallback to Koios function-style filtering.
         () =>
@@ -179,12 +183,16 @@ async function sumPoolVotingPowerForEpoch(epochNo: number): Promise<bigint> {
             order: "pool_id_bech32.asc",
             limit: pageSize,
             offset,
+          }, {
+            source: "ingestion.epoch-totals.pool-voting-power.func-ordered",
           }),
         () =>
           koiosGet("/pool_voting_power_history", {
             _epoch_no: epochNo,
             limit: pageSize,
             offset,
+          }, {
+            source: "ingestion.epoch-totals.pool-voting-power.func",
           }),
       ];
 
@@ -267,6 +275,8 @@ async function getDrepDelegatorAggregatesForEpoch(
       epoch_no: `eq.${epochNo}`,
       limit: pageSize,
       offset,
+    }, {
+      source: "ingestion.epoch-totals.special-drep-delegators",
     });
 
     if (page && page.length > 0) {
@@ -297,7 +307,8 @@ async function getDrepVotingPowerForEpoch(
     {
       _epoch_no: epochNo,
       _drep_id: drepId,
-    }
+    },
+    { source: "ingestion.epoch-totals.special-drep-voting-power" }
   );
   const lovelace = history?.[0]?.amount;
   return lovelace ? BigInt(lovelace) : BigInt(0);
@@ -358,8 +369,14 @@ export async function syncEpochTotals(
     endpoint: string
   ): Promise<T | null> {
     const attempts: Array<() => Promise<T[]>> = [
-      () => koiosGet<T[]>(endpoint, { _epoch_no: epochNo }),
-      () => koiosGet<T[]>(endpoint, { epoch_no: `eq.${epochNo}` }),
+      () =>
+        koiosGet<T[]>(endpoint, { _epoch_no: epochNo }, {
+          source: `ingestion.epoch-totals.fetch-row.${endpoint}.func`,
+        }),
+      () =>
+        koiosGet<T[]>(endpoint, { epoch_no: `eq.${epochNo}` }, {
+          source: `ingestion.epoch-totals.fetch-row.${endpoint}.eq`,
+        }),
     ];
 
     for (const attempt of attempts) {
