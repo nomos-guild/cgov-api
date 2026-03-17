@@ -39,6 +39,10 @@ export interface KoiosProposal {
     };
   } | null;
   block_time?: number;
+  proposal_description?: {
+    tag?: string;
+    contents?: unknown;
+  } | null;
   // Treasury withdrawal specific field (only for TreasuryWithdrawals proposals)
   // Single object with amount and stake_address
   withdrawal?: KoiosTreasuryWithdrawal | null;

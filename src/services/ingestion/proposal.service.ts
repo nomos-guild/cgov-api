@@ -160,6 +160,7 @@ export async function ingestProposalData(
 
     // 2. Map Koios governance type to Prisma enum
     const governanceActionType = mapGovernanceType(koiosProposal.proposal_type);
+    const withdrawalAmount = extractTreasuryWithdrawalAmount(koiosProposal);
 
     // If Koios sends a proposal_type we don't recognize, log it for debugging
     if (koiosProposal.proposal_type && !governanceActionType) {
@@ -246,6 +247,7 @@ export async function ingestProposalData(
         description,
         rationale,
         governanceActionType: governanceActionType ?? undefined,
+        withdrawalAmount,
         status,
         submissionEpoch: koiosProposal.proposed_epoch,
         ratifiedEpoch: koiosProposal.ratified_epoch,
@@ -260,6 +262,7 @@ export async function ingestProposalData(
       update: {
         // Only update mutable fields
         status,
+        withdrawalAmount,
         // Backfill governanceActionType when we have a valid mapping
         ...(governanceActionType !== null && {
           governanceActionType: governanceActionType,
@@ -1356,6 +1359,78 @@ async function fetchInactiveDrepVotingPowerForCompletedProposal(
 function lovelaceToBigInt(lovelace: string | null | undefined): bigint | null {
   if (!lovelace) return null;
   return BigInt(lovelace);
+}
+
+function parseLovelaceUnknown(value: unknown): bigint | null {
+  if (typeof value === "bigint") {
+    return value;
+  }
+  if (typeof value === "number") {
+    if (!Number.isFinite(value) || value < 0 || !Number.isInteger(value)) {
+      return null;
+    }
+    return BigInt(value);
+  }
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!/^\d+$/.test(trimmed)) {
+      return null;
+    }
+    return BigInt(trimmed);
+  }
+  return null;
+}
+
+function isKoiosTreasuryRecipient(value: unknown): boolean {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+  const candidate = value as { network?: unknown; credential?: unknown };
+  return (
+    typeof candidate.network === "string" &&
+    candidate.credential != null &&
+    typeof candidate.credential === "object"
+  );
+}
+
+function collectTreasuryWithdrawalAmounts(value: unknown, amounts: bigint[]): void {
+  if (!Array.isArray(value)) {
+    return;
+  }
+
+  // Koios TreasuryWithdrawals `proposal_description.contents` usually encodes
+  // recipient entries as `[recipient, amount]`.
+  if (value.length === 2 && isKoiosTreasuryRecipient(value[0])) {
+    const parsedAmount = parseLovelaceUnknown(value[1]);
+    if (parsedAmount !== null) {
+      amounts.push(parsedAmount);
+    }
+  }
+
+  for (const entry of value) {
+    collectTreasuryWithdrawalAmounts(entry, amounts);
+  }
+}
+
+function extractTreasuryWithdrawalAmount(proposal: KoiosProposal): bigint | null {
+  if (proposal.proposal_type !== "TreasuryWithdrawals") {
+    return null;
+  }
+
+  // Primary source: Koios `withdrawal` field.
+  const directAmount = parseLovelaceUnknown(proposal.withdrawal?.amount);
+  if (directAmount !== null) {
+    return directAmount;
+  }
+
+  // Fallback source: nested CBOR-decoded structure in proposal_description.
+  const nestedAmounts: bigint[] = [];
+  collectTreasuryWithdrawalAmounts(proposal.proposal_description?.contents, nestedAmounts);
+  if (nestedAmounts.length > 0) {
+    return nestedAmounts.reduce((sum, amount) => sum + amount, BigInt(0));
+  }
+
+  return null;
 }
 
 /**
