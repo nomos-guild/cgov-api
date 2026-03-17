@@ -414,6 +414,7 @@ export async function ingestProposal(
  * @returns Summary of sync operation for proposals that were actually processed.
  */
 export async function syncAllProposals(): Promise<SyncAllProposalsResult> {
+  const startedAtMs = Date.now();
   console.log("[Proposal Sync] Starting sync of all proposals...");
 
   // Clear vote cache to ensure fresh data
@@ -502,6 +503,15 @@ export async function syncAllProposals(): Promise<SyncAllProposalsResult> {
   const currentEpoch = await getCurrentEpoch();
   const inactivePowerRunCache = new Map<string, bigint>();
   const inactivePowerMetrics = createInactivePowerMetrics();
+  const voteRunTotals = {
+    processed: 0,
+    created: 0,
+    updated: 0,
+    metadataAttempts: 0,
+    metadataSuccess: 0,
+    metadataFailed: 0,
+    metadataSkipped: 0,
+  };
 
   // 6. Process each proposal sequentially
   for (const koiosProposal of sortedProposals) {
@@ -516,6 +526,13 @@ export async function syncAllProposals(): Promise<SyncAllProposalsResult> {
       });
 
       await finalizeProposalStatusAfterVoteSync(result, "[Proposal Sync]");
+      voteRunTotals.processed += result.stats.votesProcessed;
+      voteRunTotals.created += result.stats.votesIngested;
+      voteRunTotals.updated += result.stats.votesUpdated;
+      voteRunTotals.metadataAttempts += result.stats.metadata.attempts;
+      voteRunTotals.metadataSuccess += result.stats.metadata.success;
+      voteRunTotals.metadataFailed += result.stats.metadata.failed;
+      voteRunTotals.metadataSkipped += result.stats.metadata.skipped;
 
       results.success++;
       console.log(
@@ -537,6 +554,9 @@ export async function syncAllProposals(): Promise<SyncAllProposalsResult> {
 
   console.log(
     `[Proposal Sync] Completed: ${results.success} succeeded, ${results.failed} failed`
+  );
+  console.log(
+    `[Proposal Sync] Run summary durationMs=${Date.now() - startedAtMs} votesProcessed=${voteRunTotals.processed} votesCreated=${voteRunTotals.created} votesUpdated=${voteRunTotals.updated} metadataAttempts=${voteRunTotals.metadataAttempts} metadataSuccess=${voteRunTotals.metadataSuccess} metadataFailed=${voteRunTotals.metadataFailed} metadataSkipped=${voteRunTotals.metadataSkipped}`
   );
   logInactivePowerMetrics(inactivePowerMetrics);
 
