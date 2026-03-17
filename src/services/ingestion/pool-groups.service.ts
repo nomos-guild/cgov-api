@@ -49,6 +49,8 @@ async function fetchAllPoolGroups(): Promise<KoiosPoolGroup[]> {
     const page = await koiosGet<KoiosPoolGroup[]>("/pool_groups", {
       limit: pageSize,
       offset,
+    }, {
+      source: "ingestion.pool-groups.pool-groups",
     });
 
     if (page && page.length > 0) {

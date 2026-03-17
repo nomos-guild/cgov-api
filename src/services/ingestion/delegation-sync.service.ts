@@ -65,6 +65,8 @@ async function fetchDelegatorsForDrep(drepId: string): Promise<KoiosDrepDelegato
       _drep_id: drepId,
       limit: pageSize,
       offset,
+    }, {
+      source: "ingestion.delegation-sync.fetch-delegators",
     });
 
     if (page && page.length > 0) {
@@ -173,7 +175,8 @@ async function fetchAccountUpdateHistoryForStakes(
   while (hasMore) {
     const page = await koiosPost<KoiosAccountUpdateHistoryEntry[]>(
       `/account_update_history?offset=${offset}&limit=${pageSize}`,
-      { _stake_addresses: stakeAddresses }
+      { _stake_addresses: stakeAddresses },
+      { source: "ingestion.delegation-sync.account-update-history" }
     );
 
     if (Array.isArray(page) && page.length > 0) {
@@ -251,6 +254,8 @@ async function fetchTxInfoByHashes(txHashes: string[]): Promise<KoiosTxInfo[]> {
       _certs: true,
       _scripts: false,
       _bytecode: false,
+    }, {
+      source: "ingestion.delegation-sync.tx-info",
     });
     if (Array.isArray(page) && page.length > 0) {
       results.push(...page);

@@ -209,7 +209,9 @@ export async function ingestVotesForProposal(
             params.epoch_no = `gte.${minEpoch}`;
           }
 
-          const batch = await koiosGet<KoiosVote[]>("/vote_list", params);
+          const batch = await koiosGet<KoiosVote[]>("/vote_list", params, {
+            source: "ingestion.vote.ingest.bulk.vote-list",
+          });
 
           if (!batch || batch.length === 0) {
             hasMore = false;
@@ -270,7 +272,9 @@ export async function ingestVotesForProposal(
           params.epoch_no = `gte.${minEpoch}`;
         }
 
-        const batch = await koiosGet<KoiosVote[]>("/vote_list", params);
+        const batch = await koiosGet<KoiosVote[]>("/vote_list", params, {
+          source: "ingestion.vote.ingest.single.vote-list",
+        });
 
         if (!batch || batch.length === 0) {
           hasMore = false;

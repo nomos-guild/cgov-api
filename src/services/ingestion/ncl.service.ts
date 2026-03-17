@@ -24,7 +24,9 @@ export interface NCLUpdateResult {
  * Gets the current epoch from Koios API
  */
 async function getCurrentEpoch(): Promise<number> {
-  const tip = await koiosGet<Array<{ epoch_no: number }>>("/tip");
+  const tip = await koiosGet<Array<{ epoch_no: number }>>("/tip", undefined, {
+    source: "ingestion.ncl.current-epoch",
+  });
   return tip?.[0]?.epoch_no || 0;
 }
 
@@ -98,7 +100,9 @@ async function calculateTreasuryWithdrawalsForYear(year: number): Promise<{
   proposalCount: number;
 }> {
   // Fetch all treasury withdrawal proposals from Koios
-  const allProposals = await koiosGet<KoiosProposal[]>("/proposal_list");
+  const allProposals = await koiosGet<KoiosProposal[]>("/proposal_list", undefined, {
+    source: "ingestion.ncl.proposal-list",
+  });
 
   if (!allProposals || allProposals.length === 0) {
     return { totalLovelace: BigInt(0), proposalCount: 0 };
