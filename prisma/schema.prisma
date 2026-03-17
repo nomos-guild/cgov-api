@@ -310,6 +310,7 @@ model Proposal {
   description                 String?
   rationale                   String?
   governanceActionType        GovernanceType? @map("governance_action_type")
+  withdrawalAmount            BigInt?         @map("withdrawal_amount")
   status                      ProposalStatus  @default(ACTIVE)
   submissionEpoch             Int?            @map("submission_epoch")
   ratifiedEpoch               Int?            @map("ratified_epoch")

@@ -68,6 +68,7 @@ export interface GovernanceAction {
   hash: string; // txHash:certIndex format
   title: string;
   type: string;
+  withdrawalAmount?: string | null; // Treasury withdrawal amount in lovelace
   status: "Active" | "Ratified" | "Enacted" | "Expired" | "Dropped" | "Closed";
   constitutionality: string;
   drep: GovernanceActionVoteInfo;
