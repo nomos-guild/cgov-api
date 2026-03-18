@@ -1,5 +1,10 @@
 import axios, { AxiosInstance } from "axios";
-import { withRetry, type RetryAttemptContext, type RetryOptions } from "./ingestion/utils";
+import type { KoiosProposal } from "../types/koios.types";
+import {
+  withRetry,
+  type RetryAttemptContext,
+  type RetryOptions,
+} from "./ingestion/utils";
 
 const BASE_URL = process.env.KOIOS_BASE_URL || "https://api.koios.rest/api/v1";
 
@@ -11,23 +16,39 @@ const KOIOS_RETRY_OPTIONS: RetryOptions = {
   maxRetries: 5,
   baseDelay: 3000, // 3 seconds
   maxDelay: 30000, // 30 seconds
+  non429JitterMaxMs: getBoundedIntEnv(
+    "KOIOS_NON_429_RETRY_JITTER_MAX_MS",
+    250,
+    0,
+    5000
+  ),
 };
 const KOIOS_STRICT_TX_METADATA_RETRY_OPTIONS: RetryOptions = {
   maxRetries: 3,
   baseDelay: 3000,
   maxDelay: 30000,
+  non429JitterMaxMs: getBoundedIntEnv(
+    "KOIOS_NON_429_RETRY_JITTER_MAX_MS",
+    250,
+    0,
+    5000
+  ),
 };
 
-const DEFAULT_KOIOS_MAX_CONCURRENT_REQUESTS = 6;
+const DEFAULT_KOIOS_MAX_CONCURRENT_REQUESTS = 3;
 const DEFAULT_ENDPOINT_MAX_CONCURRENT = 2;
 const DEFAULT_KOIOS_LIMITER_SLOW_MS = 15000;
 const KOIOS_BURST_WINDOW_MS = 10_000;
 const KOIOS_BURST_MAX_REQUESTS = 90;
 const KOIOS_429_COOLDOWN_MS = 60_000;
+const DEFAULT_KOIOS_PRESSURE_WINDOW_MS = 30_000;
+const DEFAULT_KOIOS_PRESSURE_THRESHOLD = 5;
+const DEFAULT_KOIOS_PRESSURE_COOLDOWN_MS = 60_000;
 const KOIOS_PUBLIC_MAX_BODY_BYTES = 1024;
 const KOIOS_REGISTERED_MAX_BODY_BYTES = 5 * 1024;
 const KOIOS_DEFAULT_TIMEOUT_MS = 30000;
 const KOIOS_TX_METADATA_TIMEOUT_MS = 20000;
+const DEFAULT_PROPOSAL_LIST_INTERACTIVE_CACHE_TTL_MS = 5000;
 
 type KoiosRetryProfileName = "default" | "tx_metadata_strict";
 interface KoiosRetryProfile {
@@ -39,6 +60,14 @@ interface KoiosRetryProfile {
 export interface KoiosRequestContext {
   source?: string;
 }
+
+interface InteractiveProposalListCacheEntry {
+  value: KoiosProposal[];
+  expiresAtMs: number;
+}
+
+let interactiveProposalListCache: InteractiveProposalListCacheEntry | null = null;
+let interactiveProposalListInFlight: Promise<KoiosProposal[]> | null = null;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -65,6 +94,15 @@ function getBooleanEnv(envKey: string, defaultValue = false): boolean {
   if (!rawValue) return defaultValue;
   const normalized = rawValue.trim().toLowerCase();
   return normalized === "1" || normalized === "true" || normalized === "yes";
+}
+
+function getInteractiveProposalListCacheTtlMs(): number {
+  return getBoundedIntEnv(
+    "KOIOS_PROPOSAL_LIST_INTERACTIVE_CACHE_TTL_MS",
+    DEFAULT_PROPOSAL_LIST_INTERACTIVE_CACHE_TTL_MS,
+    250,
+    30000
+  );
 }
 
 interface AcquireMetrics {
@@ -205,6 +243,21 @@ const globalKoiosBurstLimiter = new BurstLimiter(
 );
 
 const KOIOS_ENDPOINT_LIMITS = new Map<string, number>([
+  ["/vote_list", getBoundedIntEnv("KOIOS_MAX_CONCURRENT_VOTE_LIST", 1, 1, 20)],
+  [
+    "/proposal_voting_summary",
+    getBoundedIntEnv("KOIOS_MAX_CONCURRENT_PROPOSAL_VOTING_SUMMARY", 1, 1, 20),
+  ],
+  [
+    "/proposal_list",
+    getBoundedIntEnv("KOIOS_MAX_CONCURRENT_PROPOSAL_LIST", 1, 1, 20),
+  ],
+  ["/tip", getBoundedIntEnv("KOIOS_MAX_CONCURRENT_TIP", 1, 1, 20)],
+  ["/epoch_info", getBoundedIntEnv("KOIOS_MAX_CONCURRENT_EPOCH_INFO", 1, 1, 20)],
+  [
+    "/drep_epoch_summary",
+    getBoundedIntEnv("KOIOS_MAX_CONCURRENT_DREP_EPOCH_SUMMARY", 1, 1, 20),
+  ],
   [
     "/tx_metadata",
     getBoundedIntEnv("KOIOS_MAX_CONCURRENT_TX_METADATA", 1, 1, 10),
@@ -213,7 +266,7 @@ const KOIOS_ENDPOINT_LIMITS = new Map<string, number>([
     "/drep_voting_power_history",
     getBoundedIntEnv(
       "KOIOS_MAX_CONCURRENT_DREP_VOTING_POWER_HISTORY",
-      DEFAULT_ENDPOINT_MAX_CONCURRENT,
+      1,
       1,
       20
     ),
@@ -249,7 +302,7 @@ const KOIOS_ENDPOINT_LIMITS = new Map<string, number>([
     "/drep_delegators",
     getBoundedIntEnv(
       "KOIOS_MAX_CONCURRENT_DREP_DELEGATORS",
-      DEFAULT_ENDPOINT_MAX_CONCURRENT,
+      1,
       1,
       20
     ),
@@ -335,12 +388,102 @@ const koiosLimiterSlowThresholdMs = getBoundedIntEnv(
   1000,
   300000
 );
+const koiosPressureSheddingEnabled = getBooleanEnv(
+  "KOIOS_PRESSURE_SHEDDING_ENABLED",
+  true
+);
+const koiosPressureWindowMs = getBoundedIntEnv(
+  "KOIOS_PRESSURE_WINDOW_MS",
+  DEFAULT_KOIOS_PRESSURE_WINDOW_MS,
+  5000,
+  300000
+);
+const koiosPressureThreshold = getBoundedIntEnv(
+  "KOIOS_PRESSURE_THRESHOLD",
+  DEFAULT_KOIOS_PRESSURE_THRESHOLD,
+  1,
+  100
+);
+const koiosPressureCooldownMs = getBoundedIntEnv(
+  "KOIOS_PRESSURE_COOLDOWN_MS",
+  DEFAULT_KOIOS_PRESSURE_COOLDOWN_MS,
+  5000,
+  600000
+);
 let koiosRequestCounter = 0;
 let koiosBackoffUntil = 0;
+let koiosPressureCooldownUntil = 0;
+const koiosPressureEvents: number[] = [];
 
 function nextKoiosRequestId(): number {
   koiosRequestCounter += 1;
   return koiosRequestCounter;
+}
+
+function isKoiosPressureError(error: any): boolean {
+  const status = error?.response?.status as number | undefined;
+  if (status === 503) return true;
+
+  const message = String(error?.message ?? "").toLowerCase();
+  const code = String(error?.code ?? "").toUpperCase();
+
+  if (message.includes("socket hang up")) return true;
+  if (code === "ECONNRESET" || code === "ETIMEDOUT" || code === "EPIPE") {
+    return true;
+  }
+
+  return false;
+}
+
+function trimKoiosPressureEvents(now: number): void {
+  while (
+    koiosPressureEvents.length > 0 &&
+    now - koiosPressureEvents[0] > koiosPressureWindowMs
+  ) {
+    koiosPressureEvents.shift();
+  }
+}
+
+function recordKoiosPressureSignal(error: any): void {
+  if (!koiosPressureSheddingEnabled || !isKoiosPressureError(error)) {
+    return;
+  }
+
+  const now = Date.now();
+  trimKoiosPressureEvents(now);
+  koiosPressureEvents.push(now);
+
+  if (koiosPressureEvents.length < koiosPressureThreshold) {
+    return;
+  }
+
+  koiosPressureCooldownUntil = Math.max(
+    koiosPressureCooldownUntil,
+    now + koiosPressureCooldownMs
+  );
+  console.warn(
+    `[Koios Pressure] action=degraded reason=error-burst windowMs=${koiosPressureWindowMs} threshold=${koiosPressureThreshold} cooldownMs=${koiosPressureCooldownMs} observed=${koiosPressureEvents.length}`
+  );
+}
+
+export function getKoiosPressureState(): {
+  active: boolean;
+  remainingMs: number;
+  observedErrors: number;
+  threshold: number;
+  windowMs: number;
+} {
+  const now = Date.now();
+  trimKoiosPressureEvents(now);
+  const remainingMs = Math.max(0, koiosPressureCooldownUntil - now);
+
+  return {
+    active: koiosPressureSheddingEnabled && remainingMs > 0,
+    remainingMs,
+    observedErrors: koiosPressureEvents.length,
+    threshold: koiosPressureThreshold,
+    windowMs: koiosPressureWindowMs,
+  };
 }
 
 function logKoiosLimiterEvent(args: {
@@ -544,6 +687,7 @@ export const getKoiosService = (): AxiosInstance => {
           Date.now() + KOIOS_429_COOLDOWN_MS
         );
       }
+      recordKoiosPressureSignal(error);
       console.error("Koios API Error:", {
         source: error.config?.__koiosSource,
         status: error.response?.status,
@@ -599,6 +743,59 @@ export async function koiosGet<T>(
     );
     throw error;
   }
+}
+
+export async function getKoiosProposalList(options?: {
+  context?: KoiosRequestContext;
+  interactiveCache?: boolean;
+  forceRefresh?: boolean;
+}): Promise<KoiosProposal[]> {
+  const context = options?.context;
+  const source = context?.source ?? "unknown";
+  const useInteractiveCache = options?.interactiveCache === true;
+  const forceRefresh = options?.forceRefresh === true;
+
+  if (!useInteractiveCache) {
+    return koiosGet<KoiosProposal[]>("/proposal_list", undefined, context);
+  }
+
+  const now = Date.now();
+  const cached = interactiveProposalListCache;
+  if (!forceRefresh && cached && cached.expiresAtMs > now) {
+    console.log(
+      `[Koios Proposal List] action=cache-hit source=${source} ttlRemainingMs=${cached.expiresAtMs - now} proposals=${cached.value.length}`
+    );
+    return cached.value;
+  }
+
+  if (!forceRefresh && interactiveProposalListInFlight) {
+    console.log(
+      `[Koios Proposal List] action=single-flight-join source=${source}`
+    );
+    return interactiveProposalListInFlight;
+  }
+
+  const ttlMs = getInteractiveProposalListCacheTtlMs();
+  let request: Promise<KoiosProposal[]>;
+  request = koiosGet<KoiosProposal[]>("/proposal_list", undefined, context)
+    .then((proposals) => {
+      interactiveProposalListCache = {
+        value: proposals,
+        expiresAtMs: Date.now() + ttlMs,
+      };
+      console.log(
+        `[Koios Proposal List] action=cache-fill source=${source} ttlMs=${ttlMs} proposals=${proposals.length}`
+      );
+      return proposals;
+    })
+    .finally(() => {
+      if (interactiveProposalListInFlight === request) {
+        interactiveProposalListInFlight = null;
+      }
+    });
+
+  interactiveProposalListInFlight = request;
+  return request;
 }
 
 /**

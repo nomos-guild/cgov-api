@@ -4,6 +4,7 @@ import { prisma } from "./prisma";
 import { getBlockfrostService } from "./blockfrost";
 import { koiosGet, koiosPost } from "./koios";
 import { processInParallel } from "./ingestion/parallel";
+import { getKoiosCurrentEpoch } from "./ingestion/sync-utils";
 import type {
   ResponderRole,
   SurveyLinkedActionId,
@@ -179,10 +180,7 @@ export async function applyProvisionalWeights(
   });
 }
 
-export async function getCurrentEpoch(): Promise<number> {
-  const tip = await koiosGet<Array<{ epoch_no?: number | null }>>("/tip");
-  return tip?.[0]?.epoch_no ?? 0;
-}
+export const getCurrentEpoch = getKoiosCurrentEpoch;
 
 export function collectPendingFinalizationWarnings(
   votes: SurveyTallyVote[]
@@ -211,6 +209,8 @@ async function fetchTxInfoByHashes(
 
   const rows = await koiosPost<KoiosTxInfoRow[]>("/tx_info", {
     _tx_hashes: uniqueHashes,
+  }, {
+    source: "proposal-survey-tally.tx-info",
   });
 
   return new Map((rows ?? []).map((row) => [row.tx_hash, row]));
@@ -416,6 +416,9 @@ async function loadDrepWeights(
         {
           _epoch_no: epochNo,
           _drep_id: drepId,
+        },
+        {
+          source: "proposal-survey-tally.drep-weight.drep-voting-power",
         }
       );
       const amount = rows?.[0]?.amount;
@@ -489,6 +492,9 @@ async function loadSpoWeights(
           {
             _epoch_no: epochNo,
             _pool_bech32: poolId,
+          },
+          {
+            source: "proposal-survey-tally.spo-weight.pool-voting-power",
           }
         );
         const amount = rows?.[0]?.amount;
@@ -505,6 +511,8 @@ async function loadSpoWeights(
 
       const rows = await koiosPost<Array<Record<string, unknown>>>("/pool_info", {
         _pool_bech32_ids: [poolId],
+      }, {
+        source: "proposal-survey-tally.spo-weight.pool-info",
       });
       const row = rows?.[0];
       const rawLivePledge = row?.live_pledge ?? row?.livePledge ?? row?.pledge;

@@ -8,6 +8,7 @@ import { GovernanceType, ProposalStatus } from "@prisma/client";
 import { prisma } from "../prisma";
 import { koiosGet } from "../koios";
 import type { KoiosProposal } from "../../types/koios.types";
+import { getKoiosCurrentEpoch } from "./sync-utils";
 
 /**
  * Result of NCL update operation
@@ -18,16 +19,6 @@ export interface NCLUpdateResult {
   currentValue: bigint; // In lovelace
   proposalsIncluded: number;
   updated: boolean;
-}
-
-/**
- * Gets the current epoch from Koios API
- */
-async function getCurrentEpoch(): Promise<number> {
-  const tip = await koiosGet<Array<{ epoch_no: number }>>("/tip", undefined, {
-    source: "ingestion.ncl.current-epoch",
-  });
-  return tip?.[0]?.epoch_no || 0;
 }
 
 /**
@@ -258,7 +249,7 @@ async function updateNCLForYear(year: number, currentEpoch: number): Promise<NCL
  * @returns Results of the update operations for each year
  */
 export async function updateNCL(): Promise<NCLUpdateResult> {
-  const currentEpoch = await getCurrentEpoch();
+  const currentEpoch = await getKoiosCurrentEpoch();
   const currentYear = new Date().getUTCFullYear();
   const results: NCLUpdateResult[] = [];
 

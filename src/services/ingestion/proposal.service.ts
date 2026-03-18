@@ -13,17 +13,25 @@ import { koiosGet } from "../koios";
 import { fetchTxMetadataByHash } from "../txMetadata.service";
 import { getDrepInfoBatch } from "../drep-lookup";
 import {
+  createVoteIngestionRunCache,
+  type VoteIngestionRunCache,
   ingestVotesForProposal,
   VoteIngestionStats,
   clearVoteCache,
 } from "./vote.service";
 import { withRetry } from "./utils";
+import { withPrismaConnectivityRetry } from "./prismaRetry";
+import {
+  clearVoterKoiosCaches,
+  fetchJsonWithBrowserLikeClient,
+} from "./voter.service";
 import {
   extractSurveyDetails,
   GOVERNANCE_SURVEY_LINK_KIND,
   parseGovernanceSurveyLink,
   type SurveyDetails,
 } from "../../libs/surveyMetadata";
+import { getKoiosCurrentEpoch } from "./sync-utils";
 import type {
   KoiosProposal,
   KoiosProposalVotingSummary,
@@ -35,6 +43,17 @@ import type {
  */
 export interface ProposalIngestionResult {
   success: boolean;
+  downstream: {
+    votes: {
+      success: boolean;
+      error?: string;
+    };
+    votingPower: {
+      success: boolean;
+      error?: string;
+      summaryFound: boolean;
+    };
+  };
   proposal: {
     id: number;
     proposalId: string;
@@ -63,6 +82,13 @@ export async function finalizeProposalStatusAfterVoteSync(
   result: ProposalIngestionResult,
   logPrefix = "[Proposal Sync]"
 ): Promise<ProposalIngestionResult> {
+  if (!result.success) {
+    console.warn(
+      `${logPrefix} action=skip-finalize reason=partial-failure proposalId=${result.proposal.proposalId} votesSuccess=${result.downstream.votes.success} votingPowerSuccess=${result.downstream.votingPower.success}`
+    );
+    return result;
+  }
+
   if (!result.intendedStatus || result.intendedStatus === result.proposal.status) {
     return result;
   }
@@ -91,6 +117,7 @@ export async function finalizeProposalStatusAfterVoteSync(
 export interface SyncAllProposalsResult {
   total: number;
   success: number;
+  partial: number;
   failed: number;
   errors: Array<{ proposalHash: string; error: string }>;
 }
@@ -103,12 +130,14 @@ export interface IngestProposalOptions {
   currentEpoch?: number;
   /** Optional minimum epoch to fetch votes from */
   minVotesEpoch?: number;
+  /** Optional per-run vote cache for bulk syncs */
+  voteRunCache?: VoteIngestionRunCache;
   /** Optional per-run cache for inactive DRep power (scoped to syncAllProposals run) */
   inactivePowerRunCache?: Map<string, bigint>;
   /** Optional metrics collector for inactive DRep power cache behavior */
   inactivePowerMetrics?: InactivePowerMetrics;
   /**
-   * When true (default), vote fetching uses a global in-memory cache.
+   * When true (default), vote fetching can reuse a per-run bulk cache.
    * When false, fetches only this proposal's votes directly from Koios
    * (ideal for sync-on-read).
    */
@@ -144,19 +173,22 @@ export async function ingestProposalData(
   const {
     currentEpoch: currentEpochOverride,
     minVotesEpoch: minVotesEpochOverride,
+    voteRunCache,
     inactivePowerRunCache,
     inactivePowerMetrics,
     useCache,
     deferExpiredStatus,
   } = options ?? {};
-  // Wrap entire operation in retry logic
-  return withRetry(async () => {
+  // Only retry proposal ingestion for retryable Prisma connectivity failures.
+  // Koios calls already retry inside `koios.ts`, and replaying the full pipeline
+  // on every transient downstream error is too expensive.
+  return withPrismaConnectivityRetry(async () => {
     // 1. Get current epoch for status calculation
     //    Allow caller to provide it so we don't call Koios /tip for every proposal
     const currentEpoch =
       typeof currentEpochOverride === "number"
         ? currentEpochOverride
-        : await getCurrentEpoch();
+        : await getKoiosCurrentEpoch();
 
     // 2. Map Koios governance type to Prisma enum
     const governanceActionType = mapGovernanceType(koiosProposal.proposal_type);
@@ -294,9 +326,16 @@ export async function ingestProposalData(
     // - Individual vote/voter inserts can commit as they go.
     // - If we hit a timeout or other error part-way through, a retry will
     //   see existing rows and continue without duplicating work.
-    const voteStats = await ingestVotesForProposal(proposal.proposalId, prisma, minVotesEpochOverride, {
-      useCache: useCache !== false,
-    });
+    const voteResult = await ingestVotesForProposal(
+      proposal.proposalId,
+      prisma,
+      minVotesEpochOverride,
+      {
+        useCache: useCache !== false,
+        runCache: voteRunCache,
+      }
+    );
+    const voteStats = voteResult.stats;
 
     // 8. Fetch and update voting power summary data from Koios
     // This populates the DRep/SPO voting power fields for accurate percentage calculations
@@ -341,7 +380,7 @@ export async function ingestProposalData(
     const inactivePowerEpoch = isCompleted
       ? koiosProposal.expiration!
       : currentEpoch;
-    await updateProposalVotingPower(
+    const votingPowerResult = await updateProposalVotingPower(
       proposal.proposalId,
       drepTotalPowerEpoch,
       spoTotalPowerEpoch,
@@ -351,8 +390,15 @@ export async function ingestProposalData(
       inactivePowerMetrics
     );
 
-    return {
-      success: true,
+    const result: ProposalIngestionResult = {
+      success: voteResult.success && votingPowerResult.success,
+      downstream: {
+        votes: {
+          success: voteResult.success,
+          error: voteResult.error,
+        },
+        votingPower: votingPowerResult,
+      },
       proposal: {
         id: proposal.id,
         proposalId: proposal.proposalId,
@@ -361,6 +407,16 @@ export async function ingestProposalData(
       stats: voteStats,
       intendedStatus,
     };
+
+    if (!result.success) {
+      console.warn(
+        `[Proposal Ingest] action=partial-failure proposalId=${proposal.proposalId} votesSuccess=${voteResult.success} votingPowerSuccess=${votingPowerResult.success} voteError=${voteResult.error ?? "none"} votingPowerError=${votingPowerResult.error ?? "none"}`
+      );
+    }
+
+    return result;
+  }, {
+    operationName: `proposal-ingest:${koiosProposal.proposal_id}`,
   });
 }
 
@@ -419,165 +475,202 @@ export async function syncAllProposals(): Promise<SyncAllProposalsResult> {
   const startedAtMs = Date.now();
   console.log("[Proposal Sync] Starting sync of all proposals...");
 
-  // Clear vote cache to ensure fresh data
+  // Reset long-lived process-local caches so each bulk run starts clean.
   clearVoteCache();
+  clearVoterKoiosCaches();
+  const voteRunCache = createVoteIngestionRunCache();
 
-  // 1. Snapshot existing proposals from DB (IDs + status)
-  const existingProposals = await prisma.proposal.findMany({
-    select: { proposalId: true, status: true },
-  });
+  try {
+    // 1. Snapshot existing proposals from DB (IDs + status)
+    const existingProposals = await prisma.proposal.findMany({
+      select: { proposalId: true, status: true },
+    });
 
-  const existingIds = new Set(existingProposals.map((p) => p.proposalId));
-  const activeIdsInDb = new Set(
-    existingProposals
-      .filter((p) => p.status === ProposalStatus.ACTIVE)
-      .map((p) => p.proposalId)
-  );
+    const existingIds = new Set(existingProposals.map((p) => p.proposalId));
+    const activeIdsInDb = new Set(
+      existingProposals
+        .filter((p) => p.status === ProposalStatus.ACTIVE)
+        .map((p) => p.proposalId)
+    );
 
-  // 2. Fetch all proposals from Koios (API does not support server-side filtering)
-  const allProposals = await koiosGet<KoiosProposal[]>("/proposal_list", undefined, {
-    source: "ingestion.proposal.sync.all",
-  });
+    // 2. Fetch all proposals from Koios (API does not support server-side filtering)
+    const allProposals = await koiosGet<KoiosProposal[]>("/proposal_list", undefined, {
+      source: "ingestion.proposal.sync.all",
+    });
 
-  if (!allProposals || allProposals.length === 0) {
-    console.log("[Proposal Sync] No proposals found in Koios");
-    return {
-      total: 0,
+    if (!allProposals || allProposals.length === 0) {
+      console.log("[Proposal Sync] No proposals found in Koios");
+      return {
+        total: 0,
+        success: 0,
+        partial: 0,
+        failed: 0,
+        errors: [],
+      };
+    }
+
+    // 3. Decide which proposals to (re)ingest:
+    //    - Any proposal missing from DB
+    //    - Any proposal that is ACTIVE in the DB (so its status/votes stay fresh)
+    const proposalsToProcess = allProposals.filter((p) => {
+      const proposalId = p.proposal_id;
+      if (!existingIds.has(proposalId)) {
+        return true; // New proposal
+      }
+      if (activeIdsInDb.has(proposalId)) {
+        return true; // Still active in DB, keep it updated
+      }
+      return false; // Historical proposal that can remain as-is
+    });
+    // Guard against duplicate proposal_id rows returned by Koios in the same payload.
+    // Keep the latest occurrence so we don't re-ingest the same proposal multiple times per run.
+    const proposalsById = new Map<string, KoiosProposal>();
+    for (const proposal of proposalsToProcess) {
+      proposalsById.set(proposal.proposal_id, proposal);
+    }
+    const dedupedProposalsToProcess = [...proposalsById.values()];
+    const duplicateCount = proposalsToProcess.length - dedupedProposalsToProcess.length;
+    if (duplicateCount > 0) {
+      console.warn(
+        `[Proposal Sync] Deduplicated ${duplicateCount} duplicate proposal rows from Koios payload`
+      );
+    }
+
+    const results: SyncAllProposalsResult = {
+      total: dedupedProposalsToProcess.length,
       success: 0,
+      partial: 0,
       failed: 0,
       errors: [],
     };
-  }
 
-  // 3. Decide which proposals to (re)ingest:
-  //    - Any proposal missing from DB
-  //    - Any proposal that is ACTIVE in the DB (so its status/votes stay fresh)
-  const proposalsToProcess = allProposals.filter((p) => {
-    const proposalId = p.proposal_id;
-    if (!existingIds.has(proposalId)) {
-      return true; // New proposal
-    }
-    if (activeIdsInDb.has(proposalId)) {
-      return true; // Still active in DB, keep it updated
-    }
-    return false; // Historical proposal that can remain as-is
-  });
-  // Guard against duplicate proposal_id rows returned by Koios in the same payload.
-  // Keep the latest occurrence so we don't re-ingest the same proposal multiple times per run.
-  const proposalsById = new Map<string, KoiosProposal>();
-  for (const proposal of proposalsToProcess) {
-    proposalsById.set(proposal.proposal_id, proposal);
-  }
-  const dedupedProposalsToProcess = [...proposalsById.values()];
-  const duplicateCount = proposalsToProcess.length - dedupedProposalsToProcess.length;
-  if (duplicateCount > 0) {
-    console.warn(
-      `[Proposal Sync] Deduplicated ${duplicateCount} duplicate proposal rows from Koios payload`
-    );
-  }
-
-  const results: SyncAllProposalsResult = {
-    // "total" now reflects how many proposals we are actually processing this run
-    total: dedupedProposalsToProcess.length,
-    success: 0,
-    failed: 0,
-    errors: [],
-  };
-
-  if (results.total === 0) {
-    console.log(
-      "[Proposal Sync] No new or active proposals to sync - database is up to date for historical proposals"
-    );
-    return results;
-  }
-
-  console.log(
-    `[Proposal Sync] Found ${results.total} proposals to sync (new or currently ACTIVE in DB)`
-  );
-
-  // 4. Sort proposals by submission epoch (oldest first) for consistent DB ordering
-  const sortedProposals = dedupedProposalsToProcess.sort((a, b) => {
-    const epochA = a.proposed_epoch || 0;
-    const epochB = b.proposed_epoch || 0;
-    return epochA - epochB;
-  });
-
-  console.log(
-    `[Proposal Sync] Processing proposals from epoch ${sortedProposals[0]?.proposed_epoch
-    } to ${sortedProposals[sortedProposals.length - 1]?.proposed_epoch}`
-  );
-
-  // Determine the earliest proposal submission epoch among the proposals
-  // we are actually processing. Votes for these proposals cannot exist
-  // before this epoch, so we can safely avoid fetching older votes.
-  const earliestProposalEpoch = sortedProposals[0]?.proposed_epoch;
-  const minVotesEpoch =
-    typeof earliestProposalEpoch === "number"
-      ? earliestProposalEpoch
-      : undefined;
-
-  // 5. Get current epoch once for the whole run and reuse it
-  const currentEpoch = await getCurrentEpoch();
-  const inactivePowerRunCache = new Map<string, bigint>();
-  const inactivePowerMetrics = createInactivePowerMetrics();
-  const voteRunTotals = {
-    processed: 0,
-    created: 0,
-    updated: 0,
-    metadataAttempts: 0,
-    metadataSuccess: 0,
-    metadataFailed: 0,
-    metadataSkipped: 0,
-  };
-
-  // 6. Process each proposal sequentially
-  for (const koiosProposal of sortedProposals) {
-    try {
-      const result = await ingestProposalData(koiosProposal, {
-        currentEpoch,
-        minVotesEpoch,
-        inactivePowerRunCache,
-        inactivePowerMetrics,
-        useCache: true, // Use cache for bulk sync
-        deferExpiredStatus: true, // Apply terminal status only after successful vote sync
-      });
-
-      await finalizeProposalStatusAfterVoteSync(result, "[Proposal Sync]");
-      voteRunTotals.processed += result.stats.votesProcessed;
-      voteRunTotals.created += result.stats.votesIngested;
-      voteRunTotals.updated += result.stats.votesUpdated;
-      voteRunTotals.metadataAttempts += result.stats.metadata.attempts;
-      voteRunTotals.metadataSuccess += result.stats.metadata.success;
-      voteRunTotals.metadataFailed += result.stats.metadata.failed;
-      voteRunTotals.metadataSkipped += result.stats.metadata.skipped;
-
-      results.success++;
+    if (results.total === 0) {
       console.log(
-        `[Proposal Sync] ✓ Synced ${koiosProposal.proposal_tx_hash} (${results.success}/${results.total})`
+        "[Proposal Sync] No new or active proposals to sync - database is up to date for historical proposals"
       );
-    } catch (error: any) {
-      results.failed++;
-      results.errors.push({
-        proposalHash: koiosProposal.proposal_tx_hash,
-        error: error.message,
-      });
-      console.error(
-        `[Proposal Sync] ✗ Failed to sync ${koiosProposal.proposal_tx_hash}:`,
-        error.message
-      );
-      // Continue to next proposal despite failure
+      return results;
     }
+
+    console.log(
+      `[Proposal Sync] Found ${results.total} proposals to sync (new or currently ACTIVE in DB)`
+    );
+
+    // 4. Sort proposals by submission epoch (oldest first) for consistent DB ordering
+    const sortedProposals = dedupedProposalsToProcess.sort((a, b) => {
+      const epochA = a.proposed_epoch || 0;
+      const epochB = b.proposed_epoch || 0;
+      return epochA - epochB;
+    });
+
+    console.log(
+      `[Proposal Sync] Processing proposals from epoch ${sortedProposals[0]?.proposed_epoch
+      } to ${sortedProposals[sortedProposals.length - 1]?.proposed_epoch}`
+    );
+
+    const earliestProposalEpoch = sortedProposals[0]?.proposed_epoch;
+    const minVotesEpoch =
+      typeof earliestProposalEpoch === "number"
+        ? earliestProposalEpoch
+        : undefined;
+
+    // 5. Get current epoch once for the whole run and reuse it
+    const currentEpoch = await getCurrentEpoch();
+    const inactivePowerRunCache = new Map<string, bigint>();
+    const inactivePowerMetrics = createInactivePowerMetrics();
+    const voteRunTotals = {
+      processed: 0,
+      created: 0,
+      updated: 0,
+      metadataAttempts: 0,
+      metadataSuccess: 0,
+      metadataFailed: 0,
+      metadataSkipped: 0,
+    };
+
+    // 6. Process each proposal sequentially
+    for (const koiosProposal of sortedProposals) {
+      try {
+        const result = await ingestProposalData(koiosProposal, {
+          currentEpoch,
+          minVotesEpoch,
+          voteRunCache,
+          inactivePowerRunCache,
+          inactivePowerMetrics,
+          useCache: true,
+          deferExpiredStatus: true,
+        });
+
+        voteRunTotals.processed += result.stats.votesProcessed;
+        voteRunTotals.created += result.stats.votesIngested;
+        voteRunTotals.updated += result.stats.votesUpdated;
+        voteRunTotals.metadataAttempts += result.stats.metadata.attempts;
+        voteRunTotals.metadataSuccess += result.stats.metadata.success;
+        voteRunTotals.metadataFailed += result.stats.metadata.failed;
+        voteRunTotals.metadataSkipped += result.stats.metadata.skipped;
+
+        if (!result.success) {
+          results.partial++;
+          results.errors.push({
+            proposalHash: koiosProposal.proposal_tx_hash,
+            error: getProposalIngestionFailureMessage(result),
+          });
+          console.warn(
+            `[Proposal Sync] action=partial-failure proposalId=${result.proposal.proposalId} proposalHash=${koiosProposal.proposal_tx_hash} votesSuccess=${result.downstream.votes.success} votingPowerSuccess=${result.downstream.votingPower.success}`
+          );
+          continue;
+        }
+
+        await finalizeProposalStatusAfterVoteSync(result, "[Proposal Sync]");
+        results.success++;
+        console.log(
+          `[Proposal Sync] ✓ Synced ${koiosProposal.proposal_tx_hash} (${results.success}/${results.total})`
+        );
+      } catch (error: any) {
+        results.failed++;
+        results.errors.push({
+          proposalHash: koiosProposal.proposal_tx_hash,
+          error: error.message,
+        });
+        console.error(
+          `[Proposal Sync] ✗ Failed to sync ${koiosProposal.proposal_tx_hash}:`,
+          error.message
+        );
+      }
+    }
+
+    console.log(
+      `[Proposal Sync] Completed: ${results.success} succeeded, ${results.partial} partial, ${results.failed} failed`
+    );
+    console.log(
+      `[Proposal Sync] Run summary durationMs=${Date.now() - startedAtMs} votesProcessed=${voteRunTotals.processed} votesCreated=${voteRunTotals.created} votesUpdated=${voteRunTotals.updated} metadataAttempts=${voteRunTotals.metadataAttempts} metadataSuccess=${voteRunTotals.metadataSuccess} metadataFailed=${voteRunTotals.metadataFailed} metadataSkipped=${voteRunTotals.metadataSkipped}`
+    );
+    logInactivePowerMetrics(inactivePowerMetrics);
+
+    return results;
+  } finally {
+    clearVoteCache();
+    clearVoterKoiosCaches();
+  }
+}
+
+function getProposalIngestionFailureMessage(
+  result: ProposalIngestionResult
+): string {
+  const failures: string[] = [];
+
+  if (!result.downstream.votes.success) {
+    failures.push(
+      `vote-ingestion failed${result.downstream.votes.error ? `: ${result.downstream.votes.error}` : ""}`
+    );
   }
 
-  console.log(
-    `[Proposal Sync] Completed: ${results.success} succeeded, ${results.failed} failed`
-  );
-  console.log(
-    `[Proposal Sync] Run summary durationMs=${Date.now() - startedAtMs} votesProcessed=${voteRunTotals.processed} votesCreated=${voteRunTotals.created} votesUpdated=${voteRunTotals.updated} metadataAttempts=${voteRunTotals.metadataAttempts} metadataSuccess=${voteRunTotals.metadataSuccess} metadataFailed=${voteRunTotals.metadataFailed} metadataSkipped=${voteRunTotals.metadataSkipped}`
-  );
-  logInactivePowerMetrics(inactivePowerMetrics);
+  if (!result.downstream.votingPower.success) {
+    failures.push(
+      `voting-power failed${result.downstream.votingPower.error ? `: ${result.downstream.votingPower.error}` : ""}`
+    );
+  }
 
-  return results;
+  return failures.join("; ") || "proposal ingestion failed";
 }
 
 /**
@@ -603,15 +696,7 @@ function mapGovernanceType(
   return typeMap[koiosType] || null;
 }
 
-/**
- * Gets current epoch from Koios API
- */
-export async function getCurrentEpoch(): Promise<number> {
-  const tip = await koiosGet<Array<{ epoch_no: number }>>("/tip", undefined, {
-    source: "ingestion.proposal.current-epoch",
-  });
-  return tip?.[0]?.epoch_no || 0;
-}
+export const getCurrentEpoch = getKoiosCurrentEpoch;
 
 /**
  * Derives proposal status from epoch fields
@@ -749,21 +834,11 @@ async function fetchMetadataFromUrl(
   metadata: string | null;
 } | null> {
   try {
-    let fetchUrl = metaUrl;
-    if (metaUrl.startsWith("ipfs://")) {
-      const ipfsHash = metaUrl.replace("ipfs://", "");
-      fetchUrl = `https://ipfs.io/ipfs/${ipfsHash}`;
-      console.log(`[Metadata] Converting IPFS URL to gateway: ${fetchUrl}`);
-    }
-
-    const axios = (await import("axios")).default;
-
     const fetchOnce = async () => {
-      const response = await axios.get(fetchUrl, {
-        timeout: 10000,
-        responseEncoding: "utf-8" as any,
-      });
-      const metaData = response.data;
+      const metaData = await fetchJsonWithBrowserLikeClient(metaUrl);
+      if (!metaData) {
+        throw new Error("Metadata endpoint returned no JSON payload");
+      }
       return {
         title: sanitizeText(metaData?.body?.title) || "Untitled Proposal",
         description: sanitizeText(metaData?.body?.abstract),
@@ -1505,6 +1580,12 @@ const DREP_INACTIVITY_START_EPOCH = 527;
 // These are included in drep_voting_power_history but don't have certificate updates.
 const SPECIAL_DREP_IDS = ["drep_always_abstain", "drep_always_no_confidence"];
 
+interface VotingPowerUpdateResult {
+  success: boolean;
+  error?: string;
+  summaryFound: boolean;
+}
+
 async function updateProposalVotingPower(
   proposalId: string,
   drepTotalPowerEpoch: number,
@@ -1513,7 +1594,7 @@ async function updateProposalVotingPower(
   isActiveProposal: boolean,
   inactivePowerRunCache?: Map<string, bigint>,
   inactivePowerMetrics?: InactivePowerMetrics
-): Promise<void> {
+): Promise<VotingPowerUpdateResult> {
   try {
     // Fetch voting summary for this proposal
     const votingSummary = await fetchProposalVotingSummary(proposalId);
@@ -1522,7 +1603,11 @@ async function updateProposalVotingPower(
       console.log(
         `[Voting Power] No voting summary available for ${proposalId}`
       );
-      return;
+      return {
+        success: false,
+        error: "No voting summary available from Koios",
+        summaryFound: false,
+      };
     }
 
     console.log(
@@ -1602,10 +1687,20 @@ async function updateProposalVotingPower(
     });
 
     console.log(`[Voting Power] Updated voting power data for ${proposalId}`);
+    return {
+      success: true,
+      summaryFound: true,
+    };
   } catch (error: any) {
+    const errorMessage = error?.message ?? String(error);
     console.warn(
       `[Voting Power] Failed to update for ${proposalId}:`,
-      error.message
+      errorMessage
     );
+    return {
+      success: false,
+      error: errorMessage,
+      summaryFound: true,
+    };
   }
 }

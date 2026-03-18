@@ -1,11 +1,11 @@
 import { Request, Response } from "express";
 import { syncAllProposals } from "../../services/ingestion/proposal.service";
 import { updateNCL } from "../../services/ingestion/ncl.service";
-import { prisma } from "../../services";
-
-const JOB_NAME = "proposal-sync";
-const DISPLAY_NAME = "Proposal Sync";
-const LOCK_EXPIRY_MS = 15 * 60 * 1000; // 15 minutes (matches Cloud Run max timeout)
+import {
+  PROPOSAL_SYNC_JOB_NAME,
+  releaseProposalSyncLock,
+  tryAcquireProposalSyncLock,
+} from "../../services/ingestion/proposalSyncLock";
 
 /**
  * POST /data/trigger-sync
@@ -14,56 +14,8 @@ const LOCK_EXPIRY_MS = 15 * 60 * 1000; // 15 minutes (matches Cloud Run max time
  * Uses database-level locking to prevent concurrent runs
  */
 export const postTriggerSync = async (_req: Request, res: Response) => {
-  const now = new Date();
-
   try {
-    // Try to acquire lock using database transaction
-    const acquired = await prisma.$transaction(async (tx) => {
-      // Clear expired locks (in case previous run crashed)
-      await tx.syncStatus.updateMany({
-        where: {
-          jobName: JOB_NAME,
-          isRunning: true,
-          expiresAt: { lt: now },
-        },
-        data: {
-          isRunning: false,
-          lastResult: "expired",
-          errorMessage: "Lock expired - previous run may have crashed",
-        },
-      });
-
-      // Check if job is already running
-      const status = await tx.syncStatus.findUnique({
-        where: { jobName: JOB_NAME },
-      });
-
-      if (status?.isRunning) {
-        return false;
-      }
-
-      // Acquire lock
-      await tx.syncStatus.upsert({
-        where: { jobName: JOB_NAME },
-        create: {
-          jobName: JOB_NAME,
-          displayName: DISPLAY_NAME,
-          isRunning: true,
-          startedAt: now,
-          expiresAt: new Date(now.getTime() + LOCK_EXPIRY_MS),
-          lockedBy: process.env.HOSTNAME || "api-instance",
-        },
-        update: {
-          isRunning: true,
-          startedAt: now,
-          expiresAt: new Date(now.getTime() + LOCK_EXPIRY_MS),
-          lockedBy: process.env.HOSTNAME || "api-instance",
-          errorMessage: null,
-        },
-      });
-
-      return true;
-    });
+    const acquired = await tryAcquireProposalSyncLock("manual-trigger");
 
     if (!acquired) {
       console.log("[Manual Sync] Skipped - another sync is already running");
@@ -79,7 +31,7 @@ export const postTriggerSync = async (_req: Request, res: Response) => {
     res.json({
       success: true,
       message: "Proposal sync started",
-      jobName: JOB_NAME,
+      jobName: PROPOSAL_SYNC_JOB_NAME,
     });
 
     // ✅ Process asynchronously
@@ -98,21 +50,15 @@ export const postTriggerSync = async (_req: Request, res: Response) => {
         }
 
         // Mark sync as completed
-        await prisma.syncStatus.update({
-          where: { jobName: JOB_NAME },
-          data: {
-            isRunning: false,
-            completedAt: new Date(),
-            lastResult: "success",
-            itemsProcessed: results.success,
-            expiresAt: null,
-            errorMessage: null,
-          },
+        await releaseProposalSyncLock({
+          status: "success",
+          itemsProcessed: results.success,
         });
 
         console.log("[Manual Sync] Completed successfully:", {
           total: results.total,
           success: results.success,
+          partial: results.partial,
           failed: results.failed,
           nclUpdated: !!nclResult,
         });
@@ -123,15 +69,9 @@ export const postTriggerSync = async (_req: Request, res: Response) => {
 
         // Mark sync as failed
         try {
-          await prisma.syncStatus.update({
-            where: { jobName: JOB_NAME },
-            data: {
-              isRunning: false,
-              completedAt: new Date(),
-              lastResult: "failed",
-              expiresAt: null,
-              errorMessage: errorMessage,
-            },
+          await releaseProposalSyncLock({
+            status: "failed",
+            errorMessage,
           });
         } catch (updateError) {
           console.error("[Manual Sync] Failed to update sync status:", updateError);
@@ -147,19 +87,10 @@ export const postTriggerSync = async (_req: Request, res: Response) => {
 
     // Mark sync as failed (only if lock was acquired)
     try {
-      const status = await prisma.syncStatus.findUnique({ where: { jobName: JOB_NAME } });
-      if (status?.isRunning) {
-        await prisma.syncStatus.update({
-          where: { jobName: JOB_NAME },
-          data: {
-            isRunning: false,
-            completedAt: new Date(),
-            lastResult: "failed",
-            expiresAt: null,
-            errorMessage: errorMessage,
-          },
-        });
-      }
+      await releaseProposalSyncLock({
+        status: "failed",
+        errorMessage,
+      });
     } catch (updateError) {
       console.error("[Manual Sync] Failed to update sync status:", updateError);
     }

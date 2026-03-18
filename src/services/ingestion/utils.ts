@@ -9,6 +9,7 @@ export interface RetryOptions {
   maxRetries: number;
   baseDelay: number; // milliseconds
   maxDelay: number;
+  non429JitterMaxMs?: number;
 }
 
 export interface RetryAttemptContext {
@@ -30,7 +31,13 @@ const DEFAULT_RETRY_OPTIONS: RetryOptions = {
   maxRetries: 3,
   baseDelay: 2000, // 2 seconds
   maxDelay: 8000, // 8 seconds
+  non429JitterMaxMs: 0,
 };
+
+function getRetryJitterMs(maxJitterMs: number | undefined): number {
+  if (!maxJitterMs || maxJitterMs <= 0) return 0;
+  return Math.floor(Math.random() * (maxJitterMs + 1));
+}
 
 /**
  * Wraps an async operation with retry logic and exponential backoff
@@ -96,6 +103,8 @@ export async function withRetry<T>(
         options.maxDelay
       );
 
+      const jitterMs = status === 429 ? 0 : getRetryJitterMs(options.non429JitterMaxMs);
+
       if (status === 429) {
         const retryAfterHeader =
           error.response?.headers?.["retry-after"] ??
@@ -113,6 +122,17 @@ export async function withRetry<T>(
           `[withRetry] Rate limited (429). Waiting ${delay}ms before retry ` +
           `(${attempt + 1}/${options.maxRetries})...`
         );
+      }
+
+      const delayWithJitter = delay + jitterMs;
+
+      if (status === 429) {
+        // already logged above
+      } else if (jitterMs > 0) {
+        console.log(
+          `Retry attempt ${attempt + 1}/${options.maxRetries} after ${delayWithJitter}ms delay ` +
+          `(base=${delay}ms + jitter=${jitterMs}ms)...`
+        );
       } else {
         console.log(
           `Retry attempt ${attempt + 1}/${options.maxRetries} after ${delay}ms delay...`
@@ -122,13 +142,13 @@ export async function withRetry<T>(
       hooks?.onRetry?.({
         attempt: attempt + 1,
         maxRetries: options.maxRetries,
-        delayMs: delay,
+        delayMs: delayWithJitter,
         status,
         error,
       });
 
       // Wait before retrying
-      await new Promise((resolve) => setTimeout(resolve, delay));
+      await new Promise((resolve) => setTimeout(resolve, delayWithJitter));
     }
   }
 

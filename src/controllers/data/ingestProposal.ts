@@ -25,12 +25,23 @@ export const postIngestProposal = async (req: Request, res: Response) => {
 
     const result = await ingestProposal(proposal_hash);
 
-    console.log(
-      `[Ingest Proposal] ✓ Successfully ingested ${proposal_hash}:`,
-      result.stats
-    );
-
-    res.json(result);
+    if (result.success) {
+      console.log(
+        `[Ingest Proposal] ✓ Successfully ingested ${proposal_hash}:`,
+        result.stats
+      );
+      return res.json(result);
+    } else {
+      console.warn(
+        `[Ingest Proposal] action=partial-failure proposal=${proposal_hash} votesSuccess=${result.downstream.votes.success} votingPowerSuccess=${result.downstream.votingPower.success}`
+      );
+      return res.status(502).json({
+        error: "Proposal ingestion partially failed",
+        message:
+          "Proposal row was updated, but downstream vote or voting-power sync did not complete successfully.",
+        result,
+      });
+    }
   } catch (error) {
     console.error("[Ingest Proposal] Error:", error);
 

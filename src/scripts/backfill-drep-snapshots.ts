@@ -18,7 +18,6 @@
 import "dotenv/config";
 import { prisma } from "../services/prisma";
 import { koiosGet } from "../services/koios";
-import { withRetry } from "../services/ingestion/utils";
 import { processInParallel } from "../services/ingestion/parallel";
 import type {
   KoiosDrepVotingPower,
@@ -52,13 +51,13 @@ async function fetchVotingPowerHistory(
   const rows: KoiosDrepVotingPower[] = [];
 
   while (hasMore) {
-    const page = await withRetry(() =>
-      koiosGet<KoiosDrepVotingPower[]>("/drep_voting_power_history", {
+    const page = await koiosGet<KoiosDrepVotingPower[]>("/drep_voting_power_history", {
         _drep_id: drepId,
         limit: KOIOS_PAGE_SIZE,
         offset,
-      })
-    );
+      }, {
+        source: "scripts.backfill-drep-snapshots.voting-power-history",
+      });
 
     if (page && page.length > 0) {
       rows.push(...page);
@@ -77,9 +76,9 @@ async function fetchVotingPowerHistory(
  */
 async function fetchEpochInfo(epochNo: number): Promise<KoiosEpochInfo | null> {
   try {
-    const rows = await withRetry(() =>
-      koiosGet<KoiosEpochInfo[]>("/epoch_info", { _epoch_no: epochNo })
-    );
+    const rows = await koiosGet<KoiosEpochInfo[]>("/epoch_info", { _epoch_no: epochNo }, {
+      source: "scripts.backfill-drep-snapshots.epoch-info",
+    });
     return rows?.find((r) => r.epoch_no === epochNo) ?? rows?.[0] ?? null;
   } catch {
     return null;

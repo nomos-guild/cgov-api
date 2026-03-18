@@ -13,16 +13,25 @@ import type { KoiosVote } from "../../types/koios.types";
 import {
   extractSurveyResponse,
 } from "../../libs/surveyMetadata";
-
-// Cache all votes at module level to avoid fetching multiple times during sync
-let cachedVotes: KoiosVote[] | null = null;
-// Track the minimum epoch used to build cachedVotes (if any) so we can safely
-// reuse or refresh the cache when different triggers request different windows.
-let cachedVotesMinEpoch: number | undefined = undefined;
+import { isRetryablePrismaConnectionError } from "./prismaRetry";
 
 // Cache for vote metadata JSON keyed by anchor URL to avoid duplicate fetches
 const voteMetadataCache = new Map<string, string | null>();
 const voteTxMetadataCache = new Map<string, Record<string, unknown> | Array<Record<string, unknown>> | null>();
+
+export interface VoteIngestionRunCache {
+  bulkVotes: KoiosVote[] | null;
+  bulkVotesMinEpoch?: number;
+  bulkVotesInFlight: Promise<KoiosVote[]> | null;
+}
+
+export function createVoteIngestionRunCache(): VoteIngestionRunCache {
+  return {
+    bulkVotes: null,
+    bulkVotesMinEpoch: undefined,
+    bulkVotesInFlight: null,
+  };
+}
 
 /**
  * Fetches and serialises vote metadata JSON for a Koios vote.
@@ -114,12 +123,17 @@ export interface VoteIngestionStats {
   };
 }
 
+export interface VoteIngestionResult {
+  success: boolean;
+  stats: VoteIngestionStats;
+  error?: string;
+}
+
 /**
  * Clears the vote cache - should be called at the start of each sync
  */
 export function clearVoteCache() {
-  cachedVotes = null;
-  cachedVotesMinEpoch = undefined;
+  voteMetadataCache.clear();
   voteTxMetadataCache.clear();
 }
 
@@ -142,8 +156,8 @@ export async function ingestVotesForProposal(
   proposalId: string,
   tx: Prisma.TransactionClient,
   minEpoch?: number,
-  options?: { useCache?: boolean }
-): Promise<VoteIngestionStats> {
+  options?: { useCache?: boolean; runCache?: VoteIngestionRunCache }
+): Promise<VoteIngestionResult> {
   const startedAt = Date.now();
   const stats: VoteIngestionStats = {
     votesIngested: 0,
@@ -168,84 +182,64 @@ export async function ingestVotesForProposal(
       // Bulk-sync mode: fetch all relevant votes once, keep in memory, then
       // filter per proposal. This is used by the cron-style sync that walks
       // through many proposals in one run.
+      const runCache = options?.runCache;
       const shouldRefreshCache =
-        !cachedVotes ||
+        !runCache?.bulkVotes ||
         // If caller wants *all* votes but cache was built with an epoch floor,
         // the cache may be missing earlier votes.
-        (typeof minEpoch !== "number" && typeof cachedVotesMinEpoch === "number") ||
+        (typeof minEpoch !== "number" &&
+          typeof runCache?.bulkVotesMinEpoch === "number") ||
         // If caller asks for an earlier epoch than cache includes, refresh.
         (typeof minEpoch === "number" &&
-          typeof cachedVotesMinEpoch === "number" &&
-          minEpoch < cachedVotesMinEpoch);
+          typeof runCache?.bulkVotesMinEpoch === "number" &&
+          minEpoch < runCache.bulkVotesMinEpoch);
 
       if (shouldRefreshCache) {
-        let allVotes: KoiosVote[] = [];
-        let offset = 0;
-        const limit = 1000; // Max limit per request
-        let hasMore = true;
-
-        console.log(
-          `[Vote Ingestion] Fetching votes with pagination${
-            typeof minEpoch === "number" ? ` from epoch >= ${minEpoch}` : ""
-          }...`
-        );
-
-        while (hasMore) {
-          // Koios exposes horizontal filtering via query params (PostgREST style).
-          // We rely on an `epoch_no` column being available on /vote_list so that
-          // we can avoid fetching votes from epochs that are strictly before the
-          // earliest proposal epoch we care about in this sync run.
-          const params: any = {
-            limit,
-            offset,
-            // Stable ordering is important for offset-based pagination.
-            // Without it, inserts during paging can cause duplicates/skips.
-            order: "block_time.asc,vote_tx_hash.asc",
-          };
-
-          if (typeof minEpoch === "number") {
-            // Fetch only votes where epoch_no >= minEpoch
-            // Example: /vote_list?epoch_no=gte.597&limit=1000&offset=0
-            params.epoch_no = `gte.${minEpoch}`;
+        if (!runCache) {
+          console.warn(
+            `[Vote Ingestion] action=bulk-cache-missing proposal=${proposalId} message=run cache not provided; fetching without run reuse`
+          );
+          koiosVotes = await fetchVotesWithPagination(minEpoch);
+        } else {
+          if (!runCache.bulkVotesInFlight) {
+            runCache.bulkVotesInFlight = fetchVotesWithPagination(minEpoch).then(
+              (allVotes) => {
+                runCache.bulkVotes = allVotes;
+                runCache.bulkVotesMinEpoch =
+                  typeof minEpoch === "number" ? minEpoch : undefined;
+                console.log(
+                  `[Vote Ingestion] ✓ Fetched ${allVotes.length} total votes from Koios for current run`
+                );
+                return allVotes;
+              }
+            );
+          } else {
+            console.log(
+              `[Vote Ingestion] action=single-flight-join proposal=${proposalId}`
+            );
           }
 
-          const batch = await koiosGet<KoiosVote[]>("/vote_list", params, {
-            source: "ingestion.vote.ingest.bulk.vote-list",
-          });
-
-          if (!batch || batch.length === 0) {
-            hasMore = false;
-          } else {
-            allVotes = allVotes.concat(batch);
-            offset += batch.length;
-            console.log(
-              `[Vote Ingestion]   Fetched ${allVotes.length} votes so far...`
-            );
-
-            if (batch.length < limit) {
-              // Last batch was smaller than limit, no more pages
-              hasMore = false;
-            }
+          try {
+            await runCache.bulkVotesInFlight;
+          } finally {
+            runCache.bulkVotesInFlight = null;
           }
         }
-
-        cachedVotes = allVotes;
-        cachedVotesMinEpoch = typeof minEpoch === "number" ? minEpoch : undefined;
-        console.log(
-          `[Vote Ingestion] ✓ Fetched ${cachedVotes.length} total votes from Koios`
-        );
       }
 
       // Filter in memory to find votes for this specific proposal
-      // (cachedVotes should always be set here, but keep TS + runtime safe)
-      if (!cachedVotes) {
+      // (run-scoped bulkVotes should always be set here, but keep TS + runtime safe)
+      if (runCache?.bulkVotes) {
+        koiosVotes = runCache.bulkVotes.filter((vote) => vote.proposal_id === proposalId);
+      } else if (koiosVotes.length === 0) {
         console.warn(
           "[Vote Ingestion] Vote cache unexpectedly empty; falling back to no votes"
         );
-        return stats;
+        return {
+          success: true,
+          stats,
+        };
       }
-
-      koiosVotes = cachedVotes.filter((vote) => vote.proposal_id === proposalId);
     } else {
       // Sync-on-read mode: fetch only votes for this proposal (and optional
       // epoch window) directly from Koios, without touching the global cache.
@@ -296,7 +290,10 @@ export async function ingestVotesForProposal(
       console.log(
         `[Vote Ingestion] No votes found for proposal ${proposalId}`
       );
-      return stats;
+      return {
+        success: true,
+        stats,
+      };
     }
 
     console.log(
@@ -322,15 +319,76 @@ export async function ingestVotesForProposal(
       );
     }
   } catch (error: any) {
-    // If fetching all votes fails, log and return empty stats
-    console.error(`[Vote Ingestion] Failed to fetch votes:`, error.message);
-    return stats;
+    if (isRetryablePrismaConnectionError(error)) {
+      console.warn(
+        `[Vote Ingestion] action=retry reason=retryable-prisma-connectivity proposal=${proposalId} message=${error?.message ?? String(error)}`
+      );
+      throw error;
+    }
+
+    // Non-retryable vote ingestion errors remain non-fatal at this layer.
+    const errorMessage = error?.message ?? String(error);
+    console.error(
+      `[Vote Ingestion] action=partial-failure proposal=${proposalId} message=${errorMessage}`
+    );
+    return {
+      success: false,
+      stats,
+      error: errorMessage,
+    };
   }
 
   console.log(
-    `[Vote Ingestion] Summary proposal=${proposalId} durationMs=${Date.now() - startedAt} votesProcessed=${stats.votesProcessed} created=${stats.votesIngested} updated=${stats.votesUpdated} metadataAttempts=${stats.metadata.attempts} metadataSuccess=${stats.metadata.success} metadataFailed=${stats.metadata.failed} metadataSkipped=${stats.metadata.skipped}`
+    `[Vote Ingestion] Summary proposal=${proposalId} success=true durationMs=${Date.now() - startedAt} votesProcessed=${stats.votesProcessed} created=${stats.votesIngested} updated=${stats.votesUpdated} metadataAttempts=${stats.metadata.attempts} metadataSuccess=${stats.metadata.success} metadataFailed=${stats.metadata.failed} metadataSkipped=${stats.metadata.skipped}`
   );
-  return stats;
+  return {
+    success: true,
+    stats,
+  };
+}
+
+async function fetchVotesWithPagination(minEpoch?: number): Promise<KoiosVote[]> {
+  let allVotes: KoiosVote[] = [];
+  let offset = 0;
+  const limit = 1000;
+  let hasMore = true;
+
+  console.log(
+    `[Vote Ingestion] Fetching votes with pagination${
+      typeof minEpoch === "number" ? ` from epoch >= ${minEpoch}` : ""
+    }...`
+  );
+
+  while (hasMore) {
+    const params: any = {
+      limit,
+      offset,
+      order: "block_time.asc,vote_tx_hash.asc",
+    };
+
+    if (typeof minEpoch === "number") {
+      params.epoch_no = `gte.${minEpoch}`;
+    }
+
+    const batch = await koiosGet<KoiosVote[]>("/vote_list", params, {
+      source: "ingestion.vote.ingest.bulk.vote-list",
+    });
+
+    if (!batch || batch.length === 0) {
+      hasMore = false;
+      continue;
+    }
+
+    allVotes = allVotes.concat(batch);
+    offset += batch.length;
+    console.log(`[Vote Ingestion]   Fetched ${allVotes.length} votes so far...`);
+
+    if (batch.length < limit) {
+      hasMore = false;
+    }
+  }
+
+  return allVotes;
 }
 
 /**

@@ -2,7 +2,8 @@ import { koiosPost } from "./koios";
 import type { KoiosTxMetadata } from "../types/koios.types";
 
 export async function fetchTxMetadataByHash(
-  txHash: string
+  txHash: string,
+  context?: { source?: string }
 ): Promise<Record<string, unknown> | Array<Record<string, unknown>> | null> {
   if (!txHash) {
     return null;
@@ -10,6 +11,8 @@ export async function fetchTxMetadataByHash(
 
   const rows = await koiosPost<KoiosTxMetadata[]>("/tx_metadata", {
     _tx_hashes: [txHash],
+  }, {
+    source: context?.source ?? "tx-metadata.fetch-by-hash",
   });
 
   const row = rows?.[0];

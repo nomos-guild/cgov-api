@@ -13,9 +13,9 @@ import type {
   KoiosSpo,
   KoiosSpoVotingPower,
   KoiosCommitteeInfo,
-  KoiosTip,
 } from "../../types/koios.types";
 import { processInParallel, getVoterSyncConcurrency } from "./parallel";
+import { getKoiosCurrentEpoch } from "./sync-utils";
 
 /**
  * Some Koios metadata fields (e.g. from /drep_updates) can be returned either
@@ -116,16 +116,6 @@ export interface EnsureVoterResult {
 }
 
 /**
- * Gets current epoch from Koios API
- */
-async function getCurrentEpoch(): Promise<number> {
-  const tip = await koiosGet<KoiosTip[]>("/tip", undefined, {
-    source: "ingestion.voter.current-epoch",
-  });
-  return tip?.[0]?.epoch_no || 0;
-}
-
-/**
  * Ensures a voter exists in the database, creating or updating as needed
  *
  * @param voterRole - Type of voter (DRep, SPO, or CC)
@@ -152,6 +142,33 @@ const drepInfoCache = new Map<string, KoiosDrepInfo | undefined>();
 const drepVotingPowerCache = new Map<string, bigint>();
 const spoInfoCache = new Map<string, KoiosSpo | undefined>();
 const spoVotingPowerCache = new Map<string, bigint>();
+const MAX_VOTER_SERVICE_CACHE_ENTRIES = 5000;
+
+function setBoundedCacheEntry<K, V>(
+  cache: Map<K, V>,
+  key: K,
+  value: V,
+  cacheName: string
+): void {
+  cache.set(key, value);
+  while (cache.size > MAX_VOTER_SERVICE_CACHE_ENTRIES) {
+    const oldestKey = cache.keys().next().value;
+    if (oldestKey === undefined) {
+      break;
+    }
+    cache.delete(oldestKey);
+    console.log(
+      `[Voter Service] action=evict cache=${cacheName} size=${cache.size}`
+    );
+  }
+}
+
+export function clearVoterKoiosCaches(): void {
+  drepInfoCache.clear();
+  drepVotingPowerCache.clear();
+  spoInfoCache.clear();
+  spoVotingPowerCache.clear();
+}
 
 /**
  * Ensures a DRep exists, creating if needed and updating voting power
@@ -179,14 +196,14 @@ async function ensureDrepExists(
       source: "ingestion.voter.ensure-drep.drep-info",
     });
     koiosDrep = koiosDrepResponse?.[0];
-    drepInfoCache.set(drepId, koiosDrep);
+    setBoundedCacheEntry(drepInfoCache, drepId, koiosDrep, "drep-info");
   }
 
   // Delegator count is not from Koios; it is refreshed from StakeDelegationState
   // in drep-sync (syncAllDrepsInfo) and delegation-sync (Phase 3).
 
   // Get current epoch for voting power history
-  const currentEpoch = await getCurrentEpoch();
+  const currentEpoch = await getKoiosCurrentEpoch();
   const cacheKey = `${drepId}_${currentEpoch}`;
 
   let votingPower = drepVotingPowerCache.get(cacheKey);
@@ -202,7 +219,12 @@ async function ensureDrepExists(
     const votingPowerLovelace = votingPowerHistory?.[0]?.amount;
     // Store voting power in lovelace as BigInt (1 ADA = 1,000,000 lovelace)
     votingPower = votingPowerLovelace ? BigInt(votingPowerLovelace) : BigInt(0);
-    drepVotingPowerCache.set(cacheKey, votingPower);
+    setBoundedCacheEntry(
+      drepVotingPowerCache,
+      cacheKey,
+      votingPower,
+      "drep-voting-power"
+    );
   }
 
   // Fetch name, payment address, icon URL, and doNotList from drep_updates endpoint
@@ -305,11 +327,11 @@ async function ensureSpoExists(
       source: "ingestion.voter.ensure-spo.pool-info",
     });
     koiosSpo = koiosSpoResponse?.[0];
-    spoInfoCache.set(poolId, koiosSpo);
+    setBoundedCacheEntry(spoInfoCache, poolId, koiosSpo, "spo-info");
   }
 
   // Get current epoch for voting power history
-  const currentEpoch = await getCurrentEpoch();
+  const currentEpoch = await getKoiosCurrentEpoch();
   const cacheKey = `${poolId}_${currentEpoch}`;
 
   let votingPower = spoVotingPowerCache.get(cacheKey);
@@ -325,7 +347,12 @@ async function ensureSpoExists(
     const votingPowerLovelace = votingPowerHistory?.[0]?.amount;
     // Store voting power in lovelace as BigInt (1 ADA = 1,000,000 lovelace)
     votingPower = votingPowerLovelace ? BigInt(votingPowerLovelace) : BigInt(0);
-    spoVotingPowerCache.set(cacheKey, votingPower);
+    setBoundedCacheEntry(
+      spoVotingPowerCache,
+      cacheKey,
+      votingPower,
+      "spo-voting-power"
+    );
   }
 
   // Get pool name, ticker, and icon URL from meta_json or meta_url
@@ -672,7 +699,7 @@ async function ensureCcExists(
   );
 
   // Get current epoch to determine status
-  const currentEpoch = await getCurrentEpoch();
+  const currentEpoch = await getKoiosCurrentEpoch();
 
   // Determine status based on expiration_epoch
   let status = "active";
@@ -750,7 +777,7 @@ export interface SyncVoterPowerResult {
 export async function syncAllVoterVotingPower(
   prisma: Prisma.TransactionClient
 ): Promise<SyncVoterPowerResult> {
-  const currentEpoch = await getCurrentEpoch();
+  const currentEpoch = await getKoiosCurrentEpoch();
 
   console.log(
     `[Voter Service] Starting voting power sync for epoch ${currentEpoch}...`
@@ -943,10 +970,7 @@ export async function getEligibleCCInfo(): Promise<EligibleCCInfo> {
   const members = info.members;
 
   // Get current epoch to check expiration
-  const tip = await koiosGet<KoiosTip[]>("/tip", undefined, {
-    source: "ingestion.voter.eligible-cc.current-epoch",
-  });
-  const currentEpoch = tip?.[0]?.epoch_no ?? 0;
+  const currentEpoch = await getKoiosCurrentEpoch();
 
   // Calculate eligible members (authorized AND not expired)
   const eligibleMembers = members.filter(
@@ -987,10 +1011,7 @@ export async function syncCommitteeState(
   const ccInfo = await getEligibleCCInfo();
 
   // Get current epoch
-  const tip = await koiosGet<KoiosTip[]>("/tip", undefined, {
-    source: "ingestion.voter.sync-committee-state.current-epoch",
-  });
-  const currentEpoch = tip?.[0]?.epoch_no ?? 0;
+  const currentEpoch = await getKoiosCurrentEpoch();
 
   // Upsert to cache table
   await prisma.committeeState.upsert({

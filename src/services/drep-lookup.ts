@@ -63,6 +63,8 @@ export async function getDrepInfoBatch(
       try {
         const koiosResults = await koiosPost<KoiosDrepInfo[]>("/drep_info", {
           _drep_ids: batch,
+        }, {
+          source: "drep-lookup.drep-info",
         });
 
         if (!Array.isArray(koiosResults)) continue;
