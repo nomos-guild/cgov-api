@@ -6,7 +6,8 @@
 
 import cron from "node-cron";
 import { prisma } from "../services";
-import { syncAllVoterVotingPower, syncCommitteeState } from "../services/ingestion/voter.service";
+import { syncCommitteeState } from "../services/committeeState.service";
+import { syncAllVoterVotingPower } from "../services/ingestion/voterPowerSync.service";
 import { applyCronJitter } from "./jitter";
 
 // Simple in-process guard to prevent overlapping runs in a single Node process

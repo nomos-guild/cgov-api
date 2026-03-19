@@ -3,8 +3,10 @@ import { DRepID, PoolId, TxCBOR } from "@meshsdk/core-cst";
 import { prisma } from "./prisma";
 import { getBlockfrostService } from "./blockfrost";
 import { koiosGet, koiosPost } from "./koios";
+import { getTxInfoBatch } from "./governanceProvider";
 import { processInParallel } from "./ingestion/parallel";
 import { getKoiosCurrentEpoch } from "./ingestion/sync-utils";
+import type { KoiosTxInfo } from "../types/koios.types";
 import type {
   ResponderRole,
   SurveyLinkedActionId,
@@ -32,15 +34,6 @@ function getSurveyTallyKoiosConcurrency(): number {
   }
 
   return DEFAULT_SURVEY_TALLY_KOIOS_CONCURRENCY;
-}
-
-interface KoiosTxInfoRow {
-  tx_hash: string;
-  epoch_no?: number | null;
-  absolute_slot?: number | null;
-  tx_block_index?: number | null;
-  voting_procedures?: unknown;
-  proposal_procedures?: unknown;
 }
 
 type VoteCoreEntry = {
@@ -201,15 +194,13 @@ export function collectPendingFinalizationWarnings(
 
 async function fetchTxInfoByHashes(
   txHashes: string[]
-): Promise<Map<string, KoiosTxInfoRow>> {
+): Promise<Map<string, KoiosTxInfo>> {
   const uniqueHashes = Array.from(new Set(txHashes.filter(Boolean)));
   if (uniqueHashes.length === 0) {
     return new Map();
   }
 
-  const rows = await koiosPost<KoiosTxInfoRow[]>("/tx_info", {
-    _tx_hashes: uniqueHashes,
-  }, {
+  const rows = await getTxInfoBatch(uniqueHashes, {
     source: "proposal-survey-tally.tx-info",
   });
 

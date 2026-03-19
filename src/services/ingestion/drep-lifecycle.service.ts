@@ -6,10 +6,9 @@
  */
 
 import type { Prisma } from "@prisma/client";
-import { koiosGet } from "../koios";
+import { listAllDrepIds, listAllDrepUpdates } from "../governanceProvider";
 import type { KoiosDrepUpdate } from "../../types/koios.types";
 import {
-  KOIOS_DREP_LIST_PAGE_SIZE,
   DREP_LIFECYCLE_SYNC_CONCURRENCY,
 } from "./sync-utils";
 import { processInParallel } from "./parallel";
@@ -17,8 +16,6 @@ import { processInParallel } from "./parallel";
 // ============================================================
 // Constants
 // ============================================================
-
-const KOIOS_DREP_UPDATES_PAGE_SIZE = 1000;
 
 // Cardano mainnet epoch reference point for converting block_time to epoch
 // Epoch 208 started on July 29, 2020 (Shelley era start)
@@ -92,61 +89,18 @@ function normalizeActionType(actionType: unknown): string {
  * Fetches all DRep IDs from Koios /drep_list
  */
 async function fetchAllDrepIds(): Promise<string[]> {
-  const pageSize = KOIOS_DREP_LIST_PAGE_SIZE;
-  let offset = 0;
-  let hasMore = true;
-  const ids: string[] = [];
-
-  while (hasMore) {
-    const page = await koiosGet<Array<{ drep_id: string }>>("/drep_list", {
-      limit: pageSize,
-      offset,
-    }, {
-      source: "ingestion.drep-lifecycle.drep-list",
-    });
-
-    if (page && page.length > 0) {
-      for (const row of page) {
-        if (row?.drep_id) ids.push(row.drep_id);
-      }
-      offset += page.length;
-      hasMore = page.length === pageSize;
-    } else {
-      hasMore = false;
-    }
-  }
-
-  return ids;
+  return listAllDrepIds({
+    source: "ingestion.drep-lifecycle.drep-list",
+  });
 }
 
 /**
  * Fetches lifecycle events for a single DRep from Koios /drep_updates
  */
 async function fetchDrepUpdates(drepId: string): Promise<KoiosDrepUpdate[]> {
-  const pageSize = KOIOS_DREP_UPDATES_PAGE_SIZE;
-  let offset = 0;
-  let hasMore = true;
-  const updates: KoiosDrepUpdate[] = [];
-
-  while (hasMore) {
-    const page = await koiosGet<KoiosDrepUpdate[]>("/drep_updates", {
-      _drep_id: drepId,
-      limit: pageSize,
-      offset,
-    }, {
-      source: "ingestion.drep-lifecycle.drep-updates",
-    });
-
-    if (page && page.length > 0) {
-      updates.push(...page);
-      offset += page.length;
-      hasMore = page.length === pageSize;
-    } else {
-      hasMore = false;
-    }
-  }
-
-  return updates;
+  return listAllDrepUpdates(drepId, {
+    source: "ingestion.drep-lifecycle.drep-updates",
+  });
 }
 
 // ============================================================

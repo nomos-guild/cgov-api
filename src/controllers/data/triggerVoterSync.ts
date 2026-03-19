@@ -1,5 +1,5 @@
 import { Request, Response } from "express";
-import { syncAllVoterVotingPower } from "../../services/ingestion/voter.service";
+import { syncAllVoterVotingPower } from "../../services/ingestion/voterPowerSync.service";
 import { prisma } from "../../services";
 
 const JOB_NAME = "voter-power-sync";

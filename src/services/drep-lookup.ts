@@ -8,8 +8,7 @@
  */
 
 import type { Prisma } from "@prisma/client";
-import { koiosPost } from "./koios";
-import type { KoiosDrepInfo } from "../types/koios.types";
+import { getDrepInfoBatchFromKoios } from "./governanceProvider";
 import { toBigIntOrNull } from "./ingestion/sync-utils";
 
 export interface DrepLookupResult {
@@ -61,9 +60,7 @@ export async function getDrepInfoBatch(
     for (let i = 0; i < missingIds.length; i += BATCH_SIZE) {
       const batch = missingIds.slice(i, i + BATCH_SIZE);
       try {
-        const koiosResults = await koiosPost<KoiosDrepInfo[]>("/drep_info", {
-          _drep_ids: batch,
-        }, {
+        const koiosResults = await getDrepInfoBatchFromKoios(batch, {
           source: "drep-lookup.drep-info",
         });
 

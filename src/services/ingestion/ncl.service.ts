@@ -90,6 +90,18 @@ async function calculateTreasuryWithdrawalsForYear(year: number): Promise<{
   totalLovelace: bigint;
   proposalCount: number;
 }> {
+  const dbResult = await calculateNCLFromDatabase(year);
+  if (dbResult.proposalCount > 0) {
+    console.log(
+      `[NCL] Using database-backed treasury withdrawal calculation for year ${year}`
+    );
+    return dbResult;
+  }
+
+  console.log(
+    `[NCL] No qualifying treasury withdrawals found in database for year ${year}; falling back to Koios proposal_list`
+  );
+
   // Fetch all treasury withdrawal proposals from Koios
   const allProposals = await koiosGet<KoiosProposal[]>("/proposal_list", undefined, {
     source: "ingestion.ncl.proposal-list",

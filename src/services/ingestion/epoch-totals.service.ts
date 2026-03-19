@@ -10,14 +10,14 @@
  */
 
 import type { Prisma } from "@prisma/client";
-import { koiosGet } from "../koios";
-import type {
-  KoiosDrepDelegator,
-  KoiosDrepVotingPower,
-  KoiosDrepEpochSummary,
-  KoiosTotals,
-  KoiosEpochInfo,
-} from "../../types/koios.types";
+import {
+  getDrepEpochSummary,
+  getEpochInfo,
+  getTotalsForEpoch,
+  listDrepDelegators,
+  listDrepVotingPowerHistory,
+  listPoolVotingPowerHistoryForEpoch,
+} from "../governanceProvider";
 import {
   KOIOS_DREP_DELEGATORS_PAGE_SIZE,
   KOIOS_POOL_VP_PAGE_SIZE,
@@ -150,68 +150,13 @@ async function sumPoolVotingPowerForEpoch(epochNo: number): Promise<bigint> {
   // accidental double-counting.
   const seenPoolIds = new Set<string>();
 
-  async function fetchPage(): Promise<
-    Array<{ pool_id_bech32: string; epoch_no: number; amount: string }>
-  > {
-    const attempts: Array<
-      () => Promise<
-        Array<{ pool_id_bech32: string; epoch_no: number; amount: string }>
-      >
-    > = [
-        // Prefer PostgREST horizontal filtering when available.
-        () =>
-          koiosGet("/pool_voting_power_history", {
-            epoch_no: `eq.${epochNo}`,
-            order: "pool_id_bech32.asc",
-            limit: pageSize,
-            offset,
-          }, {
-            source: "ingestion.epoch-totals.pool-voting-power.eq-ordered",
-          }),
-        () =>
-          koiosGet("/pool_voting_power_history", {
-            epoch_no: `eq.${epochNo}`,
-            limit: pageSize,
-            offset,
-          }, {
-            source: "ingestion.epoch-totals.pool-voting-power.eq",
-          }),
-        // Fallback to Koios function-style filtering.
-        () =>
-          koiosGet("/pool_voting_power_history", {
-            _epoch_no: epochNo,
-            order: "pool_id_bech32.asc",
-            limit: pageSize,
-            offset,
-          }, {
-            source: "ingestion.epoch-totals.pool-voting-power.func-ordered",
-          }),
-        () =>
-          koiosGet("/pool_voting_power_history", {
-            _epoch_no: epochNo,
-            limit: pageSize,
-            offset,
-          }, {
-            source: "ingestion.epoch-totals.pool-voting-power.func",
-          }),
-      ];
-
-    let lastError: any;
-    for (const attempt of attempts) {
-      try {
-        return await attempt();
-      } catch (error: any) {
-        lastError = error;
-        // Try next attempt (some Koios deployments reject certain filter params with 404/400).
-        continue;
-      }
-    }
-
-    throw lastError;
-  }
-
   while (hasMore) {
-    const page = await fetchPage();
+    const page = await listPoolVotingPowerHistoryForEpoch({
+      epochNo,
+      limit: pageSize,
+      offset,
+      source: "ingestion.epoch-totals.pool-voting-power",
+    });
 
     if (page && page.length > 0) {
       for (const row of page) {
@@ -266,16 +211,11 @@ async function getDrepDelegatorAggregatesForEpoch(
   let delegatorCount = 0;
 
   while (hasMore) {
-    const page = await koiosGet<KoiosDrepDelegator[]>("/drep_delegators", {
-      _drep_id: drepId,
-      // IMPORTANT:
-      // Koios docs define /drep_delegators with required `_drep_id` only.
-      // Epoch filtering is supported via PostgREST horizontal filtering on `epoch_no`
-      // (e.g. epoch_no=eq.320). Passing `_epoch_no` causes Koios to return 404.
-      epoch_no: `eq.${epochNo}`,
+    const page = await listDrepDelegators({
+      drepId,
+      epochNo,
       limit: pageSize,
       offset,
-    }, {
       source: "ingestion.epoch-totals.special-drep-delegators",
     });
 
@@ -302,14 +242,11 @@ async function getDrepVotingPowerForEpoch(
   epochNo: number,
   drepId: string
 ): Promise<bigint> {
-  const history = await koiosGet<KoiosDrepVotingPower[]>(
-    "/drep_voting_power_history",
-    {
-      _epoch_no: epochNo,
-      _drep_id: drepId,
-    },
-    { source: "ingestion.epoch-totals.special-drep-voting-power" }
-  );
+  const history = await listDrepVotingPowerHistory({
+    epochNo,
+    drepId,
+    source: "ingestion.epoch-totals.special-drep-voting-power",
+  });
   const lovelace = history?.[0]?.amount;
   return lovelace ? BigInt(lovelace) : BigInt(0);
 }
@@ -365,36 +302,6 @@ export async function syncEpochTotals(
   prisma: Prisma.TransactionClient,
   epochNo: number
 ): Promise<SyncEpochTotalsResult> {
-  async function fetchRowForEpoch<T extends { epoch_no: number }>(
-    endpoint: string
-  ): Promise<T | null> {
-    const attempts: Array<() => Promise<T[]>> = [
-      () =>
-        koiosGet<T[]>(endpoint, { _epoch_no: epochNo }, {
-          source: `ingestion.epoch-totals.fetch-row.${endpoint}.func`,
-        }),
-      () =>
-        koiosGet<T[]>(endpoint, { epoch_no: `eq.${epochNo}` }, {
-          source: `ingestion.epoch-totals.fetch-row.${endpoint}.eq`,
-        }),
-    ];
-
-    for (const attempt of attempts) {
-      try {
-        const rows = await attempt();
-        const row = rows?.find((r) => r?.epoch_no === epochNo) ?? rows?.[0];
-        if (row && row.epoch_no === epochNo) return row;
-      } catch {
-        // fall through to next attempt
-      }
-    }
-
-    console.warn(
-      `[Epoch Totals] No rows returned for endpoint=${endpoint} epoch=${epochNo}`
-    );
-    return null;
-  }
-
   const [
     totals,
     drepSummary,
@@ -403,9 +310,15 @@ export async function syncEpochTotals(
     drepAlwaysAbstainAgg,
     drepAlwaysNoConfidenceAgg,
   ] = await Promise.all([
-    fetchRowForEpoch<KoiosTotals>("/totals"),
-    fetchRowForEpoch<KoiosDrepEpochSummary>("/drep_epoch_summary"),
-    fetchRowForEpoch<KoiosEpochInfo>("/epoch_info"),
+    getTotalsForEpoch(epochNo, {
+      source: "ingestion.epoch-totals.fetch-row./totals",
+    }),
+    getDrepEpochSummary(epochNo, {
+      source: "ingestion.epoch-totals.fetch-row./drep_epoch_summary",
+    }),
+    getEpochInfo(epochNo, {
+      source: "ingestion.epoch-totals.fetch-row./epoch_info",
+    }),
     sumPoolVotingPowerForEpoch(epochNo),
     getSpecialDrepAggregatesForEpoch(epochNo, "drep_always_abstain"),
     getSpecialDrepAggregatesForEpoch(epochNo, "drep_always_no_confidence"),

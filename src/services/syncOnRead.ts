@@ -16,31 +16,31 @@
 
 import { ProposalStatus } from "@prisma/client";
 import { prisma } from "./prisma";
+import { getKoiosPressureState } from "./koios";
 import {
-  getKoiosPressureState,
-  getKoiosProposalList,
-  koiosGet,
-} from "./koios";
+  getProposalVotingSummary,
+  listProposals,
+  listVotes,
+} from "./governanceProvider";
 import {
   ingestProposalData,
   finalizeProposalStatusAfterVoteSync,
   getCurrentEpoch,
+  isProposalStatusLocallyRetryable,
 } from "./ingestion/proposal.service";
 import {
   isProposalSyncLockActive,
   releaseProposalSyncLock,
   tryAcquireProposalSyncLock,
 } from "./ingestion/proposalSyncLock";
-import type {
-  KoiosProposal,
-  KoiosProposalVotingSummary,
-} from "../types/koios.types";
-
-type ProposalSyncTargetKind =
-  | "proposalId"
-  | "numericId"
-  | "txHash"
-  | "txHashAndIndex";
+import type { KoiosProposal } from "../types/koios.types";
+import {
+  findKoiosProposalForIdentifier,
+  getProposalIdentifierAliases,
+  parseProposalIdentifier,
+  type ParsedProposalIdentifier,
+  type ProposalIdentifierKind,
+} from "./proposalLookup";
 
 type ProposalSnapshot = {
   proposalId: string;
@@ -53,19 +53,9 @@ type ProposalSnapshot = {
   spoActiveAbstainVotePower: bigint | null;
 };
 
-interface ParsedProposalIdentifier {
-  raw: string;
-  normalized: string;
-  kind: ProposalSyncTargetKind;
-  proposalId?: string;
-  numericId?: number;
-  txHash?: string;
-  certIndex?: string;
-}
-
 interface ResolvedProposalSyncTarget {
   raw: string;
-  kind: ProposalSyncTargetKind;
+  kind: ProposalIdentifierKind;
   canonicalKey: string;
   guardKey: string;
   proposalId?: string;
@@ -144,9 +134,6 @@ const MAX_TRACKED_PROPOSAL_IDENTIFIER_ALIASES = getBoundedIntEnv(
   100,
   200_000
 );
-const GOV_ACTION_IDENTIFIER_PREFIX = "gov_action";
-const TX_HASH_REGEX = /^[0-9a-f]{64}$/i;
-const NUMERIC_ID_REGEX = /^\d+$/;
 
 // Last sync timestamps
 let lastOverviewSyncTime = 0;
@@ -194,62 +181,6 @@ const proposalSnapshotSelect = {
   spoActiveNoVotePower: true,
   spoActiveAbstainVotePower: true,
 } as const;
-
-function parseProposalIdentifier(
-  identifier: string
-): ParsedProposalIdentifier | null {
-  const trimmed = identifier.trim();
-  if (!trimmed) {
-    return null;
-  }
-
-  if (trimmed.startsWith(GOV_ACTION_IDENTIFIER_PREFIX)) {
-    return {
-      raw: identifier,
-      normalized: trimmed,
-      kind: "proposalId",
-      proposalId: trimmed,
-    };
-  }
-
-  if (NUMERIC_ID_REGEX.test(trimmed)) {
-    return {
-      raw: identifier,
-      normalized: trimmed,
-      kind: "numericId",
-      numericId: Number.parseInt(trimmed, 10),
-    };
-  }
-
-  if (trimmed.includes(":")) {
-    const [rawHash, rawIndex] = trimmed.split(":");
-    const txHash = rawHash?.trim().toLowerCase();
-    const certIndex = rawIndex?.trim();
-    if (!txHash || !certIndex || !TX_HASH_REGEX.test(txHash) || !NUMERIC_ID_REGEX.test(certIndex)) {
-      return null;
-    }
-
-    return {
-      raw: identifier,
-      normalized: `${txHash}:${certIndex}`,
-      kind: "txHashAndIndex",
-      txHash,
-      certIndex,
-    };
-  }
-
-  const txHash = trimmed.toLowerCase();
-  if (!TX_HASH_REGEX.test(txHash)) {
-    return null;
-  }
-
-  return {
-    raw: identifier,
-    normalized: txHash,
-    kind: "txHash",
-    txHash,
-  };
-}
 
 async function resolveProposalSyncTarget(
   identifier: string
@@ -391,15 +322,9 @@ function rememberProposalIdentifierAlias(
 }
 
 function rememberProposalAliases(proposal: KoiosProposal): void {
-  rememberProposalIdentifierAlias(proposal.proposal_id, proposal.proposal_id);
-  rememberProposalIdentifierAlias(
-    proposal.proposal_tx_hash?.toLowerCase(),
-    proposal.proposal_id
-  );
-  rememberProposalIdentifierAlias(
-    `${proposal.proposal_tx_hash?.toLowerCase()}:${String(proposal.proposal_index)}`,
-    proposal.proposal_id
-  );
+  for (const alias of getProposalIdentifierAliases(proposal)) {
+    rememberProposalIdentifierAlias(alias, proposal.proposal_id);
+  }
 }
 
 function getProposalGuardJobName(proposalId: string): string {
@@ -508,8 +433,8 @@ async function withProposalGuard<T>(
 }
 
 async function getInteractiveProposalList(source: string): Promise<KoiosProposal[]> {
-  return getKoiosProposalList({
-    context: { source },
+  return listProposals({
+    source,
     interactiveCache: true,
   });
 }
@@ -518,23 +443,37 @@ function findKoiosProposalForTarget(
   proposals: KoiosProposal[],
   target: ResolvedProposalSyncTarget
 ): KoiosProposal | undefined {
-  if (target.kind === "proposalId" && target.proposalId) {
-    return proposals.find((proposal) => proposal.proposal_id === target.proposalId);
-  }
+  const parsed: ParsedProposalIdentifier =
+    target.kind === "proposalId"
+      ? {
+          raw: target.raw,
+          normalized: target.proposalId ?? target.canonicalKey,
+          kind: "proposalId",
+          proposalId: target.proposalId ?? target.canonicalKey,
+        }
+      : target.kind === "numericId"
+      ? {
+          raw: target.raw,
+          normalized: target.raw.trim(),
+          kind: "numericId",
+          numericId: Number.parseInt(target.raw.trim(), 10),
+        }
+      : target.kind === "txHashAndIndex"
+      ? {
+          raw: target.raw,
+          normalized: `${target.txHash}:${target.certIndex}`,
+          kind: "txHashAndIndex",
+          txHash: target.txHash,
+          certIndex: target.certIndex,
+        }
+      : {
+          raw: target.raw,
+          normalized: target.txHash ?? target.raw.trim().toLowerCase(),
+          kind: "txHash",
+          txHash: target.txHash,
+        };
 
-  if (target.kind === "txHashAndIndex" && target.txHash && target.certIndex) {
-    return proposals.find(
-      (proposal) =>
-        proposal.proposal_tx_hash === target.txHash &&
-        String(proposal.proposal_index) === target.certIndex
-    );
-  }
-
-  if (target.txHash) {
-    return proposals.find((proposal) => proposal.proposal_tx_hash === target.txHash);
-  }
-
-  return undefined;
+  return findKoiosProposalForIdentifier(proposals, parsed);
 }
 
 /**
@@ -662,7 +601,7 @@ async function doOverviewSync(): Promise<void> {
                 currentEpoch,
                 minVotesEpoch: proposal.proposed_epoch,
                 useCache: false,
-                deferExpiredStatus: true,
+                deferStatusFinalization: true,
               })
           );
           if (!guarded.executed || !guarded.value) {
@@ -818,7 +757,7 @@ async function doProposalSync(target: ResolvedProposalSyncTarget): Promise<void>
         return;
       }
 
-      if (dbProposal.status !== ProposalStatus.ACTIVE) {
+      if (!isProposalStatusLocallyRetryable(dbProposal.status)) {
         console.log(
           `[Sync-on-Read] Proposal ${target.canonicalKey} is ${dbProposal.status}, skipping sync`
         );
@@ -838,17 +777,13 @@ async function doProposalSync(target: ResolvedProposalSyncTarget): Promise<void>
 
       const hasVoteCountChange = koiosVoteCount !== dbVoteCount;
 
-      const koiosSummary = await koiosGet<KoiosProposalVotingSummary[]>(
-        `/proposal_voting_summary?_proposal_id=${dbProposal.proposalId}`,
-        undefined,
-        {
-          source: "sync-on-read.details.voting-summary",
-        }
-      );
+      const koiosSummary = await getProposalVotingSummary(dbProposal.proposalId, {
+        source: "sync-on-read.details.voting-summary",
+      });
 
       let hasVotingPowerChange = false;
-      if (koiosSummary && koiosSummary.length > 0) {
-        const summary = koiosSummary[0];
+      if (koiosSummary) {
+        const summary = koiosSummary;
 
         const koiosDrepYes = BigInt(summary.drep_active_yes_vote_power || "0");
         const koiosDrepNo = BigInt(summary.drep_active_no_vote_power || "0");
@@ -917,7 +852,7 @@ async function doProposalSync(target: ResolvedProposalSyncTarget): Promise<void>
       const result = await ingestProposalData(koiosProposal, {
         minVotesEpoch: koiosProposal.proposed_epoch,
         useCache: false,
-        deferExpiredStatus: true,
+        deferStatusFinalization: true,
       });
 
       const finalized = await finalizeProposalStatusAfterVoteSync(
@@ -964,19 +899,13 @@ async function fetchVotesForProposal(
   let hasMore = true;
 
   while (hasMore) {
-    const batch = await koiosGet<Array<{ vote_tx_hash: string }>>(
-      "/vote_list",
-      {
-        proposal_id: `eq.${proposalId}`,
-        limit,
-        offset,
-        // Stable ordering is important for offset-based pagination.
-        order: "block_time.asc,vote_tx_hash.asc",
-      },
-      {
-        source: "sync-on-read.details.vote-list",
-      }
-    );
+    const batch = await listVotes({
+      proposalId,
+      limit,
+      offset,
+      order: "block_time.asc,vote_tx_hash.asc",
+      source: "sync-on-read.details.vote-list",
+    });
 
     if (!batch || batch.length === 0) {
       hasMore = false;
@@ -1021,7 +950,7 @@ async function tryIngestNewProposal(
         const result = await ingestProposalData(proposalToIngest, {
           minVotesEpoch: proposalToIngest.proposed_epoch,
           useCache: false,
-          deferExpiredStatus: true,
+          deferStatusFinalization: true,
         });
         await finalizeProposalStatusAfterVoteSync(result, "[Sync-on-Read]");
         if (!result.success) {

@@ -6,7 +6,7 @@
  */
 
 import type { Prisma } from "@prisma/client";
-import { koiosGet } from "../koios";
+import { listAllPoolGroups } from "../governanceProvider";
 import type { KoiosPoolGroup } from "../../types/koios.types";
 import {
   POOL_GROUPS_DB_UPDATE_CONCURRENCY,
@@ -16,12 +16,6 @@ import { processInParallel } from "./parallel";
 
 // ============================================================
 // Constants
-// ============================================================
-
-const KOIOS_POOL_GROUPS_PAGE_SIZE = 1000;
-
-// ============================================================
-// Result Types
 // ============================================================
 
 export interface SyncPoolGroupsResult {
@@ -40,29 +34,9 @@ export interface SyncPoolGroupsResult {
  * Fetches all pool groups from Koios /pool_groups endpoint
  */
 async function fetchAllPoolGroups(): Promise<KoiosPoolGroup[]> {
-  const pageSize = KOIOS_POOL_GROUPS_PAGE_SIZE;
-  let offset = 0;
-  let hasMore = true;
-  const groups: KoiosPoolGroup[] = [];
-
-  while (hasMore) {
-    const page = await koiosGet<KoiosPoolGroup[]>("/pool_groups", {
-      limit: pageSize,
-      offset,
-    }, {
-      source: "ingestion.pool-groups.pool-groups",
-    });
-
-    if (page && page.length > 0) {
-      groups.push(...page);
-      offset += page.length;
-      hasMore = page.length === pageSize;
-    } else {
-      hasMore = false;
-    }
-  }
-
-  return groups;
+  return listAllPoolGroups({
+    source: "ingestion.pool-groups.pool-groups",
+  });
 }
 
 // ============================================================

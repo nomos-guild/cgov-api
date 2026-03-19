@@ -1,5 +1,4 @@
 import { Request, Response } from "express";
-import { Prisma } from "@prisma/client";
 import { prisma } from "../../services";
 import {
   mapProposalToGovernanceActionDetail,
@@ -7,49 +6,9 @@ import {
   proposalWithVotesSelect,
 } from "../../libs/proposalMapper";
 import { GetProposalInfoResponse } from "../../responses";
+import { getCachedEligibleCCInfo } from "../../services/committeeState.service";
+import { buildProposalLookup } from "../../services/proposalLookup";
 import { syncProposalDetailsOnRead } from "../../services/syncOnRead";
-import { getCachedEligibleCCInfo } from "../../services/ingestion/voter.service";
-
-export const buildProposalLookup = (
-  identifier: string
-): Prisma.ProposalWhereInput | null => {
-  const trimmed = identifier.trim();
-  if (!trimmed) {
-    return null;
-  }
-
-  const filters: Prisma.ProposalWhereInput[] = [];
-  const numericId = Number(trimmed);
-
-  // Check for numeric id
-  if (!Number.isNaN(numericId)) {
-    filters.push({ id: numericId });
-  }
-
-  // Check for proposalId (starts with "gov_action")
-  if (trimmed.startsWith("gov_action")) {
-    filters.push({ proposalId: trimmed });
-  }
-
-  // Check for txHash:certIndex format or plain txHash
-  if (trimmed.includes(":") && !trimmed.startsWith("gov_action")) {
-    const [hashCandidate, certCandidate] = trimmed.split(":");
-    if (hashCandidate && certCandidate) {
-      filters.push({ txHash: hashCandidate, certIndex: certCandidate });
-    } else if (hashCandidate) {
-      filters.push({ txHash: hashCandidate });
-    }
-  } else if (!trimmed.startsWith("gov_action")) {
-    // Plain txHash (64 char hex string)
-    filters.push({ txHash: trimmed });
-  }
-
-  if (!filters.length) {
-    return null;
-  }
-
-  return filters.length === 1 ? filters[0] : { OR: filters };
-};
 
 export const getProposalDetails = async (req: Request, res: Response) => {
   try {
