@@ -4,82 +4,9 @@ import { syncActiveRepos, syncModerateRepos, syncDormantRepos, snapshotAllRepos 
 import { backfillRepositories } from "../../services/ingestion/github-backfill";
 import { aggregateRecentToHistorical, precomputeNetworkGraphs } from "../../services/ingestion/github-aggregation";
 import { cacheInvalidatePrefix } from "../../services/cache";
-import { prisma } from "../../services";
+import { acquireJobLock, releaseJobLock } from "../../services/ingestion/syncLock";
 
 const LOCK_EXPIRY_MS = 35 * 60 * 1000; // 35 minutes (generous for large syncs, handles snapshot's 30min timeout)
-
-// ─── Helper: Acquire Job Lock ───────────────────────────────────────────────
-
-async function acquireJobLock(jobName: string, displayName: string): Promise<boolean> {
-  const now = new Date();
-
-  return await prisma.$transaction(async (tx) => {
-    // Clear expired locks
-    await tx.syncStatus.updateMany({
-      where: {
-        jobName,
-        isRunning: true,
-        expiresAt: { lt: now },
-      },
-      data: {
-        isRunning: false,
-        lastResult: "expired",
-        errorMessage: "Lock expired - previous run may have crashed",
-      },
-    });
-
-    // Check if job is already running
-    const status = await tx.syncStatus.findUnique({
-      where: { jobName },
-    });
-
-    if (status?.isRunning) {
-      return false;
-    }
-
-    // Acquire lock
-    await tx.syncStatus.upsert({
-      where: { jobName },
-      create: {
-        jobName,
-        displayName,
-        isRunning: true,
-        startedAt: now,
-        expiresAt: new Date(now.getTime() + LOCK_EXPIRY_MS),
-        lockedBy: process.env.HOSTNAME || "cloud-run-instance",
-      },
-      update: {
-        isRunning: true,
-        startedAt: now,
-        expiresAt: new Date(now.getTime() + LOCK_EXPIRY_MS),
-        lockedBy: process.env.HOSTNAME || "cloud-run-instance",
-        errorMessage: null,
-      },
-    });
-
-    return true;
-  });
-}
-
-// ─── Helper: Release Job Lock ───────────────────────────────────────────────
-
-async function releaseJobLock(
-  jobName: string,
-  result: "success" | "failed",
-  itemsProcessed?: number,
-  errorMessage?: string
-): Promise<void> {
-  await prisma.syncStatus.update({
-    where: { jobName },
-    data: {
-      isRunning: false,
-      completedAt: new Date(),
-      lastResult: result,
-      itemsProcessed: itemsProcessed ?? null,
-      errorMessage: errorMessage ?? null,
-    },
-  });
-}
 
 // ─── GitHub Discovery ────────────────────────────────────────────────────────
 
@@ -87,7 +14,10 @@ export const postTriggerGithubDiscovery = async (_req: Request, res: Response) =
   const jobName = "github-discover";
   const displayName = "GitHub Repository Discovery";
 
-  const acquired = await acquireJobLock(jobName, displayName);
+  const acquired = await acquireJobLock(jobName, displayName, {
+    ttlMs: LOCK_EXPIRY_MS,
+    source: "cloud-run-instance",
+  });
   if (!acquired) {
     return res.status(409).json({
       success: false,
@@ -137,7 +67,10 @@ export const postTriggerGithubSync = async (req: Request, res: Response) => {
 
   const { jobName, displayName } = tierJobMap[tier] || tierJobMap.all;
 
-  const acquired = await acquireJobLock(jobName, displayName);
+  const acquired = await acquireJobLock(jobName, displayName, {
+    ttlMs: LOCK_EXPIRY_MS,
+    source: "cloud-run-instance",
+  });
   if (!acquired) {
     return res.status(409).json({
       success: false,
@@ -199,7 +132,10 @@ export const postTriggerGithubBackfill = async (req: Request, res: Response) => 
   const jobName = "github-backfill";
   const displayName = "GitHub Historical Backfill";
 
-  const acquired = await acquireJobLock(jobName, displayName);
+  const acquired = await acquireJobLock(jobName, displayName, {
+    ttlMs: LOCK_EXPIRY_MS,
+    source: "cloud-run-instance",
+  });
   if (!acquired) {
     return res.status(409).json({
       success: false,
@@ -243,7 +179,10 @@ export const postTriggerGithubSnapshot = async (_req: Request, res: Response) =>
   const jobName = "github-snapshot";
   const displayName = "GitHub Daily Snapshot";
 
-  const acquired = await acquireJobLock(jobName, displayName);
+  const acquired = await acquireJobLock(jobName, displayName, {
+    ttlMs: LOCK_EXPIRY_MS,
+    source: "cloud-run-instance",
+  });
   if (!acquired) {
     return res.status(409).json({
       success: false,
@@ -284,7 +223,10 @@ export const postTriggerGithubAggregate = async (_req: Request, res: Response) =
   const jobName = "github-aggregate";
   const displayName = "GitHub Data Aggregation";
 
-  const acquired = await acquireJobLock(jobName, displayName);
+  const acquired = await acquireJobLock(jobName, displayName, {
+    ttlMs: LOCK_EXPIRY_MS,
+    source: "cloud-run-instance",
+  });
   if (!acquired) {
     return res.status(409).json({
       success: false,

@@ -14,8 +14,10 @@ import {
  * Uses database-level locking to prevent concurrent runs
  */
 export const postTriggerSync = async (_req: Request, res: Response) => {
+  let acquired = false;
+
   try {
-    const acquired = await tryAcquireProposalSyncLock("manual-trigger");
+    acquired = await tryAcquireProposalSyncLock("manual-trigger");
 
     if (!acquired) {
       console.log("[Manual Sync] Skipped - another sync is already running");
@@ -86,13 +88,15 @@ export const postTriggerSync = async (_req: Request, res: Response) => {
     const errorMessage = error instanceof Error ? error.message : "Unknown error";
 
     // Mark sync as failed (only if lock was acquired)
-    try {
+    if (acquired) {
+      try {
       await releaseProposalSyncLock({
         status: "failed",
         errorMessage,
       });
-    } catch (updateError) {
-      console.error("[Manual Sync] Failed to update sync status:", updateError);
+      } catch (updateError) {
+        console.error("[Manual Sync] Failed to update sync status:", updateError);
+      }
     }
 
     res.status(500).json({

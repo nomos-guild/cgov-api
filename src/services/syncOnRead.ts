@@ -33,6 +33,11 @@ import {
   releaseProposalSyncLock,
   tryAcquireProposalSyncLock,
 } from "./ingestion/proposalSyncLock";
+import {
+  acquireJobLock,
+  getBoundedIntEnv,
+  releaseJobLock,
+} from "./ingestion/syncLock";
 import type { KoiosProposal } from "../types/koios.types";
 import {
   findKoiosProposalForIdentifier,
@@ -75,21 +80,6 @@ function getCooldownMs(
   const parsed = Number.parseInt(raw, 10);
   if (!Number.isFinite(parsed) || parsed < minMs || parsed > maxMs) {
     return defaultMs;
-  }
-  return parsed;
-}
-
-function getBoundedIntEnv(
-  envKey: string,
-  defaultValue: number,
-  min: number,
-  max: number
-): number {
-  const rawValue = process.env[envKey];
-  if (!rawValue) return defaultValue;
-  const parsed = Number.parseInt(rawValue, 10);
-  if (!Number.isFinite(parsed) || parsed < min || parsed > max) {
-    return defaultValue;
   }
   return parsed;
 }
@@ -335,50 +325,10 @@ async function tryAcquireProposalGuard(
   guardKey: string,
   source: string
 ): Promise<boolean> {
-  const now = new Date();
   const jobName = getProposalGuardJobName(guardKey);
-  return prisma.$transaction(async (tx) => {
-    await tx.syncStatus.updateMany({
-      where: {
-        jobName,
-        isRunning: true,
-        expiresAt: { lt: now },
-      },
-      data: {
-        isRunning: false,
-        completedAt: now,
-        lastResult: "expired",
-        errorMessage: "Sync-on-read proposal guard lock expired",
-      },
-    });
-
-    const status = await tx.syncStatus.findUnique({
-      where: { jobName },
-      select: { isRunning: true },
-    });
-    if (status?.isRunning) return false;
-
-    await tx.syncStatus.upsert({
-      where: { jobName },
-      create: {
-        jobName,
-        displayName: "Sync-on-Read Proposal Guard",
-        isRunning: true,
-        startedAt: now,
-        expiresAt: new Date(now.getTime() + PROPOSAL_SYNC_ON_READ_GUARD_TTL_MS),
-        lockedBy: process.env.HOSTNAME || source,
-      },
-      update: {
-        isRunning: true,
-        startedAt: now,
-        completedAt: null,
-        expiresAt: new Date(now.getTime() + PROPOSAL_SYNC_ON_READ_GUARD_TTL_MS),
-        lockedBy: process.env.HOSTNAME || source,
-        errorMessage: null,
-      },
-    });
-
-    return true;
+  return acquireJobLock(jobName, "Sync-on-Read Proposal Guard", {
+    ttlMs: PROPOSAL_SYNC_ON_READ_GUARD_TTL_MS,
+    source,
   });
 }
 
@@ -388,16 +338,12 @@ async function releaseProposalGuard(
   errorMessage?: string
 ): Promise<void> {
   try {
-    await prisma.syncStatus.update({
-      where: { jobName: getProposalGuardJobName(guardKey) },
-      data: {
-        isRunning: false,
-        completedAt: new Date(),
-        expiresAt: null,
-        lastResult: status,
-        errorMessage: errorMessage ?? null,
-      },
-    });
+    await releaseJobLock(
+      getProposalGuardJobName(guardKey),
+      status,
+      undefined,
+      errorMessage
+    );
   } catch (error: any) {
     console.warn(
       `[Sync-on-Read] action=non-retryable reason=proposal-guard-release-failed guardKey=${guardKey} message=${error?.message ?? String(error)}`

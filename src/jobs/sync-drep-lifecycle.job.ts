@@ -9,9 +9,12 @@
 import cron from "node-cron";
 import { prisma } from "../services";
 import { syncDrepLifecycleStep } from "../services/ingestion/epoch-analytics.service";
+import { acquireJobLock, releaseJobLock } from "../services/ingestion/syncLock";
 import { applyCronJitter } from "./jitter";
 
 let isRunning = false;
+const JOB_NAME = "drep-lifecycle-sync";
+const DISPLAY_NAME = "DRep Lifecycle Sync";
 
 export const startDrepLifecycleSyncJob = () => {
   const schedule = process.env.DREP_LIFECYCLE_SYNC_SCHEDULE || "37 * * * *";
@@ -49,8 +52,19 @@ function startDrepLifecycleSyncJobWithSchedule(schedule: string) {
     const timestamp = new Date().toISOString();
     const startedAt = Date.now();
     console.log(`\n[${timestamp}] Starting DRep lifecycle sync job...`);
+    let acquired = false;
 
     try {
+      acquired = await acquireJobLock(JOB_NAME, DISPLAY_NAME, {
+        source: "cron",
+      });
+      if (!acquired) {
+        console.log(
+          `[${timestamp}] DRep lifecycle sync skipped because another instance already holds the DB lock.`
+        );
+        return;
+      }
+
       const result = await syncDrepLifecycleStep(prisma);
 
       console.log(
@@ -75,11 +89,32 @@ function startDrepLifecycleSyncJobWithSchedule(schedule: string) {
       } else {
         console.log(`  Lifecycle: skipped=${result.skipped}`);
       }
+
+      await releaseJobLock(
+        JOB_NAME,
+        "success",
+        result.drepLifecycle?.eventsIngested ?? 0
+      );
     } catch (error: any) {
       console.error(
         `[${timestamp}] DRep lifecycle sync job failed:`,
         error?.message ?? String(error)
       );
+      if (acquired) {
+        try {
+          await releaseJobLock(
+            JOB_NAME,
+            "failed",
+            0,
+            error?.message ?? String(error)
+          );
+        } catch (releaseError: any) {
+          console.error(
+            `[${timestamp}] Failed to release DRep lifecycle sync lock:`,
+            releaseError?.message ?? releaseError
+          );
+        }
+      }
     } finally {
       const durationSeconds = ((Date.now() - startedAt) / 1000).toFixed(1);
       const finishedTimestamp = new Date().toISOString();

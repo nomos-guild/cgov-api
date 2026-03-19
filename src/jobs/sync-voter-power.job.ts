@@ -7,11 +7,14 @@
 import cron from "node-cron";
 import { prisma } from "../services";
 import { syncCommitteeState } from "../services/committeeState.service";
+import { acquireJobLock, releaseJobLock } from "../services/ingestion/syncLock";
 import { syncAllVoterVotingPower } from "../services/ingestion/voterPowerSync.service";
 import { applyCronJitter } from "./jitter";
 
 // Simple in-process guard to prevent overlapping runs in a single Node process
 let isVoterPowerSyncRunning = false;
+const JOB_NAME = "voter-power-sync";
+const DISPLAY_NAME = "Voter Power Sync";
 
 /**
  * Starts the voter power sync cron job
@@ -58,8 +61,19 @@ function startVoterPowerSyncJobWithSchedule(schedule: string) {
     await applyCronJitter("[Cron] Voter power sync job");
     const timestamp = new Date().toISOString();
     console.log(`\n[${timestamp}] Starting voter power sync job...`);
+    let acquired = false;
 
     try {
+      acquired = await acquireJobLock(JOB_NAME, DISPLAY_NAME, {
+        source: "cron",
+      });
+      if (!acquired) {
+        console.log(
+          `[${timestamp}] Voter power sync skipped because another instance already holds the DB lock.`
+        );
+        return;
+      }
+
       const results = await syncAllVoterVotingPower(prisma);
 
       console.log(
@@ -103,11 +117,32 @@ function startVoterPowerSyncJobWithSchedule(schedule: string) {
           ccError.message
         );
       }
+
+      await releaseJobLock(
+        JOB_NAME,
+        "success",
+        results.dreps.updated + results.spos.updated
+      );
     } catch (error: any) {
       console.error(
         `[${timestamp}] Voter power sync job failed:`,
         error.message
       );
+      if (acquired) {
+        try {
+          await releaseJobLock(
+            JOB_NAME,
+            "failed",
+            0,
+            error?.message ?? "Unknown error"
+          );
+        } catch (releaseError: any) {
+          console.error(
+            `[${timestamp}] Failed to release voter power sync lock:`,
+            releaseError?.message ?? releaseError
+          );
+        }
+      }
     } finally {
       isVoterPowerSyncRunning = false;
     }
