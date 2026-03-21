@@ -22,6 +22,8 @@ export interface RetryAttemptContext {
 
 export interface RetryHooks {
   onRetry?: (context: RetryAttemptContext) => void;
+  /** Called before each attempt with the zero-based attempt number. */
+  onBeforeAttempt?: (attempt: number) => void;
 }
 
 /**
@@ -67,6 +69,7 @@ export async function withRetry<T>(
 
   for (let attempt = 0; attempt <= options.maxRetries; attempt++) {
     try {
+      hooks?.onBeforeAttempt?.(attempt);
       return await operation();
     } catch (error: any) {
       lastError = error;

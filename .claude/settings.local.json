@@ -36,7 +36,12 @@
       "mcp__cgov-api-project__get_deployment_info",
       "mcp__cgov-api-project__search_project_knowledge",
       "Bash(curl:*)",
-      "Bash(gh issue view:*)"
+      "Bash(gh issue view:*)",
+      "Bash(xargs grep:*)",
+      "Bash(grep -B 3 -A 3 \"$transaction\" /c/Users/andru/Documents/GitHub/cgov-api/src/services/ingestion/delegation-sync.service.ts)",
+      "Bash(grep -rn \"update_tx_hash\\\\|cert_index\\\\|block_time\\\\|\\\\.action\\\\|\\\\.deposit\" /c/Users/andru/Documents/GitHub/cgov-api/src/services/ingestion/ --include=*.ts)",
+      "Bash(grep -rn select= /c/Users/andru/Documents/GitHub/cgov-api/src/services/ --include=*.ts)",
+      "Bash(grep -n \"DREP_INFO_SYNC_SCHEDULE\\\\|DREP_DELEGATOR_SYNC_SCHEDULE\\\\|DREP_INVENTORY_SYNC_SCHEDULE\" \"c:/Users/andru/Documents/GitHub/cgov-api/src/jobs/\"*.ts)"
     ],
     "deny": []
   },
