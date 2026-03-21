@@ -23,24 +23,20 @@ export interface NCLYearData {
 }
 
 /**
- * Sum enacted treasury withdrawal amounts from proposal metadata JSON.
- * Reads metadata.body.onChain.withdrawals[].withdrawalAmount.
+ * Sum enacted treasury withdrawal amounts using the withdrawal_amount column.
  */
 async function calcNCLCurrentFromDB(fromEpoch: number, toEpoch?: number): Promise<bigint> {
   const toEpochClause =
     typeof toEpoch === "number"
-      ? Prisma.sql`AND p.enacted_epoch < ${toEpoch}`
+      ? Prisma.sql`AND enacted_epoch < ${toEpoch}`
       : Prisma.empty;
 
   const rows = await prisma.$queryRaw<Array<{ total: bigint | null }>>`
-    SELECT COALESCE(SUM((w->>'withdrawalAmount')::bigint), 0) AS total
-    FROM proposal p
-    CROSS JOIN LATERAL jsonb_array_elements(
-      COALESCE(p.metadata::jsonb->'body'->'onChain'->'withdrawals', '[]'::jsonb)
-    ) w
-    WHERE p.governance_action_type = 'TREASURY_WITHDRAWALS'
-      AND p.status = 'ENACTED'
-      AND p.enacted_epoch >= ${fromEpoch}
+    SELECT COALESCE(SUM(withdrawal_amount), 0) AS total
+    FROM proposal
+    WHERE governance_action_type = 'TREASURY_WITHDRAWALS'
+      AND status = 'ENACTED'
+      AND enacted_epoch >= ${fromEpoch}
       ${toEpochClause}
   `;
 

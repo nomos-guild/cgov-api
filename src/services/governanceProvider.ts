@@ -48,6 +48,20 @@ export interface TxInfoBatchOptions extends GovernanceProviderOptions {
 const KOIOS_DREP_UPDATES_PAGE_SIZE = 1000;
 const KOIOS_POOL_GROUPS_PAGE_SIZE = 1000;
 
+// Delay between paginated pages to stay under Koios burst limits (100 req/10s).
+const KOIOS_DREP_DELEGATORS_PAGE_DELAY_MS = parseInt(
+  process.env.KOIOS_DREP_DELEGATORS_PAGE_DELAY_MS || "300",
+  10
+);
+const KOIOS_DREP_UPDATES_PAGE_DELAY_MS = parseInt(
+  process.env.KOIOS_DREP_UPDATES_PAGE_DELAY_MS || "150",
+  10
+);
+const KOIOS_DEFAULT_PAGE_DELAY_MS = parseInt(
+  process.env.KOIOS_DEFAULT_PAGE_DELAY_MS || "100",
+  10
+);
+
 function toKoiosContext(
   options?: GovernanceProviderOptions
 ): KoiosRequestContext | undefined {
@@ -59,13 +73,21 @@ function toKoiosContext(
 
 async function collectPaginated<T>(options: {
   pageSize: number;
+  delayMs?: number;
   fetchPage: (params: { offset: number; limit: number }) => Promise<T[]>;
 }): Promise<T[]> {
   const rows: T[] = [];
   let offset = 0;
   let hasMore = true;
+  let isFirstPage = true;
 
   while (hasMore) {
+    // Delay between pages to avoid burst-limit pressure on Koios.
+    if (!isFirstPage && options.delayMs && options.delayMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, options.delayMs));
+    }
+    isFirstPage = false;
+
     const page = await options.fetchPage({
       offset,
       limit: options.pageSize,
@@ -332,7 +354,7 @@ export async function listDrepDelegators(options: {
 
   return koiosGet<KoiosDrepDelegator[]>(
     "/drep_delegators",
-    params,
+    { ...params, select: "stake_address,amount,epoch_no" },
     toKoiosContext(options)
   );
 }
@@ -344,6 +366,7 @@ export async function listAllDrepDelegators(options: {
 }): Promise<KoiosDrepDelegator[]> {
   return collectPaginated({
     pageSize: KOIOS_DREP_DELEGATORS_PAGE_SIZE,
+    delayMs: KOIOS_DREP_DELEGATORS_PAGE_DELAY_MS,
     fetchPage: ({ offset, limit }) =>
       listDrepDelegators({
         ...options,
@@ -399,6 +422,7 @@ export async function listAllDrepIds(
 ): Promise<string[]> {
   const rows = await collectPaginated({
     pageSize: KOIOS_DREP_LIST_PAGE_SIZE,
+    delayMs: KOIOS_DEFAULT_PAGE_DELAY_MS,
     fetchPage: ({ offset, limit }) =>
       listDreps({
         offset,
@@ -424,6 +448,7 @@ export async function listDrepUpdates(options: {
       _drep_id: options.drepId,
       limit: options.limit ?? KOIOS_DREP_UPDATES_PAGE_SIZE,
       offset: options.offset ?? 0,
+      select: "drep_id,action,block_time,update_tx_hash",
     },
     toKoiosContext(options)
   );
@@ -435,6 +460,7 @@ export async function listAllDrepUpdates(
 ): Promise<KoiosDrepUpdate[]> {
   return collectPaginated({
     pageSize: KOIOS_DREP_UPDATES_PAGE_SIZE,
+    delayMs: KOIOS_DREP_UPDATES_PAGE_DELAY_MS,
     fetchPage: ({ offset, limit }) =>
       listDrepUpdates({
         drepId,
@@ -451,7 +477,7 @@ export async function getDrepUpdates(
 ): Promise<KoiosDrepUpdate[]> {
   return koiosGet<KoiosDrepUpdate[]>(
     "/drep_updates",
-    { _drep_id: drepId },
+    { _drep_id: drepId, select: "drep_id,action,block_time,update_tx_hash" },
     toKoiosContext(options)
   );
 }
@@ -580,6 +606,7 @@ export async function listAllPoolGroups(
 ): Promise<KoiosPoolGroup[]> {
   return collectPaginated({
     pageSize: KOIOS_POOL_GROUPS_PAGE_SIZE,
+    delayMs: KOIOS_DEFAULT_PAGE_DELAY_MS,
     fetchPage: ({ offset, limit }) =>
       listPoolGroups({
         offset,

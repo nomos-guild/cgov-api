@@ -107,7 +107,7 @@ async function fetchMetadataFromUrl(
     };
 
     if (!retryMetaUrlFetch) {
-      return fetchOnce();
+      return await fetchOnce();
     }
 
     return withRetry(fetchOnce, {

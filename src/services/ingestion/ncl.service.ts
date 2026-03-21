@@ -334,6 +334,7 @@ export async function calculateNCLFromDatabase(year: number): Promise<{
       id: true,
       proposalId: true,
       metadata: true,
+      withdrawalAmount: true,
       ratifiedEpoch: true,
       enactedEpoch: true,
     },
@@ -342,15 +343,15 @@ export async function calculateNCLFromDatabase(year: number): Promise<{
   let totalLovelace = BigInt(0);
 
   for (const proposal of treasuryProposals) {
+    let proposalAmount = BigInt(0);
+
     if (proposal.metadata) {
       try {
         const metadata = JSON.parse(proposal.metadata);
-        // The withdrawal array might be stored in the metadata
-        // Structure depends on how Koios provides it
         if (metadata.withdrawal && Array.isArray(metadata.withdrawal)) {
           for (const withdrawal of metadata.withdrawal) {
             if (withdrawal.amount) {
-              totalLovelace += BigInt(withdrawal.amount);
+              proposalAmount += BigInt(withdrawal.amount);
             }
           }
         }
@@ -358,6 +359,13 @@ export async function calculateNCLFromDatabase(year: number): Promise<{
         console.warn(`[NCL] Failed to parse metadata for proposal ${proposal.proposalId}`);
       }
     }
+
+    // Fallback to the withdrawalAmount column if metadata yielded nothing
+    if (proposalAmount === BigInt(0) && proposal.withdrawalAmount) {
+      proposalAmount = proposal.withdrawalAmount;
+    }
+
+    totalLovelace += proposalAmount;
   }
 
   return {
