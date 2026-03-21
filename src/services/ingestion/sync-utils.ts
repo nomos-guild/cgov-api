@@ -4,6 +4,7 @@
 
 import { koiosGet } from "../koios";
 import type { KoiosTip } from "../../types/koios.types";
+import { getBoundedIntEnv } from "./syncLock";
 export {
   extractBooleanField,
   extractStringField,
@@ -27,7 +28,12 @@ export const KOIOS_TX_INFO_BATCH_SIZE = 10;
 export const DREP_DELEGATOR_MIN_VOTING_POWER = BigInt(0);
 export const DREP_DELEGATION_SYNC_CONCURRENCY = 2;
 export const DREP_DELEGATION_DB_UPDATE_CONCURRENCY = 10;
-export const DREP_INFO_SYNC_CONCURRENCY = 5;
+export const DREP_INFO_SYNC_CONCURRENCY = getBoundedIntEnv(
+  "DREP_INFO_SYNC_CONCURRENCY",
+  2,
+  1,
+  20
+);
 export const DREP_LIFECYCLE_SYNC_CONCURRENCY = 5;
 export const POOL_GROUPS_DB_UPDATE_CONCURRENCY = 10;
 export const EPOCH_TOTALS_BACKFILL_CONCURRENCY = 2;
