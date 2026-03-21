@@ -2,11 +2,12 @@ import { Request, Response } from "express";
 import { VoterType } from "@prisma/client";
 import { prisma } from "../../services";
 import { koiosGet } from "../../services/koios";
-import { KoiosCommitteeInfo, KoiosTip } from "../../types/koios.types";
+import { KoiosCommitteeInfo } from "../../types/koios.types";
 import {
   GetCCParticipationResponse,
   CCMemberParticipation,
 } from "../../responses/analytics.response";
+import { getKoiosCurrentEpoch } from "../../services/ingestion/sync-utils";
 
 type KoiosCcMemberInfo = {
   status: "authorized" | "resigned";
@@ -49,11 +50,13 @@ export const getCCParticipation = async (req: Request, res: Response) => {
     let koiosMemberInfoByHotId: Map<string, KoiosCcMemberInfo> | null = null;
     try {
       const [committeeInfo, tip] = await Promise.all([
-        koiosGet<KoiosCommitteeInfo[]>("/committee_info"),
-        koiosGet<KoiosTip[]>("/tip"),
+        koiosGet<KoiosCommitteeInfo[]>("/committee_info", undefined, {
+          source: "analytics.cc-participation.committee-info",
+        }),
+        getKoiosCurrentEpoch(),
       ]);
 
-      currentEpoch = tip?.[0]?.epoch_no ?? 0;
+      currentEpoch = tip;
       const members = committeeInfo?.[0]?.members ?? [];
 
       const normalizedMembers: KoiosCcMemberInfo[] = members.map((m) => ({

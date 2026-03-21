@@ -8,9 +8,12 @@
 import cron from "node-cron";
 import { prisma } from "../services";
 import { syncPoolGroupsStep } from "../services/ingestion/epoch-analytics.service";
+import { acquireJobLock, releaseJobLock } from "../services/ingestion/syncLock";
 import { applyCronJitter } from "./jitter";
 
 let isRunning = false;
+const JOB_NAME = "pool-groups-sync";
+const DISPLAY_NAME = "Pool Groups Sync";
 
 export const startPoolGroupsSyncJob = () => {
   const schedule = process.env.POOL_GROUPS_SYNC_SCHEDULE || "47 * * * *";
@@ -48,8 +51,19 @@ function startPoolGroupsSyncJobWithSchedule(schedule: string) {
     const timestamp = new Date().toISOString();
     const startedAt = Date.now();
     console.log(`\n[${timestamp}] Starting pool groups sync job...`);
+    let acquired = false;
 
     try {
+      acquired = await acquireJobLock(JOB_NAME, DISPLAY_NAME, {
+        source: "cron",
+      });
+      if (!acquired) {
+        console.log(
+          `[${timestamp}] Pool groups sync skipped because another instance already holds the DB lock.`
+        );
+        return;
+      }
+
       const result = await syncPoolGroupsStep(prisma);
 
       console.log(
@@ -63,11 +77,32 @@ function startPoolGroupsSyncJobWithSchedule(schedule: string) {
       } else {
         console.log(`  Pool Groups: skipped=${result.skipped}`);
       }
+
+      await releaseJobLock(
+        JOB_NAME,
+        "success",
+        (result.poolGroups?.created ?? 0) + (result.poolGroups?.updated ?? 0)
+      );
     } catch (error: any) {
       console.error(
         `[${timestamp}] Pool groups sync job failed:`,
         error?.message ?? String(error)
       );
+      if (acquired) {
+        try {
+          await releaseJobLock(
+            JOB_NAME,
+            "failed",
+            0,
+            error?.message ?? String(error)
+          );
+        } catch (releaseError: any) {
+          console.error(
+            `[${timestamp}] Failed to release pool groups sync lock:`,
+            releaseError?.message ?? releaseError
+          );
+        }
+      }
     } finally {
       const durationSeconds = ((Date.now() - startedAt) / 1000).toFixed(1);
       const finishedTimestamp = new Date().toISOString();

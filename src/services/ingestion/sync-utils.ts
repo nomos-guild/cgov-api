@@ -4,7 +4,10 @@
 
 import { koiosGet } from "../koios";
 import type { KoiosTip } from "../../types/koios.types";
-import { withRetry } from "./utils";
+export {
+  extractBooleanField,
+  extractStringField,
+} from "./koiosNormalizers";
 
 // ============================================================
 // Constants
@@ -32,6 +35,7 @@ export const STAKE_DELEGATION_SYNC_STATE_ID = "current";
 export const DREP_DELEGATION_BACKFILL_JOB_NAME = "drep-delegation-backfill";
 export const FORCE_DREP_DELEGATION_BACKFILL_JOB_NAME = "drep-delegation-backfill-force";
 export const DREP_DELEGATION_PHASE3_JOB_NAME = "drep-delegation-phase3";
+const KOIOS_CURRENT_EPOCH_CACHE_TTL_MS = 5_000;
 
 // ============================================================
 // Type Helpers
@@ -47,41 +51,6 @@ export function toBigIntOrNull(value: string | null | undefined): bigint | null 
   } catch {
     return null;
   }
-}
-
-/**
- * Normalises Koios metadata fields that can be returned as plain strings
- * or as objects of the form `{ "@value": "..." }`.
- */
-export function extractStringField(value: unknown): string | undefined {
-  if (value == null) return undefined;
-  if (typeof value === "string") return value;
-  if (typeof value === "object") {
-    const withValue = value as { [key: string]: unknown };
-    const candidate = (withValue["@value"] ?? withValue["value"]) as unknown;
-    if (typeof candidate === "string") return candidate;
-  }
-  return undefined;
-}
-
-/**
- * Normalises Koios boolean-like metadata fields.
- */
-export function extractBooleanField(value: unknown): boolean | undefined {
-  if (value == null) return undefined;
-  if (typeof value === "boolean") return value;
-  if (typeof value === "string") {
-    const normalised = value.trim().toLowerCase();
-    if (normalised === "true") return true;
-    if (normalised === "false") return false;
-    return undefined;
-  }
-  if (typeof value === "object") {
-    const withValue = value as { [key: string]: unknown };
-    const candidate = withValue["@value"] ?? withValue["value"];
-    return extractBooleanField(candidate);
-  }
-  return undefined;
 }
 
 /**
@@ -102,14 +71,41 @@ export function chunkArray<T>(items: T[], chunkSize: number): T[][] {
 /**
  * Gets the current epoch number from Koios.
  */
+let cachedKoiosCurrentEpoch: number | null = null;
+let cachedKoiosCurrentEpochExpiresAt = 0;
+let inFlightKoiosCurrentEpoch: Promise<number> | null = null;
+
 export async function getKoiosCurrentEpoch(): Promise<number> {
-  const tip = await withRetry(() =>
-    koiosGet<KoiosTip[]>("/tip", undefined, {
+  const now = Date.now();
+  if (
+    cachedKoiosCurrentEpoch !== null &&
+    cachedKoiosCurrentEpochExpiresAt > now
+  ) {
+    return cachedKoiosCurrentEpoch;
+  }
+
+  if (inFlightKoiosCurrentEpoch) {
+    return inFlightKoiosCurrentEpoch;
+  }
+
+  inFlightKoiosCurrentEpoch = koiosGet<KoiosTip[]>("/tip", undefined, {
       source: "ingestion.sync-utils.current-epoch",
     })
-  );
-  return tip?.[0]?.epoch_no ?? 0;
+    .then((tip) => {
+      const epoch = tip?.[0]?.epoch_no ?? 0;
+      cachedKoiosCurrentEpoch = epoch;
+      cachedKoiosCurrentEpochExpiresAt =
+        Date.now() + KOIOS_CURRENT_EPOCH_CACHE_TTL_MS;
+      return epoch;
+    })
+    .finally(() => {
+      inFlightKoiosCurrentEpoch = null;
+    });
+
+  return inFlightKoiosCurrentEpoch;
 }
+
+export const getCurrentEpoch = getKoiosCurrentEpoch;
 
 // ============================================================
 // Checkpoint Types

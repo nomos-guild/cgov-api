@@ -9,9 +9,12 @@
 import cron from "node-cron";
 import { prisma } from "../services";
 import { syncDrepInventoryStep } from "../services/ingestion/epoch-analytics.service";
+import { acquireJobLock, releaseJobLock } from "../services/ingestion/syncLock";
 import { applyCronJitter } from "./jitter";
 
 let isRunning = false;
+const JOB_NAME = "drep-inventory-sync";
+const DISPLAY_NAME = "DRep Inventory Sync";
 
 export const startDrepInventorySyncJob = () => {
   const schedule = process.env.DREP_INVENTORY_SYNC_SCHEDULE || "2 * * * *";
@@ -49,8 +52,19 @@ function startDrepInventorySyncJobWithSchedule(schedule: string) {
     const timestamp = new Date().toISOString();
     const startedAt = Date.now();
     console.log(`\n[${timestamp}] Starting DRep inventory sync job...`);
+    let acquired = false;
 
     try {
+      acquired = await acquireJobLock(JOB_NAME, DISPLAY_NAME, {
+        source: "cron",
+      });
+      if (!acquired) {
+        console.log(
+          `[${timestamp}] DRep inventory sync skipped because another instance already holds the DB lock.`
+        );
+        return;
+      }
+
       const result = await syncDrepInventoryStep(prisma);
 
       console.log(
@@ -72,11 +86,32 @@ function startDrepInventorySyncJobWithSchedule(schedule: string) {
       } else {
         console.log(`  Snapshot: skipped=${result.skippedSnapshot}`);
       }
+
+      await releaseJobLock(
+        JOB_NAME,
+        "success",
+        (result.inventory?.created ?? 0) + (result.snapshot?.snapshotted ?? 0)
+      );
     } catch (error: any) {
       console.error(
         `[${timestamp}] DRep inventory sync job failed:`,
         error?.message ?? String(error)
       );
+      if (acquired) {
+        try {
+          await releaseJobLock(
+            JOB_NAME,
+            "failed",
+            0,
+            error?.message ?? String(error)
+          );
+        } catch (releaseError: any) {
+          console.error(
+            `[${timestamp}] Failed to release DRep inventory sync lock:`,
+            releaseError?.message ?? releaseError
+          );
+        }
+      }
     } finally {
       const durationSeconds = ((Date.now() - startedAt) / 1000).toFixed(1);
       const finishedTimestamp = new Date().toISOString();

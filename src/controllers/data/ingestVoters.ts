@@ -4,7 +4,7 @@ import {
   ingestDrep,
   ingestSpo,
   ingestCc,
-} from "../../services/ingestion/voter.service";
+} from "../../services/ingestion/voterIngestion.service";
 
 /**
  * POST /data/drep/:drep_id

@@ -8,10 +8,23 @@
 import cron from "node-cron";
 import { prisma } from "../services";
 import { syncDrepDelegationChanges } from "../services/ingestion/epoch-analytics.service";
+import {
+  acquireJobLock,
+  getBoundedIntEnv,
+  releaseJobLock,
+} from "../services/ingestion/syncLock";
 import { applyCronJitter } from "./jitter";
 
 // Simple in-process guard to prevent overlapping runs in a single Node process
 let isDrepDelegatorSyncRunning = false;
+const JOB_NAME = "drep-delegator-sync";
+const DISPLAY_NAME = "DRep Delegator Sync";
+const LOCK_TTL_MS = getBoundedIntEnv(
+  "DREP_DELEGATOR_SYNC_LOCK_TTL_MS",
+  30 * 60 * 1000,
+  30_000,
+  60 * 60 * 1000
+);
 
 /**
  * Starts the DRep delegation change sync job.
@@ -55,8 +68,20 @@ function startDrepDelegatorSyncJobWithSchedule(schedule: string) {
     const timestamp = new Date().toISOString();
     const startedAt = Date.now();
     console.log(`\n[${timestamp}] Starting DRep delegation change sync job...`);
+    let acquired = false;
 
     try {
+      acquired = await acquireJobLock(JOB_NAME, DISPLAY_NAME, {
+        ttlMs: LOCK_TTL_MS,
+        source: "cron",
+      });
+      if (!acquired) {
+        console.log(
+          `[${timestamp}] DRep delegation change sync skipped because another instance already holds the DB lock.`
+        );
+        return;
+      }
+
       console.log(`  [DRep Delegation Sync] Starting delegation change sync...`);
       const result = await syncDrepDelegationChanges(prisma);
       console.log(
@@ -68,11 +93,32 @@ function startDrepDelegatorSyncJobWithSchedule(schedule: string) {
           result.failed.slice(0, 10)
         );
       }
+
+      await releaseJobLock(
+        JOB_NAME,
+        "success",
+        result.statesUpdated + result.changesInserted
+      );
     } catch (error: any) {
       console.error(
         `[${timestamp}] DRep delegation change sync job failed:`,
         error?.message ?? String(error)
       );
+      if (acquired) {
+        try {
+          await releaseJobLock(
+            JOB_NAME,
+            "failed",
+            0,
+            error?.message ?? String(error)
+          );
+        } catch (releaseError: any) {
+          console.error(
+            `[${timestamp}] Failed to release DRep delegation change sync lock:`,
+            releaseError?.message ?? releaseError
+          );
+        }
+      }
     } finally {
       const finishedAt = Date.now();
       const durationSeconds = ((finishedAt - startedAt) / 1000).toFixed(1);

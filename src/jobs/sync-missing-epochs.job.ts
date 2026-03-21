@@ -9,9 +9,22 @@
 import cron from "node-cron";
 import { prisma } from "../services";
 import { syncMissingEpochAnalytics } from "../services/ingestion/epoch-analytics.service";
+import {
+  acquireJobLock,
+  getBoundedIntEnv,
+  releaseJobLock,
+} from "../services/ingestion/syncLock";
 import { applyCronJitter } from "./jitter";
 
 let isRunning = false;
+const JOB_NAME = "missing-epochs-sync";
+const DISPLAY_NAME = "Missing Epochs Backfill";
+const LOCK_TTL_MS = getBoundedIntEnv(
+  "MISSING_EPOCHS_SYNC_LOCK_TTL_MS",
+  30 * 60 * 1000,
+  30_000,
+  60 * 60 * 1000
+);
 
 export const startMissingEpochsSyncJob = () => {
   const schedule = process.env.MISSING_EPOCHS_SYNC_SCHEDULE || "5 1,13 * * *";
@@ -49,8 +62,20 @@ function startMissingEpochsSyncJobWithSchedule(schedule: string) {
     const timestamp = new Date().toISOString();
     const startedAt = Date.now();
     console.log(`\n[${timestamp}] Starting missing epochs backfill job...`);
+    let acquired = false;
 
     try {
+      acquired = await acquireJobLock(JOB_NAME, DISPLAY_NAME, {
+        ttlMs: LOCK_TTL_MS,
+        source: "cron",
+      });
+      if (!acquired) {
+        console.log(
+          `[${timestamp}] Missing epochs backfill skipped because another instance already holds the DB lock.`
+        );
+        return;
+      }
+
       const backfill = await syncMissingEpochAnalytics(prisma);
 
       console.log(
@@ -65,11 +90,32 @@ function startMissingEpochsSyncJobWithSchedule(schedule: string) {
           backfill.totals.failed.slice(0, 10)
         );
       }
+
+      await releaseJobLock(
+        JOB_NAME,
+        "success",
+        backfill.totals.synced.length
+      );
     } catch (error: any) {
       console.error(
         `[${timestamp}] Missing epochs backfill job failed:`,
         error?.message ?? String(error)
       );
+      if (acquired) {
+        try {
+          await releaseJobLock(
+            JOB_NAME,
+            "failed",
+            0,
+            error?.message ?? String(error)
+          );
+        } catch (releaseError: any) {
+          console.error(
+            `[${timestamp}] Failed to release missing epochs backfill lock:`,
+            releaseError?.message ?? releaseError
+          );
+        }
+      }
     } finally {
       const durationSeconds = ((Date.now() - startedAt) / 1000).toFixed(1);
       const finishedTimestamp = new Date().toISOString();

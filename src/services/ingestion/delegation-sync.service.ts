@@ -6,7 +6,11 @@
  */
 
 import type { Prisma } from "@prisma/client";
-import { koiosGet, koiosPost } from "../koios";
+import {
+  getAccountUpdateHistoryBatch,
+  getTxInfoBatch,
+  listAllDrepDelegators,
+} from "../governanceProvider";
 import type {
   KoiosDrepDelegator,
   KoiosAccountUpdateHistoryEntry,
@@ -14,7 +18,6 @@ import type {
 } from "../../types/koios.types";
 import { processInParallel } from "./parallel";
 import {
-  KOIOS_DREP_DELEGATORS_PAGE_SIZE,
   DREP_DELEGATOR_MIN_VOTING_POWER,
   DREP_DELEGATION_SYNC_CONCURRENCY,
   DREP_DELEGATION_DB_UPDATE_CONCURRENCY,
@@ -23,8 +26,6 @@ import {
   FORCE_DREP_DELEGATION_BACKFILL_JOB_NAME,
   DREP_DELEGATION_PHASE3_JOB_NAME,
   KOIOS_ACCOUNT_UPDATE_HISTORY_BATCH_SIZE,
-  KOIOS_ACCOUNT_UPDATE_HISTORY_PAGE_SIZE,
-  KOIOS_TX_INFO_BATCH_SIZE,
   chunkArray,
   getKoiosCurrentEpoch,
   Phase3Checkpoint,
@@ -55,30 +56,10 @@ export interface SyncDrepDelegationChangesResult {
 // ============================================================
 
 async function fetchDelegatorsForDrep(drepId: string): Promise<KoiosDrepDelegator[]> {
-  const pageSize = KOIOS_DREP_DELEGATORS_PAGE_SIZE;
-  let offset = 0;
-  let hasMore = true;
-  const rows: KoiosDrepDelegator[] = [];
-
-  while (hasMore) {
-    const page = await koiosGet<KoiosDrepDelegator[]>("/drep_delegators", {
-      _drep_id: drepId,
-      limit: pageSize,
-      offset,
-    }, {
-      source: "ingestion.delegation-sync.fetch-delegators",
-    });
-
-    if (page && page.length > 0) {
-      rows.push(...page);
-      offset += page.length;
-      hasMore = page.length === pageSize;
-    } else {
-      hasMore = false;
-    }
-  }
-
-  return rows;
+  return listAllDrepDelegators({
+    drepId,
+    source: "ingestion.delegation-sync.fetch-delegators",
+  });
 }
 
 function extractDelegatedDrepId(entry: KoiosAccountUpdateHistoryEntry): string | null {
@@ -166,32 +147,16 @@ async function fetchAccountUpdateHistoryForStakes(
   const result = new Map<string, KoiosAccountUpdateHistoryEntry[]>();
   if (stakeAddresses.length === 0) return result;
 
-  const pageSize = KOIOS_ACCOUNT_UPDATE_HISTORY_PAGE_SIZE;
-  let offset = 0;
-  let hasMore = true;
+  const rows = await getAccountUpdateHistoryBatch(stakeAddresses, {
+    source: "ingestion.delegation-sync.account-update-history",
+  });
 
-  // Koios (PostgREST) endpoints cap responses to max 1000; we page explicitly.
-  // When batching stake addresses, paging applies to the combined result set.
-  while (hasMore) {
-    const page = await koiosPost<KoiosAccountUpdateHistoryEntry[]>(
-      `/account_update_history?offset=${offset}&limit=${pageSize}`,
-      { _stake_addresses: stakeAddresses },
-      { source: "ingestion.delegation-sync.account-update-history" }
-    );
-
-    if (Array.isArray(page) && page.length > 0) {
-      for (const row of page) {
-        const stakeAddress = row?.stake_address;
-        if (typeof stakeAddress !== "string" || !stakeAddress) continue;
-        const existing = result.get(stakeAddress);
-        if (existing) existing.push(row);
-        else result.set(stakeAddress, [row]);
-      }
-      offset += page.length;
-      hasMore = page.length === pageSize;
-    } else {
-      hasMore = false;
-    }
+  for (const row of rows) {
+    const stakeAddress = row?.stake_address;
+    if (typeof stakeAddress !== "string" || !stakeAddress) continue;
+    const existing = result.get(stakeAddress);
+    if (existing) existing.push(row);
+    else result.set(stakeAddress, [row]);
   }
 
   return result;
@@ -239,30 +204,16 @@ function extractVoteDelegationDrepIdFromTxInfo(
 async function fetchTxInfoByHashes(txHashes: string[]): Promise<KoiosTxInfo[]> {
   if (txHashes.length === 0) return [];
 
-  // Keep request bodies small to avoid Koios payload limits.
-  const unique = Array.from(new Set(txHashes));
-  const batches = chunkArray(unique, KOIOS_TX_INFO_BATCH_SIZE);
-  const results: KoiosTxInfo[] = [];
-
-  for (const batch of batches) {
-    const page = await koiosPost<KoiosTxInfo[]>("/tx_info", {
-      _tx_hashes: batch,
-      _inputs: false,
-      _metadata: false,
-      _assets: false,
-      _withdrawals: false,
-      _certs: true,
-      _scripts: false,
-      _bytecode: false,
-    }, {
-      source: "ingestion.delegation-sync.tx-info",
-    });
-    if (Array.isArray(page) && page.length > 0) {
-      results.push(...page);
-    }
-  }
-
-  return results;
+  return getTxInfoBatch(txHashes, {
+    includeInputs: false,
+    includeMetadata: false,
+    includeAssets: false,
+    includeWithdrawals: false,
+    includeCerts: true,
+    includeScripts: false,
+    includeBytecode: false,
+    source: "ingestion.delegation-sync.tx-info",
+  });
 }
 
 async function backfillStakeDelegationHistory(

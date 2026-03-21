@@ -1,10 +1,10 @@
 import { Request, Response } from "express";
 import { syncPoolGroupsStep } from "../../services/ingestion/epoch-analytics.service";
 import { prisma } from "../../services";
+import { acquireJobLock, releaseJobLock } from "../../services/ingestion/syncLock";
 
 const JOB_NAME = "pool-groups-sync";
 const DISPLAY_NAME = "Pool Groups Sync";
-const LOCK_EXPIRY_MS = 15 * 60 * 1000; // 15 minutes
 
 /**
  * POST /data/trigger-pool-groups-sync
@@ -16,24 +16,11 @@ export const postTriggerPoolGroupsSync = async (
   _req: Request,
   res: Response
 ) => {
-  const now = new Date();
+  let acquired = false;
 
   try {
-    const acquired = await prisma.$transaction(async (tx) => {
-      await tx.syncStatus.updateMany({
-        where: { jobName: JOB_NAME, isRunning: true, expiresAt: { lt: now } },
-        data: { isRunning: false, lastResult: "expired", errorMessage: "Lock expired - previous run may have crashed" },
-      });
-
-      const status = await tx.syncStatus.findUnique({ where: { jobName: JOB_NAME } });
-      if (status?.isRunning) return false;
-
-      await tx.syncStatus.upsert({
-        where: { jobName: JOB_NAME },
-        create: { jobName: JOB_NAME, displayName: DISPLAY_NAME, isRunning: true, startedAt: now, expiresAt: new Date(now.getTime() + LOCK_EXPIRY_MS), lockedBy: process.env.HOSTNAME || "api-instance" },
-        update: { isRunning: true, startedAt: now, expiresAt: new Date(now.getTime() + LOCK_EXPIRY_MS), lockedBy: process.env.HOSTNAME || "api-instance", errorMessage: null },
-      });
-      return true;
+    acquired = await acquireJobLock(JOB_NAME, DISPLAY_NAME, {
+      source: "api-instance",
     });
 
     if (!acquired) {
@@ -48,10 +35,7 @@ export const postTriggerPoolGroupsSync = async (
         const result = await syncPoolGroupsStep(prisma);
         const itemsProcessed = (result.poolGroups?.created ?? 0) + (result.poolGroups?.updated ?? 0);
 
-        await prisma.syncStatus.update({
-          where: { jobName: JOB_NAME },
-          data: { isRunning: false, completedAt: new Date(), lastResult: "success", itemsProcessed, expiresAt: null, errorMessage: null },
-        });
+        await releaseJobLock(JOB_NAME, "success", itemsProcessed);
 
         console.log("[Pool Groups Sync] Completed successfully:", {
           currentEpoch: result.currentEpoch, epochToSync: result.epochToSync, itemsProcessed, skipped: result.skipped,
@@ -60,7 +44,7 @@ export const postTriggerPoolGroupsSync = async (
         console.error("[Pool Groups Sync] Async processing error:", error);
         const errorMessage = error instanceof Error ? error.message : "Unknown error";
         try {
-          await prisma.syncStatus.update({ where: { jobName: JOB_NAME }, data: { isRunning: false, completedAt: new Date(), lastResult: "failed", expiresAt: null, errorMessage } });
+          await releaseJobLock(JOB_NAME, "failed", 0, errorMessage);
         } catch (updateError) {
           console.error("[Pool Groups Sync] Failed to update sync status:", updateError);
         }
@@ -69,13 +53,12 @@ export const postTriggerPoolGroupsSync = async (
   } catch (error) {
     console.error("[Pool Groups Sync] Setup error:", error);
     const errorMessage = error instanceof Error ? error.message : "Unknown error";
-    try {
-      const status = await prisma.syncStatus.findUnique({ where: { jobName: JOB_NAME } });
-      if (status?.isRunning) {
-        await prisma.syncStatus.update({ where: { jobName: JOB_NAME }, data: { isRunning: false, completedAt: new Date(), lastResult: "failed", expiresAt: null, errorMessage } });
+    if (acquired) {
+      try {
+        await releaseJobLock(JOB_NAME, "failed", 0, errorMessage);
+      } catch (updateError) {
+        console.error("[Pool Groups Sync] Failed to update sync status:", updateError);
       }
-    } catch (updateError) {
-      console.error("[Pool Groups Sync] Failed to update sync status:", updateError);
     }
     res.status(500).json({ success: false, error: "Failed to start pool groups sync", message: errorMessage });
   }

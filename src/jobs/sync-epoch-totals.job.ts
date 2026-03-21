@@ -11,9 +11,12 @@
 import cron from "node-cron";
 import { prisma } from "../services";
 import { syncEpochTotalsStep } from "../services/ingestion/epoch-analytics.service";
+import { acquireJobLock, releaseJobLock } from "../services/ingestion/syncLock";
 import { applyCronJitter } from "./jitter";
 
 let isRunning = false;
+const JOB_NAME = "epoch-totals-sync";
+const DISPLAY_NAME = "Epoch Totals Sync";
 
 export const startEpochTotalsSyncJob = () => {
   const schedule = process.env.EPOCH_TOTALS_SYNC_SCHEDULE || "42 * * * *";
@@ -51,8 +54,19 @@ function startEpochTotalsSyncJobWithSchedule(schedule: string) {
     const timestamp = new Date().toISOString();
     const startedAt = Date.now();
     console.log(`\n[${timestamp}] Starting epoch totals sync job...`);
+    let acquired = false;
 
     try {
+      acquired = await acquireJobLock(JOB_NAME, DISPLAY_NAME, {
+        source: "cron",
+      });
+      if (!acquired) {
+        console.log(
+          `[${timestamp}] Epoch totals sync skipped because another instance already holds the DB lock.`
+        );
+        return;
+      }
+
       const result = await syncEpochTotalsStep(prisma);
 
       console.log(
@@ -80,11 +94,32 @@ function startEpochTotalsSyncJobWithSchedule(schedule: string) {
       console.log(
         `  Timestamps (current epoch): startTime=${cur.startTime?.toISOString() ?? "null"}, endTime=${cur.endTime?.toISOString() ?? "null"}, blocks=${cur.blockCount ?? "null"}, txs=${cur.txCount ?? "null"}`
       );
+
+      await releaseJobLock(
+        JOB_NAME,
+        "success",
+        result.skippedPrevious ? 1 : 2
+      );
     } catch (error: any) {
       console.error(
         `[${timestamp}] Epoch totals sync job failed:`,
         error?.message ?? String(error)
       );
+      if (acquired) {
+        try {
+          await releaseJobLock(
+            JOB_NAME,
+            "failed",
+            0,
+            error?.message ?? String(error)
+          );
+        } catch (releaseError: any) {
+          console.error(
+            `[${timestamp}] Failed to release epoch totals sync lock:`,
+            releaseError?.message ?? releaseError
+          );
+        }
+      }
     } finally {
       const durationSeconds = ((Date.now() - startedAt) / 1000).toFixed(1);
       const finishedTimestamp = new Date().toISOString();

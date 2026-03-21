@@ -7,10 +7,12 @@
  */
 
 import type { Prisma } from "@prisma/client";
-import { koiosGet, koiosPost } from "../koios";
-import type { KoiosDrepInfo, KoiosDrepListEntry } from "../../types/koios.types";
 import {
-  KOIOS_DREP_LIST_PAGE_SIZE,
+  getDrepInfoBatchFromKoios,
+  listAllDrepIds,
+  listAllDrepUpdates,
+} from "../governanceProvider";
+import {
   KOIOS_DREP_INFO_BATCH_SIZE,
   DREP_INFO_SYNC_CONCURRENCY,
   toBigIntOrNull,
@@ -46,31 +48,9 @@ export interface SyncDrepInfoResult {
  * Fetches all DRep IDs from Koios /drep_list endpoint.
  */
 async function fetchAllKoiosDrepIds(): Promise<string[]> {
-  const pageSize = KOIOS_DREP_LIST_PAGE_SIZE;
-  let offset = 0;
-  let hasMore = true;
-  const ids: string[] = [];
-
-  while (hasMore) {
-    const page = await koiosGet<KoiosDrepListEntry[]>("/drep_list", {
-      limit: pageSize,
-      offset,
-    }, {
-      source: "ingestion.drep-sync.drep-list",
-    });
-
-    if (page && page.length > 0) {
-      for (const row of page) {
-        if (row?.drep_id) ids.push(row.drep_id);
-      }
-      offset += page.length;
-      hasMore = page.length === pageSize;
-    } else {
-      hasMore = false;
-    }
-  }
-
-  return ids;
+  return listAllDrepIds({
+    source: "ingestion.drep-sync.drep-list",
+  });
 }
 
 /**
@@ -90,25 +70,7 @@ interface DrepMetadata {
 
 async function fetchDrepMetadata(drepId: string): Promise<DrepMetadata> {
   try {
-    const drepUpdates = await koiosGet<
-      Array<{
-        meta_json?: {
-          body?: {
-            givenName?: unknown;
-            paymentAddress?: unknown;
-            doNotList?: unknown;
-            image?: {
-              contentUrl?: unknown;
-            };
-            bio?: unknown;
-            motivations?: unknown;
-            objectives?: unknown;
-            qualifications?: unknown;
-            references?: unknown;
-          };
-        } | null;
-      }>
-    >("/drep_updates", { _drep_id: drepId }, {
+    const drepUpdates = await listAllDrepUpdates(drepId, {
       source: "ingestion.drep-sync.drep-updates",
     });
 
@@ -332,9 +294,7 @@ export async function syncAllDrepsInfo(
   for (let i = 0; i < drepIds.length; i += batchSize) {
     const batch = drepIds.slice(i, i + batchSize);
     try {
-      const infos = await koiosPost<KoiosDrepInfo[]>("/drep_info", {
-        _drep_ids: batch,
-      }, {
+      const infos = await getDrepInfoBatchFromKoios(batch, {
         source: "ingestion.drep-sync.drep-info",
       });
 

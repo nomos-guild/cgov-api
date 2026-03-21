@@ -7,7 +7,7 @@ import {
   proposalWithVotesSelect,
 } from "../../libs/proposalMapper";
 import { syncProposalsOverviewOnRead } from "../../services/syncOnRead";
-import { getCachedEligibleCCInfo } from "../../services/ingestion/voter.service";
+import { getCachedEligibleCCInfo } from "../../services/committeeState.service";
 
 export const getOverviewProposals = async (_req: Request, res: Response) => {
   try {

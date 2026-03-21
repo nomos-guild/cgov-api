@@ -1,10 +1,10 @@
 import { Request, Response } from "express";
-import { syncAllVoterVotingPower } from "../../services/ingestion/voter.service";
+import { syncAllVoterVotingPower } from "../../services/ingestion/voterPowerSync.service";
 import { prisma } from "../../services";
+import { acquireJobLock, releaseJobLock } from "../../services/ingestion/syncLock";
 
 const JOB_NAME = "voter-power-sync";
 const DISPLAY_NAME = "Voter Power Sync";
-const LOCK_EXPIRY_MS = 15 * 60 * 1000; // 15 minutes (matches Cloud Run max timeout)
 
 /**
  * POST /data/trigger-voter-sync
@@ -13,55 +13,12 @@ const LOCK_EXPIRY_MS = 15 * 60 * 1000; // 15 minutes (matches Cloud Run max time
  * Uses database-level locking to prevent concurrent runs
  */
 export const postTriggerVoterSync = async (_req: Request, res: Response) => {
-  const now = new Date();
+  let acquired = false;
 
   try {
     // Try to acquire lock using database transaction
-    const acquired = await prisma.$transaction(async (tx) => {
-      // Clear expired locks (in case previous run crashed)
-      await tx.syncStatus.updateMany({
-        where: {
-          jobName: JOB_NAME,
-          isRunning: true,
-          expiresAt: { lt: now },
-        },
-        data: {
-          isRunning: false,
-          lastResult: "expired",
-          errorMessage: "Lock expired - previous run may have crashed",
-        },
-      });
-
-      // Check if job is already running
-      const status = await tx.syncStatus.findUnique({
-        where: { jobName: JOB_NAME },
-      });
-
-      if (status?.isRunning) {
-        return false;
-      }
-
-      // Acquire lock
-      await tx.syncStatus.upsert({
-        where: { jobName: JOB_NAME },
-        create: {
-          jobName: JOB_NAME,
-          displayName: DISPLAY_NAME,
-          isRunning: true,
-          startedAt: now,
-          expiresAt: new Date(now.getTime() + LOCK_EXPIRY_MS),
-          lockedBy: process.env.HOSTNAME || "api-instance",
-        },
-        update: {
-          isRunning: true,
-          startedAt: now,
-          expiresAt: new Date(now.getTime() + LOCK_EXPIRY_MS),
-          lockedBy: process.env.HOSTNAME || "api-instance",
-          errorMessage: null,
-        },
-      });
-
-      return true;
+    acquired = await acquireJobLock(JOB_NAME, DISPLAY_NAME, {
+      source: "api-instance",
     });
 
     if (!acquired) {
@@ -90,17 +47,11 @@ export const postTriggerVoterSync = async (_req: Request, res: Response) => {
         const results = await syncAllVoterVotingPower(prisma);
 
         // Mark sync as completed
-        await prisma.syncStatus.update({
-          where: { jobName: JOB_NAME },
-          data: {
-            isRunning: false,
-            completedAt: new Date(),
-            lastResult: "success",
-            itemsProcessed: results.dreps.updated + results.spos.updated,
-            expiresAt: null,
-            errorMessage: null,
-          },
-        });
+        await releaseJobLock(
+          JOB_NAME,
+          "success",
+          results.dreps.updated + results.spos.updated
+        );
 
         console.log("[Manual Voter Sync] Completed successfully:", results);
       } catch (error) {
@@ -110,16 +61,7 @@ export const postTriggerVoterSync = async (_req: Request, res: Response) => {
 
         // Mark sync as failed
         try {
-          await prisma.syncStatus.update({
-            where: { jobName: JOB_NAME },
-            data: {
-              isRunning: false,
-              completedAt: new Date(),
-              lastResult: "failed",
-              expiresAt: null,
-              errorMessage: errorMessage,
-            },
-          });
+          await releaseJobLock(JOB_NAME, "failed", 0, errorMessage);
         } catch (updateError) {
           console.error("[Manual Voter Sync] Failed to update sync status:", updateError);
         }
@@ -133,22 +75,12 @@ export const postTriggerVoterSync = async (_req: Request, res: Response) => {
     const errorMessage = error instanceof Error ? error.message : "Unknown error";
 
     // Mark sync as failed (only if lock was acquired)
-    try {
-      const status = await prisma.syncStatus.findUnique({ where: { jobName: JOB_NAME } });
-      if (status?.isRunning) {
-        await prisma.syncStatus.update({
-          where: { jobName: JOB_NAME },
-          data: {
-            isRunning: false,
-            completedAt: new Date(),
-            lastResult: "failed",
-            expiresAt: null,
-            errorMessage: errorMessage,
-          },
-        });
+    if (acquired) {
+      try {
+        await releaseJobLock(JOB_NAME, "failed", 0, errorMessage);
+      } catch (updateError) {
+        console.error("[Manual Voter Sync] Failed to update sync status:", updateError);
       }
-    } catch (updateError) {
-      console.error("[Manual Voter Sync] Failed to update sync status:", updateError);
     }
 
     res.status(500).json({

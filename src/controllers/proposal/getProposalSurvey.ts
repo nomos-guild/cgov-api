@@ -2,7 +2,7 @@ import { Request, Response } from "express";
 import { prisma } from "../../services";
 import { GetProposalSurveyResponse } from "../../responses";
 import { syncProposalDetailsOnRead } from "../../services/syncOnRead";
-import { buildProposalLookup } from "./getProposalDetails";
+import { buildProposalLookup } from "../../services/proposalLookup";
 import {
   emptySurveyPayload,
   normalizeSurveyDetails,

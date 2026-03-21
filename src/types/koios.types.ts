@@ -326,8 +326,11 @@ export interface KoiosTxInfo {
   epoch_no?: number | null;
   epoch_slot?: number | null;
   absolute_slot?: number | null;
+  tx_block_index?: number | null;
   tx_timestamp?: number | null;
   certificates?: KoiosTxInfoCertificate[] | null;
+  voting_procedures?: unknown;
+  proposal_procedures?: unknown;
 }
 
 /**
@@ -371,6 +374,11 @@ export interface KoiosDrepUpdate {
       givenName?: unknown;
       paymentAddress?: unknown;
       doNotList?: unknown;
+      bio?: unknown;
+      motivations?: unknown;
+      objectives?: unknown;
+      qualifications?: unknown;
+      references?: unknown;
       image?: {
         contentUrl?: unknown;
       };
