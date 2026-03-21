@@ -279,17 +279,26 @@ export async function refreshDrepDelegatorCountsFromDelegationState(
 export async function syncAllDrepsInfo(
   prisma: Prisma.TransactionClient
 ): Promise<SyncDrepInfoResult> {
-  // Get all DRep IDs from database
-  const dreps = await prisma.drep.findMany({ select: { drepId: true } });
+  // Get all DRep IDs + existing metaHash/name so we can skip unchanged metadata
+  const dreps = await prisma.drep.findMany({
+    select: { drepId: true, metaHash: true, name: true },
+  });
   const drepIds = dreps.map((d) => d.drepId);
 
   if (drepIds.length === 0) {
     return { totalDreps: 0, updated: 0, failedBatches: 0 };
   }
 
+  // Build lookup of existing state for hash comparison
+  const existingState = new Map(
+    dreps.map((d) => [d.drepId, { metaHash: d.metaHash, name: d.name }])
+  );
+
   const batchSize = KOIOS_DREP_INFO_BATCH_SIZE;
   let updated = 0;
   let failedBatches = 0;
+  let metadataFetched = 0;
+  let metadataSkipped = 0;
 
   for (let i = 0; i < drepIds.length; i += batchSize) {
     const batch = drepIds.slice(i, i + batchSize);
@@ -309,8 +318,20 @@ export async function syncAllDrepsInfo(
         async (info) => {
           if (!info?.drep_id) return null;
 
-          // Fetch metadata from /drep_updates (name, paymentAddr, iconUrl, doNotList)
-          const metadata = await fetchDrepMetadata(info.drep_id);
+          const existing = existingState.get(info.drep_id);
+
+          // Only fetch metadata from /drep_updates if the hash changed or we never fetched it
+          const metadataChanged =
+            info.meta_hash !== existing?.metaHash ||
+            existing?.name == null;
+
+          let metadata: DrepMetadata = {};
+          if (metadataChanged) {
+            metadata = await fetchDrepMetadata(info.drep_id);
+            metadataFetched++;
+          } else {
+            metadataSkipped++;
+          }
 
           await prisma.drep.update({
             where: { drepId: info.drep_id },
@@ -321,7 +342,7 @@ export async function syncAllDrepsInfo(
               expiresEpoch: info.expires_epoch_no ?? undefined,
               metaUrl: info.meta_url ?? undefined,
               metaHash: info.meta_hash ?? undefined,
-              // Metadata from /drep_updates
+              // Metadata from /drep_updates (only when changed)
               ...(metadata.name && { name: metadata.name }),
               ...(metadata.paymentAddr && { paymentAddr: metadata.paymentAddr }),
               ...(metadata.iconUrl && { iconUrl: metadata.iconUrl }),
@@ -351,6 +372,10 @@ export async function syncAllDrepsInfo(
       failedBatches++;
     }
   }
+
+  console.log(
+    `[DRep Sync] Metadata: fetched=${metadataFetched} skipped=${metadataSkipped} (${drepIds.length} total)`
+  );
 
   // Delegator counts come from our StakeDelegationState (Koios does not provide live_delegators)
   await refreshDrepDelegatorCountsFromDelegationState(prisma);

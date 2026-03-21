@@ -448,7 +448,7 @@ export async function listDrepUpdates(options: {
       _drep_id: options.drepId,
       limit: options.limit ?? KOIOS_DREP_UPDATES_PAGE_SIZE,
       offset: options.offset ?? 0,
-      select: "drep_id,action,block_time,update_tx_hash",
+      select: "drep_id,action,block_time,update_tx_hash,meta_json",
     },
     toKoiosContext(options)
   );
