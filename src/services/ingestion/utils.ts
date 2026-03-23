@@ -77,7 +77,11 @@ export async function withRetry<T>(
       const status = error?.response?.status as number | undefined;
 
       // Don't retry on client errors (4xx) or validation errors
-      // EXCEPT 429 (Too Many Requests), which we *do* want to retry with backoff
+      // EXCEPT 429 (Too Many Requests), which we *do* want to retry with backoff.
+      //
+      // 5xx errors (including 503 Service Unavailable and 504 Gateway Timeout)
+      // are intentionally retried — Koios docs explicitly note that queries
+      // exceeding 30 s are returned as 504, and 503 signals transient overload.
       if (
         status &&
         status >= 400 &&

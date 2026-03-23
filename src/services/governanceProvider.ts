@@ -1,6 +1,7 @@
 import {
   getKoiosProposalList,
   koiosGet,
+  koiosGetAll,
   koiosPost,
   type KoiosRequestContext,
 } from "./koios";
@@ -254,61 +255,37 @@ export async function listPoolVotingPowerHistoryForEpoch(options: {
   limit?: number;
   source?: string;
 }): Promise<KoiosSpoVotingPower[]> {
-  const attempts: Array<() => Promise<KoiosSpoVotingPower[]>> = [
-    () =>
-      koiosGet<KoiosSpoVotingPower[]>(
-        "/pool_voting_power_history",
-        {
-          epoch_no: `eq.${options.epochNo}`,
-          order: "pool_id_bech32.asc",
-          limit: options.limit ?? 1000,
-          offset: options.offset ?? 0,
-        },
-        toKoiosContext(options)
-      ),
-    () =>
-      koiosGet<KoiosSpoVotingPower[]>(
-        "/pool_voting_power_history",
-        {
-          epoch_no: `eq.${options.epochNo}`,
-          limit: options.limit ?? 1000,
-          offset: options.offset ?? 0,
-        },
-        toKoiosContext(options)
-      ),
-    () =>
-      koiosGet<KoiosSpoVotingPower[]>(
-        "/pool_voting_power_history",
-        {
-          _epoch_no: options.epochNo,
-          order: "pool_id_bech32.asc",
-          limit: options.limit ?? 1000,
-          offset: options.offset ?? 0,
-        },
-        toKoiosContext(options)
-      ),
-    () =>
-      koiosGet<KoiosSpoVotingPower[]>(
-        "/pool_voting_power_history",
-        {
-          _epoch_no: options.epochNo,
-          limit: options.limit ?? 1000,
-          offset: options.offset ?? 0,
-        },
-        toKoiosContext(options)
-      ),
-  ];
+  return koiosGet<KoiosSpoVotingPower[]>(
+    "/pool_voting_power_history",
+    {
+      _epoch_no: options.epochNo,
+      order: "pool_id_bech32.asc",
+      limit: options.limit ?? 1000,
+      offset: options.offset ?? 0,
+    },
+    toKoiosContext(options)
+  );
+}
 
-  let lastError: unknown;
-  for (const attempt of attempts) {
-    try {
-      return await attempt();
-    } catch (error) {
-      lastError = error;
-    }
-  }
-
-  throw lastError;
+/**
+ * Fetches ALL pool voting power records for an epoch, auto-paginating via
+ * koiosGetAll. Use this instead of listPoolVotingPowerHistoryForEpoch +
+ * a manual while loop.
+ *
+ * Ordering by pool_id_bech32.asc gives deterministic pages so offset-based
+ * pagination never returns duplicates across page boundaries.
+ *
+ * Docs: GET /pool_voting_power_history — params: _epoch_no, _pool_bech32
+ */
+export async function getAllPoolVotingPowerHistoryForEpoch(options: {
+  epochNo: number;
+  source?: string;
+}): Promise<KoiosSpoVotingPower[]> {
+  return koiosGetAll<KoiosSpoVotingPower>(
+    "/pool_voting_power_history",
+    { _epoch_no: options.epochNo, order: "pool_id_bech32.asc" },
+    toKoiosContext(options)
+  );
 }
 
 export async function listDrepVotingPowerHistory(options: {
