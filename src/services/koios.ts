@@ -16,19 +16,34 @@ const KOIOS_REQUEST_TIMEOUT_MS = getBoundedIntEnv(
   120000
 );
 
+// Certain endpoints (e.g. /proposal_voting_summary) are known to be slow.
+// We give them an extra 10 s over the base timeout so the server has time to
+// return a proper 504 rather than racing our client-side cutoff.  Receiving a
+// 504 lets withRetry classify it as a retryable 5xx; a client-side timeout
+// produces status=undefined and a less predictable retry path.
+const KOIOS_SLOW_ENDPOINT_TIMEOUT_MS = getBoundedIntEnv(
+  "KOIOS_SLOW_ENDPOINT_TIMEOUT_MS",
+  KOIOS_REQUEST_TIMEOUT_MS + 10_000,
+  1000,
+  180000
+);
+
 // HTTP Keep-Alive agents to reuse TCP connections and avoid socket pool exhaustion.
-// Socket timeout is always REQUEST_TIMEOUT + 5s to avoid `socket hang up` races.
+// Socket timeout must be >= the longest per-endpoint timeout + 5 s so the OS
+// does not tear down the socket before Axios receives the response.
+const KOIOS_SOCKET_TIMEOUT_MS =
+  Math.max(KOIOS_REQUEST_TIMEOUT_MS, KOIOS_SLOW_ENDPOINT_TIMEOUT_MS) + 5000;
 const httpsAgent = new https.Agent({
   keepAlive: true,
   maxSockets: 15,
   maxFreeSockets: 5,
-  timeout: KOIOS_REQUEST_TIMEOUT_MS + 5000,
+  timeout: KOIOS_SOCKET_TIMEOUT_MS,
 });
 const httpAgent = new http.Agent({
   keepAlive: true,
   maxSockets: 15,
   maxFreeSockets: 5,
-  timeout: KOIOS_REQUEST_TIMEOUT_MS + 5000,
+  timeout: KOIOS_SOCKET_TIMEOUT_MS,
 });
 
 const BASE_URL = process.env.KOIOS_BASE_URL || "https://api.koios.rest/api/v1";
@@ -48,17 +63,6 @@ const KOIOS_RETRY_OPTIONS: RetryOptions = {
     5000
   ),
 };
-const KOIOS_STRICT_TX_METADATA_RETRY_OPTIONS: RetryOptions = {
-  maxRetries: 3,
-  baseDelay: 3000,
-  maxDelay: 30000,
-  non429JitterMaxMs: getBoundedIntEnv(
-    "KOIOS_NON_429_RETRY_JITTER_MAX_MS",
-    250,
-    0,
-    5000
-  ),
-};
 
 const DEFAULT_KOIOS_MAX_CONCURRENT_REQUESTS = 3;
 const DEFAULT_ENDPOINT_MAX_CONCURRENT = 2;
@@ -69,11 +73,12 @@ const KOIOS_429_COOLDOWN_MS = 60_000;
 const DEFAULT_KOIOS_PRESSURE_WINDOW_MS = 60_000;
 const DEFAULT_KOIOS_PRESSURE_THRESHOLD = 10;
 const DEFAULT_KOIOS_PRESSURE_COOLDOWN_MS = 20_000;
+const KOIOS_MAX_PAGE_LIMIT = 1000;
 const KOIOS_PUBLIC_MAX_BODY_BYTES = 1024;
 const KOIOS_REGISTERED_MAX_BODY_BYTES = 5 * 1024;
 const DEFAULT_PROPOSAL_LIST_INTERACTIVE_CACHE_TTL_MS = 5000;
 
-type KoiosRetryProfileName = "default" | "tx_metadata_strict";
+type KoiosRetryProfileName = "default" | "tx_metadata" | "slow_endpoint";
 interface KoiosRetryProfile {
   name: KoiosRetryProfileName;
   retry: RetryOptions;
@@ -338,7 +343,6 @@ const KOIOS_ENDPOINT_LIMITS = new Map<string, number>([
 ]);
 
 const endpointLimiters = new Map<string, ConcurrencyLimiter>();
-const koiosRetryCounters = new Map<string, number>();
 
 function normalizeKoiosEndpoint(url: string): string {
   const rawPath = (() => {
@@ -353,12 +357,26 @@ function normalizeKoiosEndpoint(url: string): string {
   return withoutApiPrefix || withLeadingSlash;
 }
 
+// Endpoints that consistently approach the Koios server-side 30 s deadline.
+// Using KOIOS_SLOW_ENDPOINT_TIMEOUT_MS (default: base + 10 s) ensures the
+// server has time to return a 504 before the client cuts the connection.
+const KOIOS_SLOW_ENDPOINTS = new Set(["/proposal_voting_summary"]);
+
 function getKoiosRetryProfile(url: string): KoiosRetryProfile {
   const endpoint = normalizeKoiosEndpoint(url);
+
+  if (KOIOS_SLOW_ENDPOINTS.has(endpoint)) {
+    return {
+      name: "slow_endpoint",
+      retry: KOIOS_RETRY_OPTIONS,
+      timeoutMs: KOIOS_SLOW_ENDPOINT_TIMEOUT_MS,
+    };
+  }
+
   if (endpoint === "/tx_metadata") {
     return {
-      name: "tx_metadata_strict",
-      retry: KOIOS_STRICT_TX_METADATA_RETRY_OPTIONS,
+      name: "tx_metadata",
+      retry: KOIOS_RETRY_OPTIONS,
       timeoutMs: KOIOS_REQUEST_TIMEOUT_MS,
     };
   }
@@ -370,11 +388,6 @@ function getKoiosRetryProfile(url: string): KoiosRetryProfile {
   };
 }
 
-function incrementRetryCounter(endpoint: string): void {
-  const current = koiosRetryCounters.get(endpoint) ?? 0;
-  koiosRetryCounters.set(endpoint, current + 1);
-}
-
 function onKoiosRetry(
   url: string,
   profileName: KoiosRetryProfileName,
@@ -383,7 +396,6 @@ function onKoiosRetry(
   const endpoint = normalizeKoiosEndpoint(url);
   const source = context?.source ?? "unknown";
   return (context: RetryAttemptContext) => {
-    incrementRetryCounter(endpoint);
     console.warn(
       `[Koios Retry] source=${source} endpoint=${endpoint} profile=${profileName} attempt=${context.attempt}/${context.maxRetries} waitMs=${context.delayMs} status=${context.status ?? "unknown"}`
     );
@@ -509,6 +521,55 @@ export function getKoiosPressureState(): {
   };
 }
 
+/**
+ * Returns a unified snapshot of all Koios limiter health — mirrors
+ * `getRateLimitState()` in the GitHub client. Useful for health-check
+ * endpoints and debugging during ingestion runs.
+ */
+export function getKoiosLimiterState(): {
+  backoffUntil: number;
+  backoffActive: boolean;
+  burstWindowMs: number;
+  burstMaxRequests: number;
+  pressure: ReturnType<typeof getKoiosPressureState>;
+  concurrency: {
+    global: { active: number; pending: number; max: number };
+    endpoints: Record<string, { active: number; pending: number; max: number }>;
+  };
+} {
+  const now = Date.now();
+  const globalStats = globalKoiosLimiter.getStats();
+  const endpoints: Record<
+    string,
+    { active: number; pending: number; max: number }
+  > = {};
+  for (const [name, limiter] of endpointLimiters) {
+    const s = limiter.getStats();
+    endpoints[name] = { active: s.active, pending: s.pending, max: s.max };
+  }
+
+  return {
+    backoffUntil: koiosBackoffUntil,
+    backoffActive: koiosBackoffUntil > now,
+    burstWindowMs: KOIOS_BURST_WINDOW_MS,
+    burstMaxRequests: getBoundedIntEnv(
+      "KOIOS_BURST_MAX_REQUESTS",
+      KOIOS_BURST_MAX_REQUESTS,
+      1,
+      100
+    ),
+    pressure: getKoiosPressureState(),
+    concurrency: {
+      global: {
+        active: globalStats.active,
+        pending: globalStats.pending,
+        max: globalStats.max,
+      },
+      endpoints,
+    },
+  };
+}
+
 function logKoiosLimiterEvent(args: {
   requestId: number;
   endpoint: string;
@@ -562,11 +623,30 @@ async function withKoiosConcurrencyLimit<T>(
   url: string,
   operation: () => Promise<T>
 ): Promise<T> {
+  // Pre-burst checks: wait out any active 429 backoff or pressure cooldown
+  // before entering the burst queue. This prevents callers from stacking up
+  // behind a long backoff and then thundering-herding when it expires.
   const now = Date.now();
   if (koiosBackoffUntil > now) {
     await sleep(koiosBackoffUntil - now);
   }
+  // Task 3: enforce pressure cooldown — mirrors GitHub's waitForRateLimit().
+  const pressureNow = Date.now();
+  if (koiosPressureCooldownUntil > pressureNow) {
+    await sleep(koiosPressureCooldownUntil - pressureNow);
+  }
+
   await globalKoiosBurstLimiter.acquire();
+
+  // Task 4: re-check after burst queue — callers that queued during a backoff
+  // or pressure cooldown must not all fire at once when the burst slot opens.
+  const afterBurst = Date.now();
+  if (koiosBackoffUntil > afterBurst) {
+    await sleep(koiosBackoffUntil - afterBurst);
+  }
+  if (koiosPressureCooldownUntil > afterBurst) {
+    await sleep(koiosPressureCooldownUntil - afterBurst);
+  }
 
   const requestId = nextKoiosRequestId();
   const endpoint = normalizeKoiosEndpoint(url);
@@ -650,7 +730,6 @@ function clampKoiosPaginationLimit(url: string, params?: any): {
   url: string;
   params?: any;
 } {
-  const MAX_PAGE_LIMIT = 1000;
   let nextUrl = url;
   let nextParams = params;
 
@@ -658,8 +737,8 @@ function clampKoiosPaginationLimit(url: string, params?: any): {
     nextParams = { ...params };
     for (const key of ["limit", "_limit"]) {
       const value = Number(nextParams[key]);
-      if (Number.isFinite(value) && value > MAX_PAGE_LIMIT) {
-        nextParams[key] = MAX_PAGE_LIMIT;
+      if (Number.isFinite(value) && value > KOIOS_MAX_PAGE_LIMIT) {
+        nextParams[key] = KOIOS_MAX_PAGE_LIMIT;
       }
     }
   }
@@ -669,8 +748,8 @@ function clampKoiosPaginationLimit(url: string, params?: any): {
     const search = new URLSearchParams(query);
     for (const key of ["limit", "_limit"]) {
       const value = Number(search.get(key));
-      if (Number.isFinite(value) && value > MAX_PAGE_LIMIT) {
-        search.set(key, String(MAX_PAGE_LIMIT));
+      if (Number.isFinite(value) && value > KOIOS_MAX_PAGE_LIMIT) {
+        search.set(key, String(KOIOS_MAX_PAGE_LIMIT));
       }
     }
     nextUrl = `${path}?${search.toString()}`;
@@ -707,9 +786,21 @@ export const getKoiosService = (): AxiosInstance => {
     (response) => response,
     (error) => {
       if (error.response?.status === 429) {
+        // Prefer the server-supplied Retry-After value so the global backoff
+        // reflects the actual penalty period rather than the hardcoded default.
+        const retryAfterHeader =
+          error.response?.headers?.["retry-after"] ??
+          error.response?.headers?.["Retry-After"];
+        const retryAfterSeconds = retryAfterHeader
+          ? parseInt(retryAfterHeader, 10)
+          : NaN;
+        const cooldownMs =
+          !Number.isNaN(retryAfterSeconds) && retryAfterSeconds > 0
+            ? retryAfterSeconds * 1000
+            : KOIOS_429_COOLDOWN_MS;
         koiosBackoffUntil = Math.max(
           koiosBackoffUntil,
-          Date.now() + KOIOS_429_COOLDOWN_MS
+          Date.now() + cooldownMs
         );
       }
       recordKoiosPressureSignal(error);
@@ -727,17 +818,18 @@ export const getKoiosService = (): AxiosInstance => {
   return koiosInstance;
 };
 
-/**
- * Helper function to make GET requests to Koios API with built-in retry logic
- * @param url - The endpoint path (e.g., "/proposal_list")
- * @param params - Optional query parameters
- * @returns The data from the API response
- */
-export async function koiosGet<T>(
+interface KoiosGetResult<T> {
+  data: T;
+  /** Raw Content-Range header value, e.g. "0-999/*", or null when absent. */
+  contentRange: string | null;
+}
+
+/** Internal GET that surfaces both the response data and the Content-Range header. */
+async function koiosGetInternal<T>(
   url: string,
   params?: any,
   context?: KoiosRequestContext
-): Promise<T> {
+): Promise<KoiosGetResult<T>> {
   const koios = getKoiosService();
   const request = clampKoiosPaginationLimit(url, params);
   const retryProfile = getKoiosRetryProfile(request.url);
@@ -754,7 +846,9 @@ export async function koiosGet<T>(
             __koiosSource: source,
           };
           const response = await koios.get<T>(request.url, requestConfig);
-          return response.data;
+          const contentRange =
+            (response.headers?.["content-range"] as string) ?? null;
+          return { data: response.data, contentRange };
         }),
       retryProfile.retry,
       {
@@ -762,12 +856,98 @@ export async function koiosGet<T>(
       }
     );
   } catch (error: any) {
-    const retries = koiosRetryCounters.get(endpoint) ?? 0;
     console.error(
-      `[Koios Request Failed] source=${source} endpoint=${endpoint} profile=${retryProfile.name} timeoutMs=${retryProfile.timeoutMs} retriesSoFar=${retries} message=${error?.message ?? error}`
+      `[Koios Request Failed] source=${source} endpoint=${endpoint} profile=${retryProfile.name} timeoutMs=${retryProfile.timeoutMs} message=${error?.message ?? error}`
     );
     throw error;
   }
+}
+
+/**
+ * Makes a GET request to Koios API with built-in retry and concurrency logic.
+ * For paginated endpoints where you need all records, use `koiosGetAll` instead.
+ */
+export async function koiosGet<T>(
+  url: string,
+  params?: any,
+  context?: KoiosRequestContext
+): Promise<T> {
+  const { data, contentRange } = await koiosGetInternal<T>(url, params, context);
+
+  // Warn only for single-page callers. koiosGetAll handles pagination itself
+  // and never reaches this path, so the warning is never a false positive.
+  if (contentRange) {
+    const match = /^(\d+)-(\d+)\//.exec(contentRange);
+    if (match) {
+      const lower = parseInt(match[1], 10);
+      const upper = parseInt(match[2], 10);
+      if (upper - lower + 1 === KOIOS_MAX_PAGE_LIMIT) {
+        const endpoint = normalizeKoiosEndpoint(url);
+        console.warn(
+          `[Koios Pagination] endpoint=${endpoint} Content-Range=${contentRange} — full page (${KOIOS_MAX_PAGE_LIMIT} items) returned, result may be truncated. Consider using koiosGetAll.`
+        );
+      }
+    }
+  }
+
+  return data;
+}
+
+/**
+ * Auto-paginating GET helper for Koios endpoints that return paginated results.
+ *
+ * Calls the endpoint repeatedly with incrementing `offset` values until a page
+ * returns fewer than `KOIOS_MAX_PAGE_LIMIT` items (or `Content-Range` confirms
+ * the last page), then returns the concatenated result array.
+ *
+ * Mirrors the conceptual model of `buildBatchRepoQuery` in the GitHub client —
+ * callers don't need to manage pagination themselves.
+ */
+export async function koiosGetAll<T>(
+  url: string,
+  params?: any,
+  context?: KoiosRequestContext
+): Promise<T[]> {
+  const results: T[] = [];
+  let offset = 0;
+
+  while (true) {
+    const pageParams = {
+      ...params,
+      limit: KOIOS_MAX_PAGE_LIMIT,
+      offset,
+    };
+    const { data, contentRange } = await koiosGetInternal<T[]>(
+      url,
+      pageParams,
+      context
+    );
+
+    if (Array.isArray(data) && data.length > 0) {
+      results.push(...data);
+    }
+
+    // Use Content-Range to detect the last page when available.
+    if (contentRange) {
+      const match = /^(\d+)-(\d+)\//.exec(contentRange);
+      if (match) {
+        const lower = parseInt(match[1], 10);
+        const upper = parseInt(match[2], 10);
+        if (upper - lower + 1 < KOIOS_MAX_PAGE_LIMIT) {
+          break;
+        }
+      }
+    }
+
+    // Fall back to item count: a short page means no more records.
+    if (!Array.isArray(data) || data.length < KOIOS_MAX_PAGE_LIMIT) {
+      break;
+    }
+
+    offset += KOIOS_MAX_PAGE_LIMIT;
+  }
+
+  return results;
 }
 
 export async function getKoiosProposalList(options?: {
@@ -858,9 +1038,8 @@ export async function koiosPost<T>(
       }
     );
   } catch (error: any) {
-    const retries = koiosRetryCounters.get(endpoint) ?? 0;
     console.error(
-      `[Koios Request Failed] source=${source} endpoint=${endpoint} profile=${retryProfile.name} timeoutMs=${retryProfile.timeoutMs} retriesSoFar=${retries} message=${error?.message ?? error}`
+      `[Koios Request Failed] source=${source} endpoint=${endpoint} profile=${retryProfile.name} timeoutMs=${retryProfile.timeoutMs} message=${error?.message ?? error}`
     );
     throw error;
   }

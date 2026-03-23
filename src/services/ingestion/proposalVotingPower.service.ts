@@ -1,8 +1,8 @@
 import { prisma } from "../prisma";
 import {
+  getAllPoolVotingPowerHistoryForEpoch,
   getDrepEpochSummary,
   getProposalVotingSummary,
-  listPoolVotingPowerHistory,
 } from "../governanceProvider";
 import {
   DREP_INACTIVITY_START_EPOCH,
@@ -57,31 +57,17 @@ async function fetchDrepTotalVotingPower(epochNo: number): Promise<bigint> {
 
 async function fetchSpoTotalVotingPower(epochNo: number): Promise<bigint> {
   try {
+    const pools = await getAllPoolVotingPowerHistoryForEpoch({
+      epochNo,
+      source: "ingestion.proposal.voting-power.pool-history",
+    });
+
     let totalLovelace = BigInt(0);
-    const pageSize = 1000;
-    let offset = 0;
-    let hasMore = true;
     let poolCount = 0;
-
-    while (hasMore) {
-      const poolPowers = await listPoolVotingPowerHistory({
-        epochNo,
-        limit: pageSize,
-        offset,
-        source: "ingestion.proposal.voting-power.pool-history",
-      });
-
-      if (poolPowers && poolPowers.length > 0) {
-        for (const pool of poolPowers) {
-          if (pool.amount) {
-            totalLovelace += BigInt(pool.amount);
-            poolCount++;
-          }
-        }
-        offset += poolPowers.length;
-        hasMore = poolPowers.length === pageSize;
-      } else {
-        hasMore = false;
+    for (const pool of pools) {
+      if (pool.amount) {
+        totalLovelace += BigInt(pool.amount);
+        poolCount++;
       }
     }
 

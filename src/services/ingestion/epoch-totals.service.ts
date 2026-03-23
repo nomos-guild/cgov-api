@@ -11,16 +11,15 @@
 
 import type { Prisma } from "@prisma/client";
 import {
+  getAllPoolVotingPowerHistoryForEpoch,
   getDrepEpochSummary,
   getEpochInfo,
   getTotalsForEpoch,
   listDrepDelegators,
   listDrepVotingPowerHistory,
-  listPoolVotingPowerHistoryForEpoch,
 } from "../governanceProvider";
 import {
   KOIOS_DREP_DELEGATORS_PAGE_SIZE,
-  KOIOS_POOL_VP_PAGE_SIZE,
   toBigIntOrNull,
   getKoiosCurrentEpoch,
   EPOCH_TOTALS_BACKFILL_CONCURRENCY,
@@ -140,49 +139,32 @@ export async function hasIncompleteEpochTotals(
  * Sums pool voting power for a specific epoch from Koios.
  */
 async function sumPoolVotingPowerForEpoch(epochNo: number): Promise<bigint> {
-  const pageSize = KOIOS_POOL_VP_PAGE_SIZE;
-  let offset = 0;
-  let hasMore = true;
-  let total = BigInt(0);
+  const rows = await getAllPoolVotingPowerHistoryForEpoch({
+    epochNo,
+    source: "ingestion.epoch-totals.pool-voting-power",
+  });
 
-  // Defensive: if Koios paging isn't deterministic (no ORDER BY), offset-based paging
-  // can return duplicates between pages. Deduping by pool_id_bech32 prevents
-  // accidental double-counting.
+  let total = BigInt(0);
+  // Dedupe by pool_id_bech32: koiosGetAll uses ORDER BY pool_id_bech32.asc when
+  // available, but guard against any server-side duplicates across page boundaries.
   const seenPoolIds = new Set<string>();
 
-  while (hasMore) {
-    const page = await listPoolVotingPowerHistoryForEpoch({
-      epochNo,
-      limit: pageSize,
-      offset,
-      source: "ingestion.epoch-totals.pool-voting-power",
-    });
+  for (const row of rows) {
+    // Defensive: if the epoch filter is ignored/unsupported, only sum the target epoch.
+    if (row?.epoch_no !== epochNo) continue;
 
-    if (page && page.length > 0) {
-      for (const row of page) {
-        // Defensive: if the epoch filter is ignored/unsupported, only sum the target epoch.
-        if (row?.epoch_no !== epochNo) continue;
+    const poolId = row?.pool_id_bech32;
+    if (typeof poolId === "string" && poolId) {
+      if (seenPoolIds.has(poolId)) continue;
+      seenPoolIds.add(poolId);
+    }
 
-        const poolId = row?.pool_id_bech32;
-        if (typeof poolId === "string" && poolId) {
-          if (seenPoolIds.has(poolId)) {
-            continue;
-          }
-          seenPoolIds.add(poolId);
-        }
-
-        if (row?.amount) {
-          try {
-            total += BigInt(row.amount);
-          } catch {
-            // ignore parse errors
-          }
-        }
+    if (row?.amount) {
+      try {
+        total += BigInt(row.amount);
+      } catch {
+        // ignore parse errors
       }
-      offset += page.length;
-      hasMore = page.length === pageSize;
-    } else {
-      hasMore = false;
     }
   }
 
