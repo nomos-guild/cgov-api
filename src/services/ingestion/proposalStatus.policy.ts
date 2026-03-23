@@ -105,9 +105,18 @@ export function extractTreasuryWithdrawalAmount(
     return null;
   }
 
-  const directAmount = parseLovelaceUnknown(proposal.withdrawal?.amount);
-  if (directAmount !== null) {
-    return directAmount;
+  // Koios returns withdrawal as an array of {amount, stake_address}
+  if (proposal.withdrawal && proposal.withdrawal.length > 0) {
+    let total = BigInt(0);
+    for (const w of proposal.withdrawal) {
+      const parsed = parseLovelaceUnknown(w.amount);
+      if (parsed !== null) {
+        total += parsed;
+      }
+    }
+    if (total > BigInt(0)) {
+      return total;
+    }
   }
 
   const nestedAmounts: bigint[] = [];
