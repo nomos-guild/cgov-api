@@ -1,4 +1,4 @@
-import type { GithubRepository } from "@prisma/client";
+import { Prisma, type GithubRepository } from "@prisma/client";
 import { prisma } from "../prisma";
 import { githubGraphQL, buildBatchRepoQuery, getRateLimitState } from "../github-graphql";
 
@@ -73,6 +73,9 @@ interface RepoActivityData {
 
 const BATCH_SIZE = 5;
 const RECENT_WINDOW_DAYS = 7;
+const DB_BATCH_SIZE = 200;
+const batchedGithubActivityWritesEnabled =
+  process.env.GITHUB_ACTIVITY_BATCHED_DB_WRITES_ENABLED !== "false";
 
 // ─── Sync Entry Points ──────────────────────────────────────────────────────
 
@@ -258,28 +261,79 @@ async function updateDeveloperRepoStats(
     if (e.eventDate > s.lastActiveAt) s.lastActiveAt = e.eventDate;
   }
 
-  for (const [key, s] of map) {
+  if (map.size === 0) return;
+
+  const rows = Array.from(map.entries()).map(([key, stats]) => {
     const [login, ...repoParts] = key.split(":");
-    const repoId = repoParts.join(":");
-    try {
+    return {
+      login,
+      repoId: repoParts.join(":"),
+      commits: stats.commits,
+      prs: stats.prs,
+      lastActiveAt: stats.lastActiveAt,
+    };
+  });
+
+  if (!batchedGithubActivityWritesEnabled) {
+    for (const row of rows) {
       await prisma.developerRepoActivity.upsert({
-        where: { developerLogin_repoId: { developerLogin: login, repoId } },
+        where: {
+          developerLogin_repoId: {
+            developerLogin: row.login,
+            repoId: row.repoId,
+          },
+        },
         create: {
-          developerLogin: login,
-          repoId,
-          totalCommits: s.commits,
-          totalPRs: s.prs,
-          lastActiveAt: s.lastActiveAt,
+          developerLogin: row.login,
+          repoId: row.repoId,
+          totalCommits: row.commits,
+          totalPRs: row.prs,
+          lastActiveAt: row.lastActiveAt,
         },
         update: {
-          totalCommits: { increment: s.commits },
-          totalPRs: { increment: s.prs },
-          lastActiveAt: s.lastActiveAt,
+          totalCommits: { increment: row.commits },
+          totalPRs: { increment: row.prs },
+          lastActiveAt: row.lastActiveAt,
         },
       });
-    } catch {
-      // Developer may not exist yet (race condition with upsertDevelopers)
     }
+    return;
+  }
+
+  for (let i = 0; i < rows.length; i += DB_BATCH_SIZE) {
+    const chunk = rows.slice(i, i + DB_BATCH_SIZE);
+    const values = Prisma.join(
+      chunk.map((row) =>
+        Prisma.sql`(${row.login}, ${row.repoId}, ${row.commits}, ${row.prs}, ${row.lastActiveAt})`
+      )
+    );
+
+    await prisma.$executeRaw`
+      WITH incoming("developer_login", "repo_id", "total_commits", "total_prs", "last_active_at") AS (
+        VALUES ${values}
+      )
+      INSERT INTO "developer_repo_activity" (
+        "developer_login",
+        "repo_id",
+        "total_commits",
+        "total_prs",
+        "last_active_at"
+      )
+      SELECT
+        i."developer_login",
+        i."repo_id",
+        i."total_commits",
+        i."total_prs",
+        i."last_active_at"
+      FROM incoming i
+      INNER JOIN "github_developer" gd
+        ON gd."id" = i."developer_login"
+      ON CONFLICT ("developer_login", "repo_id")
+      DO UPDATE SET
+        "total_commits" = "developer_repo_activity"."total_commits" + EXCLUDED."total_commits",
+        "total_prs" = "developer_repo_activity"."total_prs" + EXCLUDED."total_prs",
+        "last_active_at" = GREATEST("developer_repo_activity"."last_active_at", EXCLUDED."last_active_at")
+    `;
   }
 }
 
@@ -450,25 +504,50 @@ function collectAuthors(
 async function upsertDevelopers(
   authors: Map<string, string | null>
 ): Promise<void> {
+  if (authors.size === 0) return;
   const now = new Date();
-  for (const [login, avatarUrl] of authors) {
-    try {
-      await prisma.githubDeveloper.upsert({
-        where: { id: login },
-        create: {
-          id: login,
-          avatarUrl,
-          firstSeenAt: now,
-          lastSeenAt: now,
-        },
-        update: {
-          avatarUrl,
-          lastSeenAt: now,
+  const rows = Array.from(authors.entries()).map(([login, avatarUrl]) => ({
+    id: login,
+    avatarUrl,
+    firstSeenAt: now,
+    lastSeenAt: now,
+  }));
+
+  await prisma.githubDeveloper.createMany({
+    data: rows,
+    skipDuplicates: true,
+  });
+
+  if (!batchedGithubActivityWritesEnabled) {
+    for (const row of rows) {
+      await prisma.githubDeveloper.update({
+        where: { id: row.id },
+        data: {
+          avatarUrl: row.avatarUrl,
+          lastSeenAt: row.lastSeenAt,
         },
       });
-    } catch {
-      // Non-critical — log and continue
     }
+    return;
+  }
+
+  for (let i = 0; i < rows.length; i += DB_BATCH_SIZE) {
+    const chunk = rows.slice(i, i + DB_BATCH_SIZE);
+    const values = Prisma.join(
+      chunk.map((row) => Prisma.sql`(${row.id}, ${row.avatarUrl}, ${row.lastSeenAt})`)
+    );
+
+    await prisma.$executeRaw`
+      WITH incoming("id", "avatar_url", "last_seen_at") AS (
+        VALUES ${values}
+      )
+      UPDATE "github_developer" gd
+      SET
+        "avatar_url" = incoming."avatar_url",
+        "last_seen_at" = incoming."last_seen_at"
+      FROM incoming
+      WHERE gd."id" = incoming."id"
+    `;
   }
 }
 

@@ -12,6 +12,7 @@ import cron from "node-cron";
 import { prisma } from "../services";
 import { syncEpochTotalsStep } from "../services/ingestion/epoch-analytics.service";
 import { acquireJobLock, releaseJobLock } from "../services/ingestion/syncLock";
+import { shouldSkipForDbPressure } from "./dbPressureGuard";
 import { applyCronJitter } from "./jitter";
 
 let isRunning = false;
@@ -57,6 +58,9 @@ function startEpochTotalsSyncJobWithSchedule(schedule: string) {
     let acquired = false;
 
     try {
+      if (shouldSkipForDbPressure("epoch-totals-sync")) {
+        return;
+      }
       acquired = await acquireJobLock(JOB_NAME, DISPLAY_NAME, {
         source: "cron",
       });

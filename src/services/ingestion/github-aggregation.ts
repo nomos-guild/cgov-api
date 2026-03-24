@@ -1,3 +1,4 @@
+import { Prisma } from "@prisma/client";
 import { prisma } from "../prisma";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -33,6 +34,9 @@ interface GraphEdge {
 
 const graphCache = new Map<number, { data: NetworkGraphData; expiresAt: number }>();
 const GRAPH_TTL_MS = 30 * 60 * 1000; // 30 min
+const DB_BATCH_SIZE = 200;
+const batchedGithubAggregationWritesEnabled =
+  process.env.GITHUB_AGGREGATION_BATCHED_DB_WRITES_ENABLED !== "false";
 
 export function getCachedGraph(rangeDays: number): NetworkGraphData | null {
   const entry = graphCache.get(rangeDays);
@@ -128,36 +132,74 @@ export async function aggregateRecentToHistorical(): Promise<AggregationResult> 
     }
   }
 
-  // Upsert into activity_historical
-  for (const b of buckets.values()) {
-    await prisma.activityHistorical.upsert({
-      where: {
-        repoId_date: { repoId: b.repoId, date: b.date },
-      },
-      create: {
-        repoId: b.repoId,
-        date: b.date,
-        commitCount: b.commitCount,
-        prOpened: b.prOpened,
-        prMerged: b.prMerged,
-        prClosed: b.prClosed,
-        issuesOpened: b.issuesOpened,
-        issuesClosed: b.issuesClosed,
-        additions: b.additions,
-        deletions: b.deletions,
-        uniqueContributors: b.contributors.size,
-      },
-      update: {
-        commitCount: { increment: b.commitCount },
-        prOpened: { increment: b.prOpened },
-        prMerged: { increment: b.prMerged },
-        prClosed: { increment: b.prClosed },
-        issuesOpened: { increment: b.issuesOpened },
-        issuesClosed: { increment: b.issuesClosed },
-        additions: { increment: b.additions },
-        deletions: { increment: b.deletions },
-      },
-    });
+  // Batch upsert into activity_historical to reduce per-row round-trips.
+  const bucketRows = Array.from(buckets.values());
+  if (!batchedGithubAggregationWritesEnabled) {
+    for (const b of bucketRows) {
+      await prisma.activityHistorical.upsert({
+        where: {
+          repoId_date: { repoId: b.repoId, date: b.date },
+        },
+        create: {
+          repoId: b.repoId,
+          date: b.date,
+          commitCount: b.commitCount,
+          prOpened: b.prOpened,
+          prMerged: b.prMerged,
+          prClosed: b.prClosed,
+          issuesOpened: b.issuesOpened,
+          issuesClosed: b.issuesClosed,
+          additions: b.additions,
+          deletions: b.deletions,
+          uniqueContributors: b.contributors.size,
+        },
+        update: {
+          commitCount: { increment: b.commitCount },
+          prOpened: { increment: b.prOpened },
+          prMerged: { increment: b.prMerged },
+          prClosed: { increment: b.prClosed },
+          issuesOpened: { increment: b.issuesOpened },
+          issuesClosed: { increment: b.issuesClosed },
+          additions: { increment: b.additions },
+          deletions: { increment: b.deletions },
+        },
+      });
+    }
+  } else {
+    for (let i = 0; i < bucketRows.length; i += DB_BATCH_SIZE) {
+    const chunk = bucketRows.slice(i, i + DB_BATCH_SIZE);
+    const values = Prisma.join(
+      chunk.map((b) =>
+        Prisma.sql`(${b.repoId}, ${b.date}, ${b.commitCount}, ${b.prOpened}, ${b.prMerged}, ${b.prClosed}, ${b.issuesOpened}, ${b.issuesClosed}, ${b.additions}, ${b.deletions}, ${b.contributors.size})`
+      )
+    );
+    await prisma.$executeRaw`
+      INSERT INTO "activity_historical" (
+        "repo_id",
+        "date",
+        "commit_count",
+        "pr_opened",
+        "pr_merged",
+        "pr_closed",
+        "issues_opened",
+        "issues_closed",
+        "additions",
+        "deletions",
+        "unique_contributors"
+      )
+      VALUES ${values}
+      ON CONFLICT ("repo_id", "date")
+      DO UPDATE SET
+        "commit_count" = "activity_historical"."commit_count" + EXCLUDED."commit_count",
+        "pr_opened" = "activity_historical"."pr_opened" + EXCLUDED."pr_opened",
+        "pr_merged" = "activity_historical"."pr_merged" + EXCLUDED."pr_merged",
+        "pr_closed" = "activity_historical"."pr_closed" + EXCLUDED."pr_closed",
+        "issues_opened" = "activity_historical"."issues_opened" + EXCLUDED."issues_opened",
+        "issues_closed" = "activity_historical"."issues_closed" + EXCLUDED."issues_closed",
+        "additions" = "activity_historical"."additions" + EXCLUDED."additions",
+        "deletions" = "activity_historical"."deletions" + EXCLUDED."deletions"
+    `;
+  }
   }
 
   // Update developer_repo_activity from events being rolled up
@@ -209,25 +251,79 @@ async function updateDeveloperRepoActivity(
     if (e.eventDate > s.lastActiveAt) s.lastActiveAt = e.eventDate;
   }
 
-  for (const [key, s] of map) {
-    const [login, ...repoParts] = key.split(":");
-    const repoId = repoParts.join(":"); // handle : in repo names (unlikely but safe)
+  if (map.size === 0) return;
 
-    await prisma.developerRepoActivity.upsert({
-      where: { developerLogin_repoId: { developerLogin: login, repoId } },
-      create: {
-        developerLogin: login,
-        repoId,
-        totalCommits: s.commits,
-        totalPRs: s.prs,
-        lastActiveAt: s.lastActiveAt,
-      },
-      update: {
-        totalCommits: { increment: s.commits },
-        totalPRs: { increment: s.prs },
-        lastActiveAt: s.lastActiveAt,
-      },
-    });
+  const rows = Array.from(map.entries()).map(([key, stats]) => {
+    const [login, ...repoParts] = key.split(":");
+    return {
+      login,
+      repoId: repoParts.join(":"),
+      commits: stats.commits,
+      prs: stats.prs,
+      lastActiveAt: stats.lastActiveAt,
+    };
+  });
+
+  if (!batchedGithubAggregationWritesEnabled) {
+    for (const row of rows) {
+      await prisma.developerRepoActivity.upsert({
+        where: {
+          developerLogin_repoId: {
+            developerLogin: row.login,
+            repoId: row.repoId,
+          },
+        },
+        create: {
+          developerLogin: row.login,
+          repoId: row.repoId,
+          totalCommits: row.commits,
+          totalPRs: row.prs,
+          lastActiveAt: row.lastActiveAt,
+        },
+        update: {
+          totalCommits: { increment: row.commits },
+          totalPRs: { increment: row.prs },
+          lastActiveAt: row.lastActiveAt,
+        },
+      });
+    }
+    return;
+  }
+
+  for (let i = 0; i < rows.length; i += DB_BATCH_SIZE) {
+    const chunk = rows.slice(i, i + DB_BATCH_SIZE);
+    const values = Prisma.join(
+      chunk.map((row) =>
+        Prisma.sql`(${row.login}, ${row.repoId}, ${row.commits}, ${row.prs}, ${row.lastActiveAt})`
+      )
+    );
+
+    await prisma.$executeRaw`
+      WITH incoming("developer_login", "repo_id", "total_commits", "total_prs", "last_active_at") AS (
+        VALUES ${values}
+      )
+      INSERT INTO "developer_repo_activity" (
+        "developer_login",
+        "repo_id",
+        "total_commits",
+        "total_prs",
+        "last_active_at"
+      )
+      SELECT
+        i."developer_login",
+        i."repo_id",
+        i."total_commits",
+        i."total_prs",
+        i."last_active_at"
+      FROM incoming i
+      INNER JOIN "github_developer" gd
+        ON gd."id" = i."developer_login"
+      ON CONFLICT ("developer_login", "repo_id")
+      DO UPDATE SET
+        "total_commits" = "developer_repo_activity"."total_commits" + EXCLUDED."total_commits",
+        "total_prs" = "developer_repo_activity"."total_prs" + EXCLUDED."total_prs",
+        "last_active_at" = GREATEST("developer_repo_activity"."last_active_at", EXCLUDED."last_active_at")
+    `;
   }
 }
 
@@ -268,22 +364,44 @@ async function recomputeDeveloperStats(): Promise<number> {
   `;
 
   let updated = 0;
-  for (const s of stats) {
-    try {
+  if (!batchedGithubAggregationWritesEnabled) {
+    for (const row of stats) {
       await prisma.githubDeveloper.updateMany({
-        where: { id: s.developer_login },
+        where: { id: row.developer_login },
         data: {
-          totalCommits: Number(s.total_commits),
-          totalPRs: Number(s.total_prs),
-          repoCount: Number(s.repo_count),
-          orgCount: Number(s.org_count),
+          totalCommits: Number(row.total_commits),
+          totalPRs: Number(row.total_prs),
+          repoCount: Number(row.repo_count),
+          orgCount: Number(row.org_count),
           isActive: true,
         },
       });
-      updated++;
-    } catch {
-      // Developer may not exist yet
+      updated += 1;
     }
+  } else {
+    for (let i = 0; i < stats.length; i += DB_BATCH_SIZE) {
+    const chunk = stats.slice(i, i + DB_BATCH_SIZE);
+    const values = Prisma.join(
+      chunk.map((row) =>
+        Prisma.sql`(${row.developer_login}, ${Number(row.total_commits)}, ${Number(row.total_prs)}, ${Number(row.repo_count)}, ${Number(row.org_count)})`
+      )
+    );
+    await prisma.$executeRaw`
+      WITH incoming("id", "total_commits", "total_prs", "repo_count", "org_count") AS (
+        VALUES ${values}
+      )
+      UPDATE "github_developer" gd
+      SET
+        "total_commits" = incoming."total_commits",
+        "total_prs" = incoming."total_prs",
+        "repo_count" = incoming."repo_count",
+        "org_count" = incoming."org_count",
+        "is_active" = true
+      FROM incoming
+      WHERE gd."id" = incoming."id"
+    `;
+    updated += chunk.length;
+  }
   }
 
   // Mark inactive developers (not seen in 90 days)

@@ -430,73 +430,40 @@ async function ingestSingleVote(
     ? JSON.stringify(surveyResponse)
     : undefined;
 
-  // 7. Check if this specific vote transaction already exists
-  // Each vote is a separate on-chain transaction, so we check by txHash
-  // (A DRep can change their vote, creating multiple vote transactions for the same proposal)
-  const existingVote = await tx.onchainVote.findFirst({
-    where: {
-      txHash: koiosVote.vote_tx_hash,
-      proposalId: proposalId,
-      voterType: voterType,
-      drepId: drepId,
-      spoId: spoId,
-      ccId: ccId,
+  // 7. Upsert vote by deterministic ID to avoid an extra read round-trip.
+  // This keeps idempotency while handling metadata refreshes for the same tx.
+  const voterKey = drepId ?? spoId ?? ccId ?? "unknown";
+  const onchainVoteId = `${koiosVote.vote_tx_hash}:${proposalId}:${voterType}:${voterKey}`;
+  const voteData = {
+    txHash: koiosVote.vote_tx_hash,
+    proposalId: proposalId,
+    vote: voteType,
+    voterType: voterType,
+    votingPower: votingPower,
+    responseEpoch: koiosVote.epoch_no ?? undefined,
+    anchorUrl: koiosVote.meta_url,
+    anchorHash: koiosVote.meta_hash,
+    rationale: rationaleJson ?? undefined,
+    surveyResponse: surveyResponseJson,
+    surveyResponseSurveyTxId: surveyResponse?.surveyTxId,
+    surveyResponseResponderRole: surveyResponse?.responderRole,
+    votedAt: koiosVote.block_time
+      ? new Date(koiosVote.block_time * 1000)
+      : undefined,
+    drepId: drepId,
+    spoId: spoId,
+    ccId: ccId,
+  };
+
+  await tx.onchainVote.upsert({
+    where: { id: onchainVoteId },
+    create: {
+      id: onchainVoteId,
+      ...voteData,
     },
+    update: voteData,
   });
-
-  if (existingVote) {
-    // Update existing vote record (same transaction, just updating metadata)
-    await tx.onchainVote.update({
-      where: { id: existingVote.id },
-      data: {
-        vote: voteType,
-        votingPower: votingPower,
-        responseEpoch: koiosVote.epoch_no ?? undefined,
-        anchorUrl: koiosVote.meta_url,
-        anchorHash: koiosVote.meta_hash,
-        rationale: rationaleJson ?? undefined,
-        surveyResponse: surveyResponseJson,
-        surveyResponseSurveyTxId: surveyResponse?.surveyTxId,
-        surveyResponseResponderRole: surveyResponse?.responderRole,
-        votedAt: koiosVote.block_time
-          ? new Date(koiosVote.block_time * 1000)
-          : undefined,
-      },
-    });
-    stats.votesUpdated++;
-  } else {
-    // Create new vote record (new transaction - could be initial vote or vote change)
-    // Build a stable, unique ID from tx hash + proposal + voter identity.
-    // This mirrors the unique DB index on (txHash, proposalId, voterType, drepId, spoId, ccId)
-    // while staying human-readable and avoiding very long hashes.
-    const voterKey = drepId ?? spoId ?? ccId ?? "unknown";
-    const onchainVoteId = `${koiosVote.vote_tx_hash}:${proposalId}:${voterType}:${voterKey}`;
-
-    await tx.onchainVote.create({
-      data: {
-        id: onchainVoteId,
-        txHash: koiosVote.vote_tx_hash,
-        proposalId: proposalId,
-        vote: voteType,
-        voterType: voterType,
-        votingPower: votingPower,
-        responseEpoch: koiosVote.epoch_no ?? undefined,
-        anchorUrl: koiosVote.meta_url,
-        anchorHash: koiosVote.meta_hash,
-        rationale: rationaleJson ?? undefined,
-        surveyResponse: surveyResponseJson,
-        surveyResponseSurveyTxId: surveyResponse?.surveyTxId,
-        surveyResponseResponderRole: surveyResponse?.responderRole,
-        votedAt: koiosVote.block_time
-          ? new Date(koiosVote.block_time * 1000) // Convert Unix timestamp to Date
-          : undefined,
-        drepId: drepId,
-        spoId: spoId,
-        ccId: ccId,
-      },
-    });
-    stats.votesIngested++;
-  }
+  stats.votesIngested++;
 }
 
 /**

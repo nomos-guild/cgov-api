@@ -14,6 +14,7 @@ import {
   getBoundedIntEnv,
   releaseJobLock,
 } from "../services/ingestion/syncLock";
+import { shouldSkipForDbPressure } from "./dbPressureGuard";
 import { applyCronJitter } from "./jitter";
 
 let isRunning = false;
@@ -65,6 +66,9 @@ function startDrepInfoSyncJobWithSchedule(schedule: string) {
     let acquired = false;
 
     try {
+      if (shouldSkipForDbPressure("drep-info-sync")) {
+        return;
+      }
       acquired = await acquireJobLock(JOB_NAME, DISPLAY_NAME, {
         ttlMs: LOCK_TTL_MS,
         source: "cron",
