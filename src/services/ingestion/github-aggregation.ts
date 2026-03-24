@@ -292,29 +292,34 @@ async function updateDeveloperRepoActivity(
 
   for (let i = 0; i < rows.length; i += DB_BATCH_SIZE) {
     const chunk = rows.slice(i, i + DB_BATCH_SIZE);
+    const updatedAt = new Date();
     const values = Prisma.join(
       chunk.map((row) =>
-        Prisma.sql`(${row.login}, ${row.repoId}, ${row.commits}, ${row.prs}, ${row.lastActiveAt})`
+        Prisma.sql`(${row.login}, ${row.repoId}, ${row.commits}, ${row.prs}, ${row.lastActiveAt}, ${updatedAt})`
       )
     );
 
     await prisma.$executeRaw`
-      WITH incoming("developer_login", "repo_id", "total_commits", "total_prs", "last_active_at") AS (
+      WITH incoming("developer_login", "repo_id", "total_commits", "total_prs", "last_active_at", "updated_at") AS (
         VALUES ${values}
       )
       INSERT INTO "developer_repo_activity" (
+        "id",
         "developer_login",
         "repo_id",
         "total_commits",
         "total_prs",
-        "last_active_at"
+        "last_active_at",
+        "updated_at"
       )
       SELECT
+        i."developer_login" || ':' || i."repo_id",
         i."developer_login",
         i."repo_id",
         i."total_commits",
         i."total_prs",
-        i."last_active_at"
+        i."last_active_at",
+        i."updated_at"
       FROM incoming i
       INNER JOIN "github_developer" gd
         ON gd."id" = i."developer_login"
@@ -322,7 +327,8 @@ async function updateDeveloperRepoActivity(
       DO UPDATE SET
         "total_commits" = "developer_repo_activity"."total_commits" + EXCLUDED."total_commits",
         "total_prs" = "developer_repo_activity"."total_prs" + EXCLUDED."total_prs",
-        "last_active_at" = GREATEST("developer_repo_activity"."last_active_at", EXCLUDED."last_active_at")
+        "last_active_at" = GREATEST("developer_repo_activity"."last_active_at", EXCLUDED."last_active_at"),
+        "updated_at" = EXCLUDED."updated_at"
     `;
   }
 }
