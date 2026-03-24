@@ -21,6 +21,11 @@
  *           type: string
  *           description: Type of governance action
  *           example: info_action
+ *         withdrawalAmount:
+ *           type: string
+ *           nullable: true
+ *           description: Derived total treasury withdrawal in lovelace for TreasuryWithdrawals proposals
+ *           example: "10142000000000"
  *     SignInRequest:
  *       type: object
  *       required:

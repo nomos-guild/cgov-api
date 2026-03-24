@@ -1,5 +1,31 @@
 import { Request, Response } from "express";
 import { getBlockfrostService } from "../../services";
+import { extractTreasuryWithdrawalAmountFromProposalLike } from "../../services/ingestion/proposalStatus.policy";
+
+type RawGovernanceProposal = {
+  [key: string]: unknown;
+  proposal_type?: unknown;
+  withdrawal?: unknown;
+  proposal_description?: {
+    contents?: unknown;
+  } | null;
+};
+
+function withAggregatedWithdrawalAmount(proposals: unknown[]): unknown[] {
+  return proposals.map((proposal) => {
+    if (!proposal || typeof proposal !== "object") {
+      return proposal;
+    }
+    const aggregate = extractTreasuryWithdrawalAmountFromProposalLike(
+      proposal as RawGovernanceProposal
+    );
+
+    return {
+      ...(proposal as RawGovernanceProposal),
+      withdrawalAmount: aggregate?.toString() ?? null,
+    };
+  });
+}
 
 /**
  * Get governance action proposals from Blockfrost API.
@@ -30,7 +56,8 @@ export const getProposals = async (req: Request, res: Response) => {
       const response = await blockfrost.get("/governance/proposals", {
         params: { count, page, order },
       });
-      return res.json(response.data);
+      const proposals = Array.isArray(response.data) ? response.data : [];
+      return res.json(withAggregatedWithdrawalAmount(proposals));
     }
 
     // Default: Fetch all pages until no more records
@@ -59,7 +86,7 @@ export const getProposals = async (req: Request, res: Response) => {
       }
     }
 
-    res.json(allProposals);
+    res.json(withAggregatedWithdrawalAmount(allProposals));
   } catch (error) {
     console.error("Error fetching proposals:", error);
     res.status(500).json({
