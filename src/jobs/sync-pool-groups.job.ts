@@ -9,6 +9,7 @@ import cron from "node-cron";
 import { prisma } from "../services";
 import { syncPoolGroupsStep } from "../services/ingestion/epoch-analytics.service";
 import { acquireJobLock, releaseJobLock } from "../services/ingestion/syncLock";
+import { shouldSkipForDbPressure } from "./dbPressureGuard";
 import { applyCronJitter } from "./jitter";
 
 let isRunning = false;
@@ -54,6 +55,9 @@ function startPoolGroupsSyncJobWithSchedule(schedule: string) {
     let acquired = false;
 
     try {
+      if (shouldSkipForDbPressure("pool-groups-sync")) {
+        return;
+      }
       acquired = await acquireJobLock(JOB_NAME, DISPLAY_NAME, {
         source: "cron",
       });

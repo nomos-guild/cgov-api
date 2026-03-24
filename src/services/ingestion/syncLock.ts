@@ -10,10 +10,11 @@
  * deduping; stronger semantics are a follow-up.
  */
 
-import { prisma } from "../prisma";
+import { prisma, withDbRead, withDbWrite } from "../prisma";
 
 /** Default lock TTL (15 min). Jobs that run longer should pass ttlMs explicitly. */
 export const DEFAULT_LOCK_TTL_MS = 15 * 60 * 1000;
+const strictSyncLockEnabled = process.env.STRICT_SYNC_LOCK_ENABLED !== "false";
 
 export interface AcquireJobLockOptions {
   /** Override default TTL. Used for slow jobs (e.g. delegation sync, missing epochs). */
@@ -57,46 +58,107 @@ export async function acquireJobLock(
   const ttlMs = options?.ttlMs ?? DEFAULT_LOCK_TTL_MS;
   const lockedBy = process.env.HOSTNAME || options?.source || "api-instance";
 
-  return prisma.$transaction(async (tx) => {
-    // 1. Expire stale locks (previous run crashed or timed out)
-    await tx.syncStatus.updateMany({
-      where: {
-        jobName,
-        isRunning: true,
-        expiresAt: { lt: now },
-      },
-      data: {
-        isRunning: false,
-        completedAt: now,
-        lastResult: "expired",
-        errorMessage: "Lock expired - previous run may have crashed",
-      },
-    });
+  if (!strictSyncLockEnabled) {
+    return withDbWrite(`sync-lock.acquire.${jobName}`, async () =>
+      prisma.$transaction(async (tx) => {
+      await tx.syncStatus.updateMany({
+        where: {
+          jobName,
+          isRunning: true,
+          expiresAt: { lt: now },
+        },
+        data: {
+          isRunning: false,
+          completedAt: now,
+          lastResult: "expired",
+          errorMessage: "Lock expired - previous run may have crashed",
+        },
+      });
 
-    // 2. Check if job is already running (another instance holds the lock)
-    const status = await tx.syncStatus.findUnique({
-      where: { jobName },
-      select: { isRunning: true },
-    });
+      const status = await tx.syncStatus.findUnique({
+        where: { jobName },
+        select: { isRunning: true },
+      });
 
-    if (status?.isRunning) {
+      if (status?.isRunning) {
+        return false;
+      }
+
+      await tx.syncStatus.upsert({
+        where: { jobName },
+        create: {
+          jobName,
+          displayName,
+          isRunning: true,
+          startedAt: now,
+          completedAt: null,
+          expiresAt: new Date(now.getTime() + ttlMs),
+          lockedBy,
+          errorMessage: null,
+        },
+        update: {
+          displayName,
+          isRunning: true,
+          startedAt: now,
+          completedAt: null,
+          expiresAt: new Date(now.getTime() + ttlMs),
+          lockedBy,
+          errorMessage: null,
+        },
+      });
+
+        return true;
+      })
+    );
+  }
+
+  return withDbWrite(`sync-lock.acquire.${jobName}`, async () =>
+    prisma.$transaction(async (tx) => {
+    // Ensure row exists so we can take a row-level lock deterministically.
+    await tx.$executeRaw`
+      INSERT INTO "sync_status" ("job_name", "display_name", "is_running", "created_at", "updated_at")
+      VALUES (${jobName}, ${displayName}, false, NOW(), NOW())
+      ON CONFLICT ("job_name") DO NOTHING
+    `;
+
+    // Lock this job row for the rest of the transaction to avoid check-then-set races.
+    const rows = await tx.$queryRaw<
+      Array<{ is_running: boolean; expires_at: Date | null; locked_by: string | null }>
+    >`
+      SELECT "is_running", "expires_at", "locked_by"
+      FROM "sync_status"
+      WHERE "job_name" = ${jobName}
+      FOR UPDATE
+    `;
+
+    const row = rows[0];
+    if (!row) {
       return false;
     }
 
-    // 3. Acquire lock: upsert row with isRunning=true and expiresAt
-    await tx.syncStatus.upsert({
+    const expired = row.is_running && row.expires_at !== null && row.expires_at < now;
+    if (expired) {
+      await tx.syncStatus.update({
+        where: { jobName },
+        data: {
+          isRunning: false,
+          completedAt: now,
+          lastResult: "expired",
+          errorMessage: "Lock expired - previous run may have crashed",
+        },
+      });
+    }
+
+    if (row.is_running && !expired) {
+      console.log(
+        `[Sync Lock] action=contended job=${jobName} lockedBy=${row.locked_by ?? "unknown"}`
+      );
+      return false;
+    }
+
+    await tx.syncStatus.update({
       where: { jobName },
-      create: {
-        jobName,
-        displayName,
-        isRunning: true,
-        startedAt: now,
-        completedAt: null,
-        expiresAt: new Date(now.getTime() + ttlMs),
-        lockedBy,
-        errorMessage: null,
-      },
-      update: {
+      data: {
         displayName,
         isRunning: true,
         startedAt: now,
@@ -107,8 +169,9 @@ export async function acquireJobLock(
       },
     });
 
-    return true;
-  });
+      return true;
+    })
+  );
 }
 
 /**
@@ -121,17 +184,19 @@ export async function releaseJobLock(
   itemsProcessed?: number,
   errorMessage?: string | null
 ): Promise<void> {
-  await prisma.syncStatus.update({
-    where: { jobName },
-    data: {
-      isRunning: false,
-      completedAt: new Date(),
-      expiresAt: null,
-      lastResult: result,
-      itemsProcessed: itemsProcessed ?? null,
-      errorMessage: errorMessage ?? null,
-    },
-  });
+  await withDbWrite(`sync-lock.release.${jobName}`, async () =>
+    prisma.syncStatus.update({
+      where: { jobName },
+      data: {
+        isRunning: false,
+        completedAt: new Date(),
+        expiresAt: null,
+        lastResult: result,
+        itemsProcessed: itemsProcessed ?? null,
+        errorMessage: errorMessage ?? null,
+      },
+    })
+  );
 }
 
 /**
@@ -139,10 +204,12 @@ export async function releaseJobLock(
  * Does not check expiresAt; use acquireJobLock to handle expiry.
  */
 export async function isJobLockActive(jobName: string): Promise<boolean> {
-  const status = await prisma.syncStatus.findUnique({
-    where: { jobName },
-    select: { isRunning: true },
-  });
+  const status = await withDbRead(`sync-lock.status.${jobName}`, async () =>
+    prisma.syncStatus.findUnique({
+      where: { jobName },
+      select: { isRunning: true },
+    })
+  );
 
   return !!status?.isRunning;
 }

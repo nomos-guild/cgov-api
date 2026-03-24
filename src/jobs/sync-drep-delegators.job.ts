@@ -13,6 +13,7 @@ import {
   getBoundedIntEnv,
   releaseJobLock,
 } from "../services/ingestion/syncLock";
+import { shouldSkipForDbPressure } from "./dbPressureGuard";
 import { applyCronJitter } from "./jitter";
 
 // Simple in-process guard to prevent overlapping runs in a single Node process
@@ -71,6 +72,9 @@ function startDrepDelegatorSyncJobWithSchedule(schedule: string) {
     let acquired = false;
 
     try {
+      if (shouldSkipForDbPressure("drep-delegator-sync")) {
+        return;
+      }
       acquired = await acquireJobLock(JOB_NAME, DISPLAY_NAME, {
         ttlMs: LOCK_TTL_MS,
         source: "cron",

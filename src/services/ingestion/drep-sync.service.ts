@@ -236,38 +236,30 @@ export async function syncAllDrepsInventory(
 export async function refreshDrepDelegatorCountsFromDelegationState(
   prisma: Prisma.TransactionClient
 ): Promise<{ updated: number }> {
-  const counts = await prisma.stakeDelegationState.groupBy({
-    by: ["drepId"],
-    where: { drepId: { not: null } },
-    _count: { stakeAddress: true },
-  });
+  const updatedWithDelegators = await prisma.$executeRaw`
+    UPDATE "drep" AS d
+    SET "delegator_count" = counts.cnt
+    FROM (
+      SELECT "drep_id", COUNT(*)::int AS cnt
+      FROM "stake_delegation_state"
+      WHERE "drep_id" IS NOT NULL
+      GROUP BY "drep_id"
+    ) AS counts
+    WHERE d."drep_id" = counts."drep_id"
+  `;
 
-  let updated = 0;
-  for (const row of counts) {
-    if (row.drepId == null) continue;
-    await prisma.drep.update({
-      where: { drepId: row.drepId },
-      data: { delegatorCount: row._count.stakeAddress },
-    });
-    updated++;
-  }
+  const updatedWithoutDelegators = await prisma.$executeRaw`
+    UPDATE "drep" AS d
+    SET "delegator_count" = 0
+    WHERE NOT EXISTS (
+      SELECT 1
+      FROM "stake_delegation_state" s
+      WHERE s."drep_id" = d."drep_id"
+    )
+      AND COALESCE(d."delegator_count", -1) <> 0
+  `;
 
-  const drepIdsWithDelegators = new Set(
-    counts.map((c) => c.drepId).filter((id): id is string => id != null)
-  );
-  const drepsWithoutDelegators = await prisma.drep.findMany({
-    where: { drepId: { notIn: [...drepIdsWithDelegators] } },
-    select: { drepId: true },
-  });
-  for (const d of drepsWithoutDelegators) {
-    await prisma.drep.update({
-      where: { drepId: d.drepId },
-      data: { delegatorCount: 0 },
-    });
-    updated++;
-  }
-
-  return { updated };
+  return { updated: Number(updatedWithDelegators) + Number(updatedWithoutDelegators) };
 }
 
 /**

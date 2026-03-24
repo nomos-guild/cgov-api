@@ -5,8 +5,22 @@ import {
   syncDormantRepos,
   reTierRepos,
 } from "../services/ingestion/github-activity";
+import {
+  acquireJobLock,
+  getBoundedIntEnv,
+  releaseJobLock,
+} from "../services/ingestion/syncLock";
+import { shouldSkipForDbPressure } from "./dbPressureGuard";
 
 let isSyncRunning = false;
+const JOB_NAME = "github-activity-sync";
+const DISPLAY_NAME = "GitHub Activity Sync";
+const LOCK_TTL_MS = getBoundedIntEnv(
+  "GITHUB_SYNC_LOCK_TTL_MS",
+  25 * 60 * 1000,
+  30_000,
+  2 * 60 * 60 * 1000
+);
 
 export const startSyncGithubActivityJob = () => {
   const schedule = process.env.GITHUB_SYNC_SCHEDULE || "*/30 * * * *"; // Every 30 min
@@ -35,8 +49,24 @@ function startWithSchedule(schedule: string) {
     isSyncRunning = true;
     const ts = new Date().toISOString();
     console.log(`\n[${ts}] Starting GitHub activity sync...`);
+    let acquired = false;
 
     try {
+      if (shouldSkipForDbPressure("github-activity-sync")) {
+        return;
+      }
+
+      acquired = await acquireJobLock(JOB_NAME, DISPLAY_NAME, {
+        ttlMs: LOCK_TTL_MS,
+        source: "cron",
+      });
+      if (!acquired) {
+        console.log(
+          `[${ts}] GitHub activity sync skipped because another instance already holds the DB lock.`
+        );
+        return;
+      }
+
       // Always sync active repos
       const activeResult = await syncActiveRepos();
       logSyncResult("Active", activeResult, ts);
@@ -63,8 +93,25 @@ function startWithSchedule(schedule: string) {
         );
       }
 
+      await releaseJobLock(JOB_NAME, "success");
+
     } catch (error: any) {
       console.error(`[${ts}] GitHub sync job failed:`, error.message);
+      if (acquired) {
+        try {
+          await releaseJobLock(
+            JOB_NAME,
+            "failed",
+            0,
+            error?.message ?? "Unknown error"
+          );
+        } catch (releaseError: any) {
+          console.error(
+            `[${ts}] Failed to release GitHub sync lock:`,
+            releaseError?.message ?? releaseError
+          );
+        }
+      }
     } finally {
       isSyncRunning = false;
     }

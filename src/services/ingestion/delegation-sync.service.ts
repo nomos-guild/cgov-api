@@ -30,6 +30,7 @@ import {
   getKoiosCurrentEpoch,
   Phase3Checkpoint,
 } from "./sync-utils";
+import { getBoundedIntEnv } from "./syncLock";
 import {
   syncAllDrepsInventory,
   ensureDrepsExist,
@@ -888,57 +889,42 @@ export async function syncDrepDelegationChanges(
 
   // Batch update existing states (with per-chunk checkpoint)
   if (toUpdate.length > 0) {
-    const updateChunkSize = 500;
+    const updateChunkSize = getBoundedIntEnv(
+      "DELEGATION_PHASE3_UPDATE_CHUNK_SIZE",
+      100,
+      20,
+      1000
+    );
     const startChunkIndex = checkpoint.updateChunkIndex;
     for (let i = startChunkIndex * updateChunkSize; i < toUpdate.length; i += updateChunkSize) {
       const chunkIndex = Math.floor(i / updateChunkSize);
       const chunk = toUpdate.slice(i, i + updateChunkSize);
       const { next, data: checkpointData } = buildCheckpointData({ updateChunkIndex: chunkIndex + 1 });
-      if (transactionClient.$transaction) {
-        const updateOps = chunk.map((row) =>
-          delegationClient.stakeDelegationState.update({
+      const updateResult = await processInParallel(
+        chunk,
+        (row) => row.stakeAddress,
+        async (row) => {
+          await delegationClient.stakeDelegationState.update({
             where: { stakeAddress: row.stakeAddress },
             data: {
               drepId: row.drepId,
               amount: row.amount,
               delegatedEpoch: row.delegatedEpoch,
             },
-          })
+          });
+          return row;
+        },
+        DREP_DELEGATION_DB_UPDATE_CONCURRENCY
+      );
+      if (updateResult.failed.length > 0) {
+        throw new Error(
+          `[DRep Delegation Sync] Phase 3 update failures: ${updateResult.failed.length}`
         );
-        await transactionClient.$transaction([
-          ...updateOps,
-          syncStatusClient.syncStatus.update({
-            where: { jobName: DREP_DELEGATION_PHASE3_JOB_NAME },
-            data: checkpointData,
-          }),
-        ]);
-      } else {
-        const updateResult = await processInParallel(
-          chunk,
-          (row) => row.stakeAddress,
-          async (row) => {
-            await delegationClient.stakeDelegationState.update({
-              where: { stakeAddress: row.stakeAddress },
-              data: {
-                drepId: row.drepId,
-                amount: row.amount,
-                delegatedEpoch: row.delegatedEpoch,
-              },
-            });
-            return row;
-          },
-          DREP_DELEGATION_DB_UPDATE_CONCURRENCY
-        );
-        if (updateResult.failed.length > 0) {
-          throw new Error(
-            `[DRep Delegation Sync] Phase 3 update failures: ${updateResult.failed.length}`
-          );
-        }
-        await syncStatusClient.syncStatus.update({
-          where: { jobName: DREP_DELEGATION_PHASE3_JOB_NAME },
-          data: checkpointData,
-        });
       }
+      await syncStatusClient.syncStatus.update({
+        where: { jobName: DREP_DELEGATION_PHASE3_JOB_NAME },
+        data: checkpointData,
+      });
       checkpoint = next;
     }
   }
