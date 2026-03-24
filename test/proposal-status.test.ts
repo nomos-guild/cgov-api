@@ -18,6 +18,7 @@ import {
   selectProposalsForBulkSync,
   type ProposalIngestionResult,
 } from "../src/services/ingestion/proposal.service";
+import { extractTreasuryWithdrawalAmountFromProposalLike } from "../src/services/ingestion/proposalStatus.policy";
 
 function makeKoiosProposal(
   proposalId: string,
@@ -198,5 +199,71 @@ describe("proposal status deferral", () => {
       data: { status: ProposalStatus.ENACTED },
     });
     expect(finalized.proposal.status).toBe(ProposalStatus.ENACTED);
+  });
+});
+
+describe("treasury withdrawal aggregation", () => {
+  it("sums multiple withdrawal entries", () => {
+    const amount = extractTreasuryWithdrawalAmountFromProposalLike({
+      proposal_type: "TreasuryWithdrawals",
+      withdrawal: [
+        { amount: "1450000000000", stake_address: "stake1..." },
+        { amount: "1160000000000", stake_address: "stake1..." },
+        { amount: "2575000000000", stake_address: "stake1..." },
+      ],
+    });
+
+    expect(amount?.toString()).toBe("5185000000000");
+  });
+
+  it("handles a single withdrawal entry", () => {
+    const amount = extractTreasuryWithdrawalAmountFromProposalLike({
+      proposal_type: "TreasuryWithdrawals",
+      withdrawal: [{ amount: "6900000000000", stake_address: "stake1..." }],
+    });
+
+    expect(amount?.toString()).toBe("6900000000000");
+  });
+
+  it("falls back to nested proposal_description contents when withdrawal is absent", () => {
+    const amount = extractTreasuryWithdrawalAmountFromProposalLike({
+      proposal_type: "TreasuryWithdrawals",
+      proposal_description: {
+        contents: [
+          [
+            [
+              {
+                network: "Mainnet",
+                credential: {
+                  scriptHash: "abc123",
+                },
+              },
+              "900000000000",
+            ],
+            [
+              {
+                network: "Mainnet",
+                credential: {
+                  scriptHash: "def456",
+                },
+              },
+              6900000000000,
+            ],
+          ],
+          "some-anchor-hash",
+        ],
+      },
+    });
+
+    expect(amount?.toString()).toBe("7800000000000");
+  });
+
+  it("returns null for non-treasury proposals", () => {
+    const amount = extractTreasuryWithdrawalAmountFromProposalLike({
+      proposal_type: "InfoAction",
+      withdrawal: [{ amount: "5000", stake_address: "stake1..." }],
+    });
+
+    expect(amount).toBeNull();
   });
 });

@@ -98,18 +98,28 @@ function collectTreasuryWithdrawalAmounts(value: unknown, amounts: bigint[]): vo
   }
 }
 
-export function extractTreasuryWithdrawalAmount(
-  proposal: KoiosProposal
+type TreasuryWithdrawalProposalLike = {
+  proposal_type?: unknown;
+  withdrawal?: unknown;
+  proposal_description?: {
+    contents?: unknown;
+  } | null;
+};
+
+export function extractTreasuryWithdrawalAmountFromProposalLike(
+  proposal: TreasuryWithdrawalProposalLike
 ): bigint | null {
   if (proposal.proposal_type !== "TreasuryWithdrawals") {
     return null;
   }
 
   // Koios returns withdrawal as an array of {amount, stake_address}
-  if (proposal.withdrawal && proposal.withdrawal.length > 0) {
+  if (Array.isArray(proposal.withdrawal) && proposal.withdrawal.length > 0) {
     let total = BigInt(0);
     for (const w of proposal.withdrawal) {
-      const parsed = parseLovelaceUnknown(w.amount);
+      const parsed = parseLovelaceUnknown(
+        w && typeof w === "object" ? (w as { amount?: unknown }).amount : null
+      );
       if (parsed !== null) {
         total += parsed;
       }
@@ -129,4 +139,10 @@ export function extractTreasuryWithdrawalAmount(
   }
 
   return null;
+}
+
+export function extractTreasuryWithdrawalAmount(
+  proposal: KoiosProposal
+): bigint | null {
+  return extractTreasuryWithdrawalAmountFromProposalLike(proposal);
 }
