@@ -6,10 +6,15 @@
 import { VoteType, VoterType } from "@prisma/client";
 import type { Prisma } from "@prisma/client";
 import { prisma } from "../prisma";
+import { getKoiosPressureState } from "../koios";
 import { listVotes } from "../governanceProvider";
 import { fetchJsonWithBrowserLikeClient } from "../remoteMetadata.service";
 import { fetchTxMetadataByHash } from "../txMetadata.service";
 import { ensureVoterExists } from "./voterIngestion.service";
+import {
+  recordDbFailureForFailFast,
+  shouldFailFastForDb,
+} from "./dbFailFast";
 import type { KoiosVote } from "../../types/koios.types";
 import {
   extractSurveyResponse,
@@ -154,8 +159,32 @@ export async function ingestVotesForProposal(
   proposalId: string,
   tx: Prisma.TransactionClient,
   minEpoch?: number,
-  options?: { useCache?: boolean; runCache?: VoteIngestionRunCache }
+  options?: {
+    useCache?: boolean;
+    runCache?: VoteIngestionRunCache;
+    fetchSurveyMetadata?: boolean;
+  }
 ): Promise<VoteIngestionResult> {
+  if (shouldFailFastForDb("ingestion.vote.ingest")) {
+    return {
+      success: false,
+      stats: {
+        votesIngested: 0,
+        votesUpdated: 0,
+        votesProcessed: 0,
+        votersCreated: { dreps: 0, spos: 0, ccs: 0 },
+        votersUpdated: { dreps: 0, spos: 0, ccs: 0 },
+        metadata: {
+          attempts: 0,
+          success: 0,
+          failed: 0,
+          skipped: 0,
+        },
+      },
+      error: "DB fail-fast active; skipping vote ingestion",
+    };
+  }
+
   const startedAt = Date.now();
   const stats: VoteIngestionStats = {
     votesIngested: 0,
@@ -236,9 +265,19 @@ export async function ingestVotesForProposal(
       where: { proposalId },
       select: { linkedSurveyTxId: true },
     });
-    const shouldFetchSurveyMetadata = Boolean(
-      proposalSurveyContext?.linkedSurveyTxId
-    );
+    const shouldFetchSurveyMetadata =
+      options?.fetchSurveyMetadata !== false &&
+      Boolean(proposalSurveyContext?.linkedSurveyTxId) &&
+      (process.env.KOIOS_SKIP_TX_METADATA_WHEN_DEGRADED === "false" ||
+        !getKoiosPressureState().active);
+    if (
+      proposalSurveyContext?.linkedSurveyTxId &&
+      !shouldFetchSurveyMetadata
+    ) {
+      console.log(
+        `[Vote Ingestion] action=skip proposal=${proposalId} reason=survey-metadata-disabled`
+      );
+    }
 
     // Process each vote
     for (const koiosVote of koiosVotes) {
@@ -251,6 +290,7 @@ export async function ingestVotesForProposal(
       );
     }
   } catch (error: any) {
+    recordDbFailureForFailFast(error, "ingestion.vote.ingest");
     // Vote ingestion errors remain non-fatal at this layer so later sync triggers
     // can resume from partial progress without replaying the whole proposal ingest.
     const errorMessage = error?.message ?? String(error);

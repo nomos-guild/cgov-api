@@ -10,6 +10,11 @@ import { syncCommitteeState } from "../services/committeeState.service";
 import { acquireJobLock, releaseJobLock } from "../services/ingestion/syncLock";
 import { syncAllVoterVotingPower } from "../services/ingestion/voterPowerSync.service";
 import { applyCronJitter } from "./jitter";
+import {
+  acquireKoiosHeavyJobLane,
+  releaseKoiosHeavyJobLane,
+  shouldSkipForKoiosPressure,
+} from "./koiosPressureGuard";
 
 // Simple in-process guard to prevent overlapping runs in a single Node process
 let isVoterPowerSyncRunning = false;
@@ -62,8 +67,12 @@ function startVoterPowerSyncJobWithSchedule(schedule: string) {
     const timestamp = new Date().toISOString();
     console.log(`\n[${timestamp}] Starting voter power sync job...`);
     let acquired = false;
+    let laneAcquired = false;
 
     try {
+      if (shouldSkipForKoiosPressure("voter-power-sync")) {
+        return;
+      }
       acquired = await acquireJobLock(JOB_NAME, DISPLAY_NAME, {
         source: "cron",
       });
@@ -71,6 +80,15 @@ function startVoterPowerSyncJobWithSchedule(schedule: string) {
         console.log(
           `[${timestamp}] Voter power sync skipped because another instance already holds the DB lock.`
         );
+        return;
+      }
+      laneAcquired = await acquireKoiosHeavyJobLane(JOB_NAME);
+      if (!laneAcquired) {
+        console.log(
+          `[${timestamp}] Voter power sync skipped because Koios heavy lane is busy.`
+        );
+        await releaseJobLock(JOB_NAME, "success", 0);
+        acquired = false;
         return;
       }
 
@@ -123,11 +141,29 @@ function startVoterPowerSyncJobWithSchedule(schedule: string) {
         "success",
         results.dreps.updated + results.spos.updated
       );
+      if (laneAcquired) {
+        await releaseKoiosHeavyJobLane("success");
+        laneAcquired = false;
+      }
     } catch (error: any) {
       console.error(
         `[${timestamp}] Voter power sync job failed:`,
         error.message
       );
+      if (laneAcquired) {
+        try {
+          await releaseKoiosHeavyJobLane(
+            "failed",
+            error?.message ?? String(error)
+          );
+          laneAcquired = false;
+        } catch (laneError: any) {
+          console.error(
+            `[${timestamp}] Failed to release Koios heavy lane lock:`,
+            laneError?.message ?? laneError
+          );
+        }
+      }
       if (acquired) {
         try {
           await releaseJobLock(

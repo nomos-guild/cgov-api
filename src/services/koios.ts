@@ -48,14 +48,15 @@ const httpAgent = new http.Agent({
 
 const BASE_URL = process.env.KOIOS_BASE_URL || "https://api.koios.rest/api/v1";
 
-// Dedicated retry configuration for Koios API calls.
-// Koios rate limits can be hit during heavy syncs, so we:
-// - Allow more retries
-// - Use slightly longer base/max delays than the generic defaults
-const KOIOS_RETRY_OPTIONS: RetryOptions = {
+// Baseline retry configuration for Koios API calls.
+const KOIOS_DEFAULT_RETRY_OPTIONS: RetryOptions = {
   maxRetries: 3,
   baseDelay: 3000, // 3 seconds
   maxDelay: 30000, // 30 seconds
+  maxRetriesForRateLimit: 4,
+  maxRetriesForTimeouts: 1,
+  maxRetriesForNetworkErrors: 2,
+  maxRetryAfterMs: 180_000,
   non429JitterMaxMs: getBoundedIntEnv(
     "KOIOS_NON_429_RETRY_JITTER_MAX_MS",
     250,
@@ -73,16 +74,24 @@ const KOIOS_429_COOLDOWN_MS = 60_000;
 const DEFAULT_KOIOS_PRESSURE_WINDOW_MS = 60_000;
 const DEFAULT_KOIOS_PRESSURE_THRESHOLD = 10;
 const DEFAULT_KOIOS_PRESSURE_COOLDOWN_MS = 20_000;
+const DEFAULT_KOIOS_TIMEOUT_COOLOFF_THRESHOLD = 5;
+const DEFAULT_KOIOS_TIMEOUT_COOLOFF_WINDOW_MS = 20_000;
+const DEFAULT_KOIOS_TIMEOUT_COOLOFF_MS = 10_000;
 const KOIOS_MAX_PAGE_LIMIT = 1000;
 const KOIOS_PUBLIC_MAX_BODY_BYTES = 1024;
 const KOIOS_REGISTERED_MAX_BODY_BYTES = 5 * 1024;
 const DEFAULT_PROPOSAL_LIST_INTERACTIVE_CACHE_TTL_MS = 5000;
 
-type KoiosRetryProfileName = "default" | "tx_metadata" | "slow_endpoint";
+type KoiosRetryProfileName =
+  | "default"
+  | "tx_metadata"
+  | "slow_endpoint"
+  | "high_volume";
 interface KoiosRetryProfile {
   name: KoiosRetryProfileName;
   retry: RetryOptions;
   timeoutMs: number;
+  timeoutByAttemptMs?: number[];
 }
 
 export interface KoiosRequestContext {
@@ -146,14 +155,22 @@ class ConcurrencyLimiter {
 
   constructor(
     private readonly name: string,
-    private readonly maxConcurrent: number
+    private readonly maxConcurrent: number | (() => number)
   ) {}
+
+  private getMaxConcurrent(): number {
+    const configured =
+      typeof this.maxConcurrent === "function"
+        ? this.maxConcurrent()
+        : this.maxConcurrent;
+    return Math.max(1, Math.floor(configured));
+  }
 
   private async acquire(): Promise<AcquireMetrics> {
     const activeAtAcquireStart = this.activeCount;
     const pendingAtAcquireStart = this.queue.length;
     const acquireStart = Date.now();
-    const queued = this.activeCount >= this.maxConcurrent;
+    const queued = this.activeCount >= this.getMaxConcurrent();
 
     if (queued) {
       await new Promise<void>((resolve) => {
@@ -202,7 +219,7 @@ class ConcurrencyLimiter {
       name: this.name,
       active: this.activeCount,
       pending: this.queue.length,
-      max: this.maxConcurrent,
+      max: this.getMaxConcurrent(),
     };
   }
 }
@@ -261,9 +278,44 @@ function getKoiosMaxConcurrentRequests(): number {
   );
 }
 
+const koiosAdaptiveConcurrencyEnabled = getBooleanEnv(
+  "KOIOS_ADAPTIVE_CONCURRENCY_ENABLED",
+  true
+);
+const koiosAdaptivePressureScale = getBoundedIntEnv(
+  "KOIOS_ADAPTIVE_PRESSURE_SCALE_PERCENT",
+  50,
+  10,
+  100
+);
+const koiosAdaptiveCooldownScale = getBoundedIntEnv(
+  "KOIOS_ADAPTIVE_COOLDOWN_SCALE_PERCENT",
+  34,
+  10,
+  100
+);
+
+function getAdaptiveScalePercent(): number {
+  if (!koiosAdaptiveConcurrencyEnabled) return 100;
+  const now = Date.now();
+  if (koiosPressureCooldownUntil > now) return koiosAdaptiveCooldownScale;
+
+  trimKoiosPressureEvents(now);
+  if (koiosPressureEvents.length >= koiosPressureThreshold) {
+    return koiosAdaptivePressureScale;
+  }
+  return 100;
+}
+
+function applyAdaptiveCap(baseMax: number): number {
+  const scaled = Math.floor((baseMax * getAdaptiveScalePercent()) / 100);
+  return Math.max(1, scaled);
+}
+
+const koiosBaseMaxConcurrentRequests = getKoiosMaxConcurrentRequests();
 const globalKoiosLimiter = new ConcurrencyLimiter(
   "global",
-  getKoiosMaxConcurrentRequests()
+  () => applyAdaptiveCap(koiosBaseMaxConcurrentRequests)
 );
 const globalKoiosBurstLimiter = new BurstLimiter(
   getBoundedIntEnv("KOIOS_BURST_MAX_REQUESTS", KOIOS_BURST_MAX_REQUESTS, 1, 100),
@@ -318,6 +370,15 @@ const KOIOS_ENDPOINT_LIMITS = new Map<string, number>([
     ),
   ],
   [
+    "/pool_info",
+    getBoundedIntEnv(
+      "KOIOS_MAX_CONCURRENT_POOL_INFO",
+      DEFAULT_ENDPOINT_MAX_CONCURRENT,
+      1,
+      20
+    ),
+  ],
+  [
     "/drep_updates",
     getBoundedIntEnv(
       "KOIOS_MAX_CONCURRENT_DREP_UPDATES",
@@ -361,6 +422,73 @@ function normalizeKoiosEndpoint(url: string): string {
 // Using KOIOS_SLOW_ENDPOINT_TIMEOUT_MS (default: base + 10 s) ensures the
 // server has time to return a 504 before the client cuts the connection.
 const KOIOS_SLOW_ENDPOINTS = new Set(["/proposal_voting_summary"]);
+const KOIOS_HIGH_VOLUME_ENDPOINTS = new Set([
+  "/vote_list",
+  "/pool_voting_power_history",
+  "/drep_updates",
+  "/drep_delegators",
+  "/drep_voting_power_history",
+]);
+
+function getKoiosRetryOptionsForProfile(
+  profile: KoiosRetryProfileName
+): RetryOptions {
+  const non429JitterMaxMs =
+    KOIOS_DEFAULT_RETRY_OPTIONS.non429JitterMaxMs ?? 0;
+
+  if (profile === "high_volume") {
+    return {
+      ...KOIOS_DEFAULT_RETRY_OPTIONS,
+      maxRetries: getBoundedIntEnv("KOIOS_RETRY_MAX_HIGH_VOLUME", 2, 0, 8),
+      maxRetriesForTimeouts: getBoundedIntEnv(
+        "KOIOS_RETRY_TIMEOUT_HIGH_VOLUME",
+        1,
+        0,
+        8
+      ),
+      maxRetriesForRateLimit: getBoundedIntEnv(
+        "KOIOS_RETRY_429_HIGH_VOLUME",
+        4,
+        0,
+        12
+      ),
+      non429JitterMaxMs: getBoundedIntEnv(
+        "KOIOS_NON_429_RETRY_JITTER_HIGH_VOLUME_MAX_MS",
+        non429JitterMaxMs,
+        0,
+        5000
+      ),
+    };
+  }
+
+  if (profile === "tx_metadata") {
+    return {
+      ...KOIOS_DEFAULT_RETRY_OPTIONS,
+      maxRetries: getBoundedIntEnv("KOIOS_RETRY_MAX_TX_METADATA", 2, 0, 8),
+      maxRetriesForTimeouts: getBoundedIntEnv(
+        "KOIOS_RETRY_TIMEOUT_TX_METADATA",
+        1,
+        0,
+        8
+      ),
+    };
+  }
+
+  if (profile === "slow_endpoint") {
+    return {
+      ...KOIOS_DEFAULT_RETRY_OPTIONS,
+      maxRetries: getBoundedIntEnv("KOIOS_RETRY_MAX_SLOW_ENDPOINT", 3, 0, 8),
+      maxRetriesForTimeouts: getBoundedIntEnv(
+        "KOIOS_RETRY_TIMEOUT_SLOW_ENDPOINT",
+        2,
+        0,
+        8
+      ),
+    };
+  }
+
+  return KOIOS_DEFAULT_RETRY_OPTIONS;
+}
 
 function getKoiosRetryProfile(url: string): KoiosRetryProfile {
   const endpoint = normalizeKoiosEndpoint(url);
@@ -368,23 +496,48 @@ function getKoiosRetryProfile(url: string): KoiosRetryProfile {
   if (KOIOS_SLOW_ENDPOINTS.has(endpoint)) {
     return {
       name: "slow_endpoint",
-      retry: KOIOS_RETRY_OPTIONS,
+      retry: getKoiosRetryOptionsForProfile("slow_endpoint"),
       timeoutMs: KOIOS_SLOW_ENDPOINT_TIMEOUT_MS,
+      timeoutByAttemptMs: [
+        KOIOS_REQUEST_TIMEOUT_MS,
+        KOIOS_SLOW_ENDPOINT_TIMEOUT_MS,
+      ],
+    };
+  }
+
+  if (KOIOS_HIGH_VOLUME_ENDPOINTS.has(endpoint)) {
+    return {
+      name: "high_volume",
+      retry: getKoiosRetryOptionsForProfile("high_volume"),
+      timeoutMs: KOIOS_REQUEST_TIMEOUT_MS,
+      timeoutByAttemptMs: [
+        Math.max(5000, Math.floor(KOIOS_REQUEST_TIMEOUT_MS * 0.55)),
+        Math.max(8000, Math.floor(KOIOS_REQUEST_TIMEOUT_MS * 0.75)),
+        KOIOS_REQUEST_TIMEOUT_MS,
+      ],
     };
   }
 
   if (endpoint === "/tx_metadata") {
     return {
       name: "tx_metadata",
-      retry: KOIOS_RETRY_OPTIONS,
+      retry: getKoiosRetryOptionsForProfile("tx_metadata"),
       timeoutMs: KOIOS_REQUEST_TIMEOUT_MS,
+      timeoutByAttemptMs: [
+        Math.max(5000, Math.floor(KOIOS_REQUEST_TIMEOUT_MS * 0.6)),
+        KOIOS_REQUEST_TIMEOUT_MS,
+      ],
     };
   }
 
   return {
     name: "default",
-    retry: KOIOS_RETRY_OPTIONS,
+    retry: getKoiosRetryOptionsForProfile("default"),
     timeoutMs: KOIOS_REQUEST_TIMEOUT_MS,
+    timeoutByAttemptMs: [
+      Math.max(5000, Math.floor(KOIOS_REQUEST_TIMEOUT_MS * 0.7)),
+      KOIOS_REQUEST_TIMEOUT_MS,
+    ],
   };
 }
 
@@ -397,7 +550,7 @@ function onKoiosRetry(
   const source = context?.source ?? "unknown";
   return (context: RetryAttemptContext) => {
     console.warn(
-      `[Koios Retry] source=${source} endpoint=${endpoint} profile=${profileName} attempt=${context.attempt}/${context.maxRetries} waitMs=${context.delayMs} status=${context.status ?? "unknown"}`
+      `[Koios Retry] source=${source} endpoint=${endpoint} profile=${profileName} attempt=${context.attempt}/${context.maxRetries} waitMs=${context.delayMs} status=${context.status ?? "unknown"} class=${context.errorClass} code=${context.code ?? "none"}`
     );
   };
 }
@@ -410,7 +563,9 @@ function getEndpointLimiter(url: string): ConcurrencyLimiter | undefined {
   const existing = endpointLimiters.get(endpoint);
   if (existing) return existing;
 
-  const created = new ConcurrencyLimiter(endpoint, endpointMax);
+  const created = new ConcurrencyLimiter(endpoint, () =>
+    applyAdaptiveCap(endpointMax)
+  );
   endpointLimiters.set(endpoint, created);
   return created;
 }
@@ -445,10 +600,30 @@ const koiosPressureCooldownMs = getBoundedIntEnv(
   5000,
   600000
 );
+const koiosTimeoutCooloffThreshold = getBoundedIntEnv(
+  "KOIOS_TIMEOUT_COOLOFF_THRESHOLD",
+  DEFAULT_KOIOS_TIMEOUT_COOLOFF_THRESHOLD,
+  1,
+  100
+);
+const koiosTimeoutCooloffWindowMs = getBoundedIntEnv(
+  "KOIOS_TIMEOUT_COOLOFF_WINDOW_MS",
+  DEFAULT_KOIOS_TIMEOUT_COOLOFF_WINDOW_MS,
+  1000,
+  300000
+);
+const koiosTimeoutCooloffMs = getBoundedIntEnv(
+  "KOIOS_TIMEOUT_COOLOFF_MS",
+  DEFAULT_KOIOS_TIMEOUT_COOLOFF_MS,
+  1000,
+  300000
+);
 let koiosRequestCounter = 0;
 let koiosBackoffUntil = 0;
 let koiosPressureCooldownUntil = 0;
+let koiosTimeoutCooldownUntil = 0;
 const koiosPressureEvents: number[] = [];
+const koiosTimeoutEvents: number[] = [];
 
 function nextKoiosRequestId(): number {
   koiosRequestCounter += 1;
@@ -470,12 +645,32 @@ function isKoiosPressureError(error: any): boolean {
   return false;
 }
 
+function isKoiosTimeoutLikeError(error: any): boolean {
+  const message = String(error?.message ?? "").toLowerCase();
+  const code = String(error?.code ?? "").toUpperCase();
+  return (
+    message.includes("timeout") ||
+    message.includes("aborted") ||
+    code === "ETIMEDOUT" ||
+    code === "ECONNABORTED"
+  );
+}
+
 function trimKoiosPressureEvents(now: number): void {
   while (
     koiosPressureEvents.length > 0 &&
     now - koiosPressureEvents[0] > koiosPressureWindowMs
   ) {
     koiosPressureEvents.shift();
+  }
+}
+
+function trimKoiosTimeoutEvents(now: number): void {
+  while (
+    koiosTimeoutEvents.length > 0 &&
+    now - koiosTimeoutEvents[0] > koiosTimeoutCooloffWindowMs
+  ) {
+    koiosTimeoutEvents.shift();
   }
 }
 
@@ -498,6 +693,25 @@ function recordKoiosPressureSignal(error: any): void {
   );
   console.warn(
     `[Koios Pressure] action=degraded reason=error-burst windowMs=${koiosPressureWindowMs} threshold=${koiosPressureThreshold} cooldownMs=${koiosPressureCooldownMs} observed=${koiosPressureEvents.length}`
+  );
+}
+
+function recordKoiosTimeoutCooloffSignal(error: any): void {
+  if (!isKoiosTimeoutLikeError(error)) {
+    return;
+  }
+  const now = Date.now();
+  trimKoiosTimeoutEvents(now);
+  koiosTimeoutEvents.push(now);
+  if (koiosTimeoutEvents.length < koiosTimeoutCooloffThreshold) {
+    return;
+  }
+  koiosTimeoutCooldownUntil = Math.max(
+    koiosTimeoutCooldownUntil,
+    now + koiosTimeoutCooloffMs
+  );
+  console.warn(
+    `[Koios Timeout Cooloff] action=degraded reason=timeout-burst windowMs=${koiosTimeoutCooloffWindowMs} threshold=${koiosTimeoutCooloffThreshold} cooldownMs=${koiosTimeoutCooloffMs} observed=${koiosTimeoutEvents.length}`
   );
 }
 
@@ -529,8 +743,11 @@ export function getKoiosPressureState(): {
 export function getKoiosLimiterState(): {
   backoffUntil: number;
   backoffActive: boolean;
+  timeoutCooldownUntil: number;
+  timeoutCooldownActive: boolean;
   burstWindowMs: number;
   burstMaxRequests: number;
+  adaptiveScalePercent: number;
   pressure: ReturnType<typeof getKoiosPressureState>;
   concurrency: {
     global: { active: number; pending: number; max: number };
@@ -551,6 +768,8 @@ export function getKoiosLimiterState(): {
   return {
     backoffUntil: koiosBackoffUntil,
     backoffActive: koiosBackoffUntil > now,
+    timeoutCooldownUntil: koiosTimeoutCooldownUntil,
+    timeoutCooldownActive: koiosTimeoutCooldownUntil > now,
     burstWindowMs: KOIOS_BURST_WINDOW_MS,
     burstMaxRequests: getBoundedIntEnv(
       "KOIOS_BURST_MAX_REQUESTS",
@@ -558,6 +777,7 @@ export function getKoiosLimiterState(): {
       1,
       100
     ),
+    adaptiveScalePercent: getAdaptiveScalePercent(),
     pressure: getKoiosPressureState(),
     concurrency: {
       global: {
@@ -623,33 +843,55 @@ async function withKoiosConcurrencyLimit<T>(
   url: string,
   operation: () => Promise<T>
 ): Promise<T> {
+  const endpoint = normalizeKoiosEndpoint(url);
+  let waitBackoffMs = 0;
+  let waitPressureMs = 0;
+  let waitTimeoutCooloffMs = 0;
   // Pre-burst checks: wait out any active 429 backoff or pressure cooldown
   // before entering the burst queue. This prevents callers from stacking up
   // behind a long backoff and then thundering-herding when it expires.
   const now = Date.now();
   if (koiosBackoffUntil > now) {
-    await sleep(koiosBackoffUntil - now);
+    const waitMs = koiosBackoffUntil - now;
+    waitBackoffMs += waitMs;
+    await sleep(waitMs);
   }
   // Task 3: enforce pressure cooldown — mirrors GitHub's waitForRateLimit().
   const pressureNow = Date.now();
   if (koiosPressureCooldownUntil > pressureNow) {
-    await sleep(koiosPressureCooldownUntil - pressureNow);
+    const waitMs = koiosPressureCooldownUntil - pressureNow;
+    waitPressureMs += waitMs;
+    await sleep(waitMs);
+  }
+  const timeoutNow = Date.now();
+  if (koiosTimeoutCooldownUntil > timeoutNow) {
+    const waitMs = koiosTimeoutCooldownUntil - timeoutNow;
+    waitTimeoutCooloffMs += waitMs;
+    await sleep(waitMs);
   }
 
-  await globalKoiosBurstLimiter.acquire();
+  const burstWaitMs = await globalKoiosBurstLimiter.acquire();
 
   // Task 4: re-check after burst queue — callers that queued during a backoff
   // or pressure cooldown must not all fire at once when the burst slot opens.
   const afterBurst = Date.now();
   if (koiosBackoffUntil > afterBurst) {
-    await sleep(koiosBackoffUntil - afterBurst);
+    const waitMs = koiosBackoffUntil - afterBurst;
+    waitBackoffMs += waitMs;
+    await sleep(waitMs);
   }
   if (koiosPressureCooldownUntil > afterBurst) {
-    await sleep(koiosPressureCooldownUntil - afterBurst);
+    const waitMs = koiosPressureCooldownUntil - afterBurst;
+    waitPressureMs += waitMs;
+    await sleep(waitMs);
+  }
+  if (koiosTimeoutCooldownUntil > afterBurst) {
+    const waitMs = koiosTimeoutCooldownUntil - afterBurst;
+    waitTimeoutCooloffMs += waitMs;
+    await sleep(waitMs);
   }
 
   const requestId = nextKoiosRequestId();
-  const endpoint = normalizeKoiosEndpoint(url);
   const startedAt = Date.now();
   const endpointLimiter = getEndpointLimiter(url);
 
@@ -675,6 +917,11 @@ async function withKoiosConcurrencyLimit<T>(
           endpointAcquire,
           globalAcquire,
         });
+        if (koiosLimiterLoggingEnabled) {
+          console.log(
+            `[Koios Limiter Wait] req=${requestId} endpoint=${endpoint} backoffWaitMs=${waitBackoffMs} pressureWaitMs=${waitPressureMs} timeoutCooloffWaitMs=${waitTimeoutCooloffMs} burstWaitMs=${burstWaitMs}`
+          );
+        }
       }
     }
   }
@@ -694,6 +941,11 @@ async function withKoiosConcurrencyLimit<T>(
         durationMs: Date.now() - startedAt,
         globalAcquire,
       });
+      if (koiosLimiterLoggingEnabled) {
+        console.log(
+          `[Koios Limiter Wait] req=${requestId} endpoint=${endpoint} backoffWaitMs=${waitBackoffMs} pressureWaitMs=${waitPressureMs} timeoutCooloffWaitMs=${waitTimeoutCooloffMs} burstWaitMs=${burstWaitMs}`
+        );
+      }
     }
   }
 }
@@ -804,6 +1056,7 @@ export const getKoiosService = (): AxiosInstance => {
         );
       }
       recordKoiosPressureSignal(error);
+      recordKoiosTimeoutCooloffSignal(error);
       console.error("Koios API Error:", {
         source: error.config?.__koiosSource,
         status: error.response?.status,
@@ -835,6 +1088,7 @@ async function koiosGetInternal<T>(
   const retryProfile = getKoiosRetryProfile(request.url);
   const endpoint = normalizeKoiosEndpoint(request.url);
   const source = context?.source ?? "unknown";
+  let attemptTimeoutMs = retryProfile.timeoutMs;
 
   try {
     return await withRetry(
@@ -842,7 +1096,7 @@ async function koiosGetInternal<T>(
         withKoiosConcurrencyLimit(request.url, async () => {
           const requestConfig: any = {
             params: request.params,
-            timeout: retryProfile.timeoutMs,
+            timeout: attemptTimeoutMs,
             __koiosSource: source,
           };
           const response = await koios.get<T>(request.url, requestConfig);
@@ -852,12 +1106,16 @@ async function koiosGetInternal<T>(
         }),
       retryProfile.retry,
       {
+        onBeforeAttempt: (attempt) => {
+          attemptTimeoutMs =
+            retryProfile.timeoutByAttemptMs?.[attempt] ?? retryProfile.timeoutMs;
+        },
         onRetry: onKoiosRetry(request.url, retryProfile.name, context),
       }
     );
   } catch (error: any) {
     console.error(
-      `[Koios Request Failed] source=${source} endpoint=${endpoint} profile=${retryProfile.name} timeoutMs=${retryProfile.timeoutMs} message=${error?.message ?? error}`
+      `[Koios Request Failed] source=${source} endpoint=${endpoint} profile=${retryProfile.name} timeoutMs=${attemptTimeoutMs} message=${error?.message ?? error}`
     );
     throw error;
   }
@@ -1019,6 +1277,7 @@ export async function koiosPost<T>(
   const retryProfile = getKoiosRetryProfile(request.url);
   const endpoint = normalizeKoiosEndpoint(request.url);
   const source = context?.source ?? "unknown";
+  let attemptTimeoutMs = retryProfile.timeoutMs;
   enforceKoiosPayloadLimit(request.url, data);
 
   try {
@@ -1026,7 +1285,7 @@ export async function koiosPost<T>(
       () =>
         withKoiosConcurrencyLimit(request.url, async () => {
           const requestConfig: any = {
-            timeout: retryProfile.timeoutMs,
+            timeout: attemptTimeoutMs,
             __koiosSource: source,
           };
           const response = await koios.post<T>(request.url, data, requestConfig);
@@ -1034,12 +1293,16 @@ export async function koiosPost<T>(
         }),
       retryProfile.retry,
       {
+        onBeforeAttempt: (attempt) => {
+          attemptTimeoutMs =
+            retryProfile.timeoutByAttemptMs?.[attempt] ?? retryProfile.timeoutMs;
+        },
         onRetry: onKoiosRetry(request.url, retryProfile.name, context),
       }
     );
   } catch (error: any) {
     console.error(
-      `[Koios Request Failed] source=${source} endpoint=${endpoint} profile=${retryProfile.name} timeoutMs=${retryProfile.timeoutMs} message=${error?.message ?? error}`
+      `[Koios Request Failed] source=${source} endpoint=${endpoint} profile=${retryProfile.name} timeoutMs=${attemptTimeoutMs} message=${error?.message ?? error}`
     );
     throw error;
   }

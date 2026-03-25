@@ -95,6 +95,12 @@ const PROPOSAL_SYNC_COOLDOWN_MS = getCooldownMs(
   "PROPOSAL_SYNC_COOLDOWN_MS",
   20_000
 );
+const SYNC_ON_READ_PRESSURE_COOLDOWN_MULTIPLIER = getBoundedIntEnv(
+  "SYNC_ON_READ_PRESSURE_COOLDOWN_MULTIPLIER",
+  3,
+  1,
+  10
+);
 const PROPOSAL_SYNC_ON_READ_GUARD_PREFIX = "sync-on-read:proposal:";
 const PROPOSAL_SYNC_ON_READ_GUARD_TTL_MS = getBoundedIntEnv(
   "SYNC_ON_READ_PROPOSAL_GUARD_TTL_MS",
@@ -159,6 +165,16 @@ async function getSyncOnReadSkipReason(
   }
 
   return null;
+}
+
+function getProposalSyncCooldownMs(): number {
+  if (!SYNC_ON_READ_SKIP_WHEN_KOIOS_DEGRADED) {
+    return PROPOSAL_SYNC_COOLDOWN_MS;
+  }
+  const pressure = getKoiosPressureState();
+  return pressure.active
+    ? PROPOSAL_SYNC_COOLDOWN_MS * SYNC_ON_READ_PRESSURE_COOLDOWN_MULTIPLIER
+    : PROPOSAL_SYNC_COOLDOWN_MS;
 }
 
 const proposalSnapshotSelect = {
@@ -638,6 +654,7 @@ async function maybeStartProposalSync(identifier: string): Promise<void> {
   }
 
   pruneProposalSyncCooldowns(now);
+  const proposalCooldownMs = getProposalSyncCooldownMs();
 
   // Check if sync is already in progress for this proposal
   if (proposalSyncsInProgress.has(target.canonicalKey)) {
@@ -649,9 +666,9 @@ async function maybeStartProposalSync(identifier: string): Promise<void> {
 
   // Check cooldown for this specific proposal
   const lastSyncTime = proposalSyncTimes.get(target.canonicalKey) || 0;
-  if (now - lastSyncTime < PROPOSAL_SYNC_COOLDOWN_MS) {
+  if (now - lastSyncTime < proposalCooldownMs) {
     console.log(
-      `[Sync-on-Read] action=skip trigger=proposal identifier=${target.canonicalKey} reason=cooldown remainingMs=${PROPOSAL_SYNC_COOLDOWN_MS - (now - lastSyncTime)}`
+      `[Sync-on-Read] action=skip trigger=proposal identifier=${target.canonicalKey} reason=cooldown remainingMs=${proposalCooldownMs - (now - lastSyncTime)}`
     );
     return;
   }

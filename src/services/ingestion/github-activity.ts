@@ -1,6 +1,10 @@
 import { Prisma, type GithubRepository } from "@prisma/client";
 import { prisma } from "../prisma";
 import { githubGraphQL, buildBatchRepoQuery, getRateLimitState } from "../github-graphql";
+import {
+  recordDbFailureForFailFast,
+  shouldFailFastForDb,
+} from "./dbFailFast";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -120,6 +124,14 @@ async function syncRepos(repos: GithubRepository[]): Promise<SyncResult> {
   };
 
   if (repos.length === 0) return result;
+  if (shouldFailFastForDb("ingestion.github-activity.sync-repos")) {
+    result.failed = repos.length;
+    result.errors.push({
+      repo: "all",
+      error: "DB fail-fast active; skipping github activity sync",
+    });
+    return result;
+  }
 
   const since = new Date(
     Date.now() - RECENT_WINDOW_DAYS * 24 * 60 * 60 * 1000
@@ -132,6 +144,7 @@ async function syncRepos(repos: GithubRepository[]): Promise<SyncResult> {
     try {
       await syncBatch(batch, since, today, result);
     } catch (error: any) {
+      recordDbFailureForFailFast(error, "ingestion.github-activity.sync-batch");
       console.error(`[sync] Batch ${i / BATCH_SIZE} failed:`, error.message);
       for (const repo of batch) {
         result.failed++;
@@ -175,6 +188,9 @@ async function syncBatch(
     }
 
     try {
+      if (shouldFailFastForDb("ingestion.github-activity.sync-batch-item")) {
+        throw new Error("DB fail-fast active; skipping github repository batch");
+      }
       const events = extractEvents(repo.id, repoData, since);
       allEvents.push(...events);
       const authors = collectAuthors(repoData);
@@ -232,6 +248,7 @@ async function syncBatch(
 
       result.success++;
     } catch (error: any) {
+      recordDbFailureForFailFast(error, "ingestion.github-activity.sync-batch-item");
       result.failed++;
       result.errors.push({ repo: repo.id, error: error.message });
     }
@@ -635,6 +652,14 @@ export async function snapshotAllRepos(): Promise<SnapshotResult> {
 
   const result: SnapshotResult = { total: repos.length, success: 0, failed: 0, errors: [] };
   if (repos.length === 0) return result;
+  if (shouldFailFastForDb("ingestion.github-activity.snapshot")) {
+    result.failed = repos.length;
+    result.errors.push({
+      repo: "all",
+      error: "DB fail-fast active; skipping github snapshot sync",
+    });
+    return result;
+  }
 
   const today = new Date();
   today.setUTCHours(0, 0, 0, 0);
@@ -668,6 +693,9 @@ export async function snapshotAllRepos(): Promise<SnapshotResult> {
         }
 
         try {
+          if (shouldFailFastForDb("ingestion.github-activity.snapshot-item")) {
+            throw new Error("DB fail-fast active; skipping github snapshot item");
+          }
           await prisma.repoDailySnapshot.upsert({
             where: { repoId_date: { repoId: repo.id, date: today } },
             create: {
@@ -696,11 +724,16 @@ export async function snapshotAllRepos(): Promise<SnapshotResult> {
 
           result.success++;
         } catch (error: any) {
+          recordDbFailureForFailFast(
+            error,
+            "ingestion.github-activity.snapshot-item"
+          );
           result.failed++;
           result.errors.push({ repo: `${repo.owner}/${repo.name}`, error: error.message });
         }
       }
     } catch (error: any) {
+      recordDbFailureForFailFast(error, "ingestion.github-activity.snapshot-batch");
       for (const repo of batch) {
         result.failed++;
         result.errors.push({ repo: `${repo.owner}/${repo.name}`, error: error.message });

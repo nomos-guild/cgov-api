@@ -7,6 +7,7 @@ import {
   ProposalStatus,
 } from "@prisma/client";
 import { prisma } from "../prisma";
+import { getKoiosPressureState } from "../koios";
 import { koiosGet } from "../koios";
 import {
   createVoteIngestionRunCache,
@@ -36,7 +37,16 @@ import {
   logInactivePowerMetrics,
 } from "./inactiveDrepPower.service";
 import type { InactivePowerMetrics } from "./inactiveDrepPower.service";
+import {
+  isDbConnectivityError,
+  recordDbFailureForFailFast,
+  shouldFailFastForDb,
+} from "./dbFailFast";
 import { updateProposalVotingPower } from "./proposalVotingPower.service";
+import {
+  createProposalVotingPowerRunCache,
+  type ProposalVotingPowerRunCache,
+} from "./proposalVotingPower.service";
 import type {
   KoiosProposal,
 } from "../../types/koios.types";
@@ -142,6 +152,8 @@ export interface IngestProposalOptions {
   voteRunCache?: VoteIngestionRunCache;
   /** Optional per-run cache for inactive DRep power (scoped to syncAllProposals run) */
   inactivePowerRunCache?: Map<string, bigint>;
+  /** Optional per-run cache for proposal voting power fetches */
+  proposalVotingPowerRunCache?: ProposalVotingPowerRunCache;
   /** Optional metrics collector for inactive DRep power cache behavior */
   inactivePowerMetrics?: InactivePowerMetrics;
   /**
@@ -241,11 +253,15 @@ export async function ingestProposalData(
   koiosProposal: KoiosProposal,
   options?: IngestProposalOptions
 ): Promise<ProposalIngestionResult> {
+  if (shouldFailFastForDb("ingestion.proposal.ingest")) {
+    throw new Error("DB fail-fast active; skipping proposal ingestion");
+  }
   const {
     currentEpoch: currentEpochOverride,
     minVotesEpoch: minVotesEpochOverride,
     voteRunCache,
     inactivePowerRunCache,
+    proposalVotingPowerRunCache,
     inactivePowerMetrics,
     useCache,
     deferStatusFinalization,
@@ -395,6 +411,10 @@ export async function ingestProposalData(
     {
       useCache: useCache !== false,
       runCache: voteRunCache,
+      fetchSurveyMetadata:
+        process.env.KOIOS_SKIP_TX_METADATA_WHEN_DEGRADED !== "false"
+          ? !getKoiosPressureState().active
+          : true,
     }
   );
   const voteStats = voteResult.stats;
@@ -449,7 +469,8 @@ export async function ingestProposalData(
     inactivePowerEpoch,
     isActiveProposal,
     inactivePowerRunCache,
-    inactivePowerMetrics
+    inactivePowerMetrics,
+    proposalVotingPowerRunCache
   );
 
   const result: ProposalIngestionResult = {
@@ -621,6 +642,7 @@ export async function syncAllProposals(): Promise<SyncAllProposalsResult> {
     // 5. Get current epoch once for the whole run and reuse it
     const currentEpoch = await getCurrentEpoch();
     const inactivePowerRunCache = new Map<string, bigint>();
+    const proposalVotingPowerRunCache = createProposalVotingPowerRunCache();
     const inactivePowerMetrics = createInactivePowerMetrics();
     const voteRunTotals = {
       processed: 0,
@@ -640,6 +662,7 @@ export async function syncAllProposals(): Promise<SyncAllProposalsResult> {
           minVotesEpoch,
           voteRunCache,
           inactivePowerRunCache,
+          proposalVotingPowerRunCache,
           inactivePowerMetrics,
           useCache: true,
           deferStatusFinalization: true,
@@ -671,6 +694,9 @@ export async function syncAllProposals(): Promise<SyncAllProposalsResult> {
           `[Proposal Sync] ✓ Synced ${koiosProposal.proposal_tx_hash} (${results.success}/${results.total})`
         );
       } catch (error: any) {
+        if (isDbConnectivityError(error)) {
+          recordDbFailureForFailFast(error, "ingestion.proposal.sync-all");
+        }
         results.failed++;
         results.errors.push({
           proposalHash: koiosProposal.proposal_tx_hash,
@@ -680,6 +706,12 @@ export async function syncAllProposals(): Promise<SyncAllProposalsResult> {
           `[Proposal Sync] ✗ Failed to sync ${koiosProposal.proposal_tx_hash}:`,
           error.message
         );
+        if (shouldFailFastForDb("ingestion.proposal.sync-all")) {
+          console.warn(
+            "[Proposal Sync] action=stop-early reason=db-fail-fast-active"
+          );
+          break;
+        }
       }
     }
 
