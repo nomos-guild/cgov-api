@@ -15,6 +15,11 @@ import {
   releaseJobLock,
 } from "../services/ingestion/syncLock";
 import { shouldSkipForDbPressure } from "./dbPressureGuard";
+import {
+  acquireKoiosHeavyJobLane,
+  releaseKoiosHeavyJobLane,
+  shouldSkipForKoiosPressure,
+} from "./koiosPressureGuard";
 import { applyCronJitter } from "./jitter";
 
 let isRunning = false;
@@ -64,9 +69,13 @@ function startDrepInfoSyncJobWithSchedule(schedule: string) {
     const startedAt = Date.now();
     console.log(`\n[${timestamp}] Starting DRep info sync job...`);
     let acquired = false;
+    let laneAcquired = false;
 
     try {
       if (shouldSkipForDbPressure("drep-info-sync")) {
+        return;
+      }
+      if (shouldSkipForKoiosPressure("drep-info-sync")) {
         return;
       }
       acquired = await acquireJobLock(JOB_NAME, DISPLAY_NAME, {
@@ -77,6 +86,15 @@ function startDrepInfoSyncJobWithSchedule(schedule: string) {
         console.log(
           `[${timestamp}] DRep info sync skipped because another instance already holds the DB lock.`
         );
+        return;
+      }
+      laneAcquired = await acquireKoiosHeavyJobLane(JOB_NAME);
+      if (!laneAcquired) {
+        console.log(
+          `[${timestamp}] DRep info sync skipped because Koios heavy lane is busy.`
+        );
+        await releaseJobLock(JOB_NAME, "success", 0);
+        acquired = false;
         return;
       }
 
@@ -99,11 +117,29 @@ function startDrepInfoSyncJobWithSchedule(schedule: string) {
         "success",
         result.drepInfo?.updated ?? 0
       );
+      if (laneAcquired) {
+        await releaseKoiosHeavyJobLane("success");
+        laneAcquired = false;
+      }
     } catch (error: any) {
       console.error(
         `[${timestamp}] DRep info sync job failed:`,
         error?.message ?? String(error)
       );
+      if (laneAcquired) {
+        try {
+          await releaseKoiosHeavyJobLane(
+            "failed",
+            error?.message ?? String(error)
+          );
+          laneAcquired = false;
+        } catch (laneError: any) {
+          console.error(
+            `[${timestamp}] Failed to release Koios heavy lane lock:`,
+            laneError?.message ?? laneError
+          );
+        }
+      }
       if (acquired) {
         try {
           await releaseJobLock(

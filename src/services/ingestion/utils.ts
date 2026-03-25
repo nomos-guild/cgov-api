@@ -10,13 +10,27 @@ export interface RetryOptions {
   baseDelay: number; // milliseconds
   maxDelay: number;
   non429JitterMaxMs?: number;
+  maxRetriesForRateLimit?: number;
+  maxRetriesForTimeouts?: number;
+  maxRetriesForNetworkErrors?: number;
+  maxRetryAfterMs?: number;
 }
+
+export type RetryErrorClass =
+  | "rate_limit"
+  | "timeout"
+  | "network"
+  | "server"
+  | "client"
+  | "unknown";
 
 export interface RetryAttemptContext {
   attempt: number;
   maxRetries: number;
   delayMs: number;
   status?: number;
+  errorClass: RetryErrorClass;
+  code?: string;
   error: unknown;
 }
 
@@ -39,6 +53,54 @@ const DEFAULT_RETRY_OPTIONS: RetryOptions = {
 function getRetryJitterMs(maxJitterMs: number | undefined): number {
   if (!maxJitterMs || maxJitterMs <= 0) return 0;
   return Math.floor(Math.random() * (maxJitterMs + 1));
+}
+
+function classifyRetryError(error: any): RetryErrorClass {
+  const status = error?.response?.status as number | undefined;
+  if (status === 429) return "rate_limit";
+  if (status && status >= 500) return "server";
+  if (status && status >= 400) return "client";
+
+  const code = String(error?.code ?? "").toUpperCase();
+  const message = String(error?.message ?? "").toLowerCase();
+
+  if (
+    code === "ECONNABORTED" ||
+    code === "ETIMEDOUT" ||
+    message.includes("timeout") ||
+    message.includes("aborted")
+  ) {
+    return "timeout";
+  }
+  if (
+    code === "ECONNRESET" ||
+    code === "EPIPE" ||
+    code === "ENOTFOUND" ||
+    code === "EAI_AGAIN" ||
+    code === "ECONNREFUSED" ||
+    message.includes("socket hang up") ||
+    message.includes("fetch failed")
+  ) {
+    return "network";
+  }
+
+  return "unknown";
+}
+
+function getMaxRetriesForError(
+  options: RetryOptions,
+  errorClass: RetryErrorClass
+): number {
+  if (errorClass === "rate_limit") {
+    return options.maxRetriesForRateLimit ?? options.maxRetries;
+  }
+  if (errorClass === "timeout") {
+    return options.maxRetriesForTimeouts ?? options.maxRetries;
+  }
+  if (errorClass === "network") {
+    return options.maxRetriesForNetworkErrors ?? options.maxRetries;
+  }
+  return options.maxRetries;
 }
 
 /**
@@ -75,6 +137,9 @@ export async function withRetry<T>(
       lastError = error;
 
       const status = error?.response?.status as number | undefined;
+      const code = String(error?.code ?? "").toUpperCase() || undefined;
+      const errorClass = classifyRetryError(error);
+      const maxRetriesForError = getMaxRetriesForError(options, errorClass);
 
       // Don't retry on client errors (4xx) or validation errors
       // EXCEPT 429 (Too Many Requests), which we *do* want to retry with backoff.
@@ -83,6 +148,7 @@ export async function withRetry<T>(
       // are intentionally retried — Koios docs explicitly note that queries
       // exceeding 30 s are returned as 504, and 503 signals transient overload.
       if (
+        errorClass === "client" &&
         status &&
         status >= 400 &&
         status < 500 &&
@@ -96,9 +162,9 @@ export async function withRetry<T>(
       }
 
       // If max retries reached, throw
-      if (attempt === options.maxRetries) {
+      if (attempt >= maxRetriesForError) {
         throw new Error(
-          `Operation failed after ${options.maxRetries} retries: ${error.message}`
+          `Operation failed after ${maxRetriesForError} retries: ${error.message}`
         );
       }
       
@@ -112,7 +178,7 @@ export async function withRetry<T>(
 
       const jitterMs = status === 429 ? 0 : getRetryJitterMs(options.non429JitterMaxMs);
 
-      if (status === 429) {
+      if (errorClass === "rate_limit") {
         const retryAfterHeader =
           error.response?.headers?.["retry-after"] ??
           error.response?.headers?.["Retry-After"];
@@ -122,35 +188,38 @@ export async function withRetry<T>(
           : NaN;
 
         if (!Number.isNaN(retryAfterSeconds) && retryAfterSeconds > 0) {
-          delay = Math.min(retryAfterSeconds * 1000, options.maxDelay);
+          const retryAfterCap = options.maxRetryAfterMs ?? Number.POSITIVE_INFINITY;
+          delay = Math.min(retryAfterSeconds * 1000, retryAfterCap);
         }
 
         console.warn(
           `[withRetry] Rate limited (429). Waiting ${delay}ms before retry ` +
-          `(${attempt + 1}/${options.maxRetries})...`
+          `(${attempt + 1}/${maxRetriesForError})...`
         );
       }
 
       const delayWithJitter = delay + jitterMs;
 
-      if (status === 429) {
+      if (errorClass === "rate_limit") {
         // already logged above
       } else if (jitterMs > 0) {
         console.log(
-          `Retry attempt ${attempt + 1}/${options.maxRetries} after ${delayWithJitter}ms delay ` +
+          `Retry attempt ${attempt + 1}/${maxRetriesForError} after ${delayWithJitter}ms delay ` +
           `(base=${delay}ms + jitter=${jitterMs}ms)...`
         );
       } else {
         console.log(
-          `Retry attempt ${attempt + 1}/${options.maxRetries} after ${delay}ms delay...`
+          `Retry attempt ${attempt + 1}/${maxRetriesForError} after ${delay}ms delay...`
         );
       }
 
       hooks?.onRetry?.({
         attempt: attempt + 1,
-        maxRetries: options.maxRetries,
+        maxRetries: maxRetriesForError,
         delayMs: delayWithJitter,
         status,
+        errorClass,
+        code,
         error,
       });
 

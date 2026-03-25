@@ -1,4 +1,5 @@
 import { prisma } from "../prisma";
+import { getKoiosPressureState } from "../koios";
 import {
   getAllPoolVotingPowerHistoryForEpoch,
   getDrepEpochSummary,
@@ -14,6 +15,20 @@ export interface VotingPowerUpdateResult {
   success: boolean;
   error?: string;
   summaryFound: boolean;
+  skipped?: boolean;
+  skippedReason?: string;
+}
+
+export interface ProposalVotingPowerRunCache {
+  spoTotalByEpoch: Map<number, bigint>;
+  spoTotalInFlight: Map<number, Promise<bigint>>;
+}
+
+export function createProposalVotingPowerRunCache(): ProposalVotingPowerRunCache {
+  return {
+    spoTotalByEpoch: new Map<number, bigint>(),
+    spoTotalInFlight: new Map<number, Promise<bigint>>(),
+  };
 }
 
 function lovelaceToBigInt(lovelace: string | null | undefined): bigint | null {
@@ -55,7 +70,20 @@ async function fetchDrepTotalVotingPower(epochNo: number): Promise<bigint> {
   }
 }
 
-async function fetchSpoTotalVotingPower(epochNo: number): Promise<bigint> {
+async function fetchSpoTotalVotingPower(
+  epochNo: number,
+  runCache?: ProposalVotingPowerRunCache
+): Promise<bigint> {
+  const fromCache = runCache?.spoTotalByEpoch.get(epochNo);
+  if (fromCache !== undefined) {
+    return fromCache;
+  }
+  const inFlight = runCache?.spoTotalInFlight.get(epochNo);
+  if (inFlight) {
+    return inFlight;
+  }
+
+  const loadPromise = (async () => {
   try {
     const pools = await getAllPoolVotingPowerHistoryForEpoch({
       epochNo,
@@ -75,6 +103,7 @@ async function fetchSpoTotalVotingPower(epochNo: number): Promise<bigint> {
       `[SPO Total Voting Power] Summed ${poolCount} pools for epoch ${epochNo}`
     );
 
+    runCache?.spoTotalByEpoch.set(epochNo, totalLovelace);
     return totalLovelace;
   } catch (error: any) {
     console.warn(
@@ -82,6 +111,17 @@ async function fetchSpoTotalVotingPower(epochNo: number): Promise<bigint> {
       error.message
     );
     return BigInt(0);
+  }
+  })();
+
+  if (runCache) {
+    runCache.spoTotalInFlight.set(epochNo, loadPromise);
+  }
+
+  try {
+    return await loadPromise;
+  } finally {
+    runCache?.spoTotalInFlight.delete(epochNo);
   }
 }
 
@@ -92,9 +132,27 @@ export async function updateProposalVotingPower(
   inactivePowerEpoch: number,
   isActiveProposal: boolean,
   inactivePowerRunCache?: Map<string, bigint>,
-  inactivePowerMetrics?: InactivePowerMetrics
+  inactivePowerMetrics?: InactivePowerMetrics,
+  votingPowerRunCache?: ProposalVotingPowerRunCache
 ): Promise<VotingPowerUpdateResult> {
   try {
+    if (
+      process.env.KOIOS_SKIP_EXPENSIVE_ENRICHMENTS_WHEN_DEGRADED !== "false"
+    ) {
+      const pressure = getKoiosPressureState();
+      if (pressure.active) {
+        console.warn(
+          `[Voting Power] Skipping update for ${proposalId} due to Koios degraded state (remainingMs=${pressure.remainingMs})`
+        );
+        return {
+          success: true,
+          summaryFound: false,
+          skipped: true,
+          skippedReason: "koios-degraded",
+        };
+      }
+    }
+
     const votingSummary = await fetchProposalVotingSummary(proposalId);
 
     if (!votingSummary) {
@@ -118,7 +176,7 @@ export async function updateProposalVotingPower(
     const [drepTotalVotePower, spoTotalVotePower, drepInactiveVotePower] =
       await Promise.all([
         fetchDrepTotalVotingPower(drepTotalPowerEpoch),
-        fetchSpoTotalVotingPower(spoTotalPowerEpoch),
+        fetchSpoTotalVotingPower(spoTotalPowerEpoch, votingPowerRunCache),
         shouldCalculateInactive
           ? getInactivePowerWithCache(
               inactivePowerEpoch,

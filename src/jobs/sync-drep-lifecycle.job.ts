@@ -11,6 +11,11 @@ import { prisma } from "../services";
 import { syncDrepLifecycleStep } from "../services/ingestion/epoch-analytics.service";
 import { acquireJobLock, releaseJobLock } from "../services/ingestion/syncLock";
 import { shouldSkipForDbPressure } from "./dbPressureGuard";
+import {
+  acquireKoiosHeavyJobLane,
+  releaseKoiosHeavyJobLane,
+  shouldSkipForKoiosPressure,
+} from "./koiosPressureGuard";
 import { applyCronJitter } from "./jitter";
 
 let isRunning = false;
@@ -54,9 +59,13 @@ function startDrepLifecycleSyncJobWithSchedule(schedule: string) {
     const startedAt = Date.now();
     console.log(`\n[${timestamp}] Starting DRep lifecycle sync job...`);
     let acquired = false;
+    let laneAcquired = false;
 
     try {
       if (shouldSkipForDbPressure("drep-lifecycle-sync")) {
+        return;
+      }
+      if (shouldSkipForKoiosPressure("drep-lifecycle-sync")) {
         return;
       }
       acquired = await acquireJobLock(JOB_NAME, DISPLAY_NAME, {
@@ -66,6 +75,15 @@ function startDrepLifecycleSyncJobWithSchedule(schedule: string) {
         console.log(
           `[${timestamp}] DRep lifecycle sync skipped because another instance already holds the DB lock.`
         );
+        return;
+      }
+      laneAcquired = await acquireKoiosHeavyJobLane(JOB_NAME);
+      if (!laneAcquired) {
+        console.log(
+          `[${timestamp}] DRep lifecycle sync skipped because Koios heavy lane is busy.`
+        );
+        await releaseJobLock(JOB_NAME, "success", 0);
+        acquired = false;
         return;
       }
 
@@ -99,11 +117,29 @@ function startDrepLifecycleSyncJobWithSchedule(schedule: string) {
         "success",
         result.drepLifecycle?.eventsIngested ?? 0
       );
+      if (laneAcquired) {
+        await releaseKoiosHeavyJobLane("success");
+        laneAcquired = false;
+      }
     } catch (error: any) {
       console.error(
         `[${timestamp}] DRep lifecycle sync job failed:`,
         error?.message ?? String(error)
       );
+      if (laneAcquired) {
+        try {
+          await releaseKoiosHeavyJobLane(
+            "failed",
+            error?.message ?? String(error)
+          );
+          laneAcquired = false;
+        } catch (laneError: any) {
+          console.error(
+            `[${timestamp}] Failed to release Koios heavy lane lock:`,
+            laneError?.message ?? laneError
+          );
+        }
+      }
       if (acquired) {
         try {
           await releaseJobLock(
