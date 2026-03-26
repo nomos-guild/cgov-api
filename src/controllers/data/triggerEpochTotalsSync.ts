@@ -25,11 +25,11 @@ export const postTriggerEpochTotalsSync = async (
     });
 
     if (!acquired) {
-      return res.status(409).json({ success: false, message: "Epoch totals sync is already running. Please try again later." });
+      return res.status(202).json({ success: true, accepted: false, message: "Epoch totals sync is already running. Skipping duplicate trigger." });
     }
 
     console.log("[Epoch Totals Sync] Triggered via API endpoint");
-    res.json({ success: true, message: "Epoch totals sync started", jobName: JOB_NAME });
+    res.status(202).json({ success: true, accepted: true, message: "Epoch totals sync started", jobName: JOB_NAME });
 
     (async () => {
       try {

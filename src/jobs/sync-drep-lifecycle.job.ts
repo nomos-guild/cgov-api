@@ -6,166 +6,40 @@
  * Uses EpochAnalyticsSync checkpoint table to avoid duplicate work.
  */
 
-import cron from "node-cron";
 import { prisma } from "../services";
 import { syncDrepLifecycleStep } from "../services/ingestion/epoch-analytics.service";
-import { acquireJobLock, releaseJobLock } from "../services/ingestion/syncLock";
-import { shouldSkipForDbPressure } from "./dbPressureGuard";
-import {
-  acquireKoiosHeavyJobLane,
-  releaseKoiosHeavyJobLane,
-  shouldSkipForKoiosPressure,
-} from "./koiosPressureGuard";
-import { applyCronJitter } from "./jitter";
+import { startIngestionCronJob } from "./runIngestionCronJob";
 
-let isRunning = false;
 const JOB_NAME = "drep-lifecycle-sync";
-const DISPLAY_NAME = "DRep Lifecycle Sync";
 
-export const startDrepLifecycleSyncJob = () => {
-  const schedule = process.env.DREP_LIFECYCLE_SYNC_SCHEDULE || "37 * * * *";
-  const enabled = process.env.ENABLE_CRON_JOBS !== "false";
-
-  if (!enabled) {
-    console.log(
-      "[Cron] DRep lifecycle sync job disabled via ENABLE_CRON_JOBS env variable"
-    );
-    return;
-  }
-
-  if (!cron.validate(schedule)) {
-    console.error(
-      `[Cron] Invalid cron schedule: ${schedule}. Using default: 37 * * * *`
-    );
-    return startDrepLifecycleSyncJobWithSchedule("37 * * * *");
-  }
-
-  startDrepLifecycleSyncJobWithSchedule(schedule);
-};
-
-function startDrepLifecycleSyncJobWithSchedule(schedule: string) {
-  cron.schedule(schedule, async () => {
-    if (isRunning) {
+export const startDrepLifecycleSyncJob = () =>
+  startIngestionCronJob({
+    jobName: JOB_NAME,
+    displayName: "DRep Lifecycle Sync",
+    scheduleEnvKey: "DREP_LIFECYCLE_SYNC_SCHEDULE",
+    defaultSchedule: "37 * * * *",
+    skipDbPressure: true,
+    skipKoiosPressure: true,
+    useKoiosHeavyLane: true,
+    run: async () => {
+      const result = await syncDrepLifecycleStep(prisma);
       const timestamp = new Date().toISOString();
       console.log(
-        `[${timestamp}] DRep lifecycle sync job is still running from a previous trigger. Skipping this run.`
-      );
-      return;
-    }
-
-    isRunning = true;
-    await applyCronJitter("[Cron] DRep lifecycle sync job");
-    const timestamp = new Date().toISOString();
-    const startedAt = Date.now();
-    console.log(`\n[${timestamp}] Starting DRep lifecycle sync job...`);
-    let acquired = false;
-    let laneAcquired = false;
-
-    try {
-      if (shouldSkipForDbPressure("drep-lifecycle-sync")) {
-        return;
-      }
-      if (shouldSkipForKoiosPressure("drep-lifecycle-sync")) {
-        return;
-      }
-      acquired = await acquireJobLock(JOB_NAME, DISPLAY_NAME, {
-        source: "cron",
-      });
-      if (!acquired) {
-        console.log(
-          `[${timestamp}] DRep lifecycle sync skipped because another instance already holds the DB lock.`
-        );
-        return;
-      }
-      laneAcquired = await acquireKoiosHeavyJobLane(JOB_NAME);
-      if (!laneAcquired) {
-        console.log(
-          `[${timestamp}] DRep lifecycle sync skipped because Koios heavy lane is busy.`
-        );
-        await releaseJobLock(JOB_NAME, "success", 0);
-        acquired = false;
-        return;
-      }
-
-      const result = await syncDrepLifecycleStep(prisma);
-
-      console.log(
-        `[${timestamp}] DRep lifecycle sync result (currentEpoch=${result.currentEpoch}, epochToSync=${result.epochToSync}):`
+        `[${timestamp}] DRep lifecycle sync result (currentEpoch=${result.currentEpoch}, epochToSync=${result.epochToSync})`
       );
 
       if (result.drepLifecycle) {
         const lc = result.drepLifecycle;
         console.log(
-          `  Lifecycle: attempted=${lc.drepsAttempted}, processed=${lc.drepsProcessed}, ` +
-          `noUpdates=${lc.drepsWithNoUpdates}, updatesFetched=${lc.totalUpdatesFetched}, ` +
-          `events=${lc.eventsIngested} (reg=${lc.eventsByType.registration}, ` +
-          `dereg=${lc.eventsByType.deregistration}, update=${lc.eventsByType.update}), ` +
-          `failed=${lc.failed.length}`
+          `  Lifecycle: attempted=${lc.drepsAttempted}, processed=${lc.drepsProcessed}, noUpdates=${lc.drepsWithNoUpdates}, updatesFetched=${lc.totalUpdatesFetched}, events=${lc.eventsIngested} (reg=${lc.eventsByType.registration}, dereg=${lc.eventsByType.deregistration}, update=${lc.eventsByType.update}), failed=${lc.failed.length}`
         );
         if (lc.failed.length > 0) {
-          console.error(
-            `  Lifecycle: first failures:`,
-            lc.failed.slice(0, 10)
-          );
+          console.error("  Lifecycle: first failures:", lc.failed.slice(0, 10));
         }
       } else {
         console.log(`  Lifecycle: skipped=${result.skipped}`);
       }
 
-      await releaseJobLock(
-        JOB_NAME,
-        "success",
-        result.drepLifecycle?.eventsIngested ?? 0
-      );
-      if (laneAcquired) {
-        await releaseKoiosHeavyJobLane("success");
-        laneAcquired = false;
-      }
-    } catch (error: any) {
-      console.error(
-        `[${timestamp}] DRep lifecycle sync job failed:`,
-        error?.message ?? String(error)
-      );
-      if (laneAcquired) {
-        try {
-          await releaseKoiosHeavyJobLane(
-            "failed",
-            error?.message ?? String(error)
-          );
-          laneAcquired = false;
-        } catch (laneError: any) {
-          console.error(
-            `[${timestamp}] Failed to release Koios heavy lane lock:`,
-            laneError?.message ?? laneError
-          );
-        }
-      }
-      if (acquired) {
-        try {
-          await releaseJobLock(
-            JOB_NAME,
-            "failed",
-            0,
-            error?.message ?? String(error)
-          );
-        } catch (releaseError: any) {
-          console.error(
-            `[${timestamp}] Failed to release DRep lifecycle sync lock:`,
-            releaseError?.message ?? releaseError
-          );
-        }
-      }
-    } finally {
-      const durationSeconds = ((Date.now() - startedAt) / 1000).toFixed(1);
-      const finishedTimestamp = new Date().toISOString();
-      console.log(
-        `[${finishedTimestamp}] DRep lifecycle sync job finished (duration=${durationSeconds}s)`
-      );
-      isRunning = false;
-    }
+      return { itemsProcessed: result.drepLifecycle?.eventsIngested ?? 0 };
+    },
   });
-
-  console.log(
-    `[Cron] DRep lifecycle sync job scheduled with cron: ${schedule}`
-  );
-}

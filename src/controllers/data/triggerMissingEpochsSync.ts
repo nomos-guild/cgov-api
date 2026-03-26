@@ -35,11 +35,11 @@ export const postTriggerMissingEpochsSync = async (
     });
 
     if (!acquired) {
-      return res.status(409).json({ success: false, message: "Missing epochs backfill is already running. Please try again later." });
+      return res.status(202).json({ success: true, accepted: false, message: "Missing epochs backfill is already running. Skipping duplicate trigger." });
     }
 
     console.log("[Missing Epochs Sync] Triggered via API endpoint");
-    res.json({ success: true, message: "Missing epochs backfill started", jobName: JOB_NAME });
+    res.status(202).json({ success: true, accepted: true, message: "Missing epochs backfill started", jobName: JOB_NAME });
 
     (async () => {
       try {

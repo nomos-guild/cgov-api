@@ -7,12 +7,8 @@ import {
   ProposalStatus,
 } from "@prisma/client";
 import { prisma } from "../prisma";
-import { getKoiosPressureState } from "../koios";
 import { koiosGet } from "../koios";
 import {
-  createVoteIngestionRunCache,
-  type VoteIngestionRunCache,
-  ingestVotesForProposal,
   VoteIngestionStats,
   clearVoteCache,
 } from "./vote.service";
@@ -42,14 +38,17 @@ import {
   recordDbFailureForFailFast,
   shouldFailFastForDb,
 } from "./dbFailFast";
-import { updateProposalVotingPower } from "./proposalVotingPower.service";
-import {
-  createProposalVotingPowerRunCache,
-  type ProposalVotingPowerRunCache,
-} from "./proposalVotingPower.service";
+import type { ProposalVotingPowerRunCache } from "./proposalVotingPower.service";
 import type {
   KoiosProposal,
 } from "../../types/koios.types";
+import {
+  createProposalPipelineRunCaches,
+  isProposalStatusRetryable,
+  runProposalDownstreamPipeline,
+} from "./proposalPipeline";
+import type { VoteIngestionRunCache } from "./vote.service";
+import { logIntegrityEvent } from "./integrityMetrics";
 
 /**
  * Result of proposal ingestion
@@ -204,7 +203,7 @@ export function resolveDeferredProposalStatus(
 export function isProposalStatusLocallyRetryable(
   status: ProposalStatus | null | undefined
 ): boolean {
-  return status == null || status === ProposalStatus.ACTIVE;
+  return isProposalStatusRetryable(status ?? null);
 }
 
 export function selectProposalsForBulkSync(
@@ -399,79 +398,19 @@ export async function ingestProposalData(
     `type: ${governanceActionType || "null"}, koios_type: "${koiosProposal.proposal_type}"`
   );
 
-  // 7. Ingest all votes for this proposal using the root Prisma client.
-  // This runs outside of a long-lived transaction so that:
-  // - Individual vote/voter inserts can commit as they go.
-  // - If we hit a timeout or other error part-way through, the next trigger can
-  //   see existing rows and continue without duplicating work.
-  const voteResult = await ingestVotesForProposal(
-    proposal.proposalId,
-    prisma,
-    minVotesEpochOverride,
-    {
-      useCache: useCache !== false,
-      runCache: voteRunCache,
-      fetchSurveyMetadata:
-        process.env.KOIOS_SKIP_TX_METADATA_WHEN_DEGRADED !== "false"
-          ? !getKoiosPressureState().active
-          : true,
-    }
-  );
+  const { votes: voteResult, votingPower: votingPowerResult } =
+    await runProposalDownstreamPipeline({
+      proposalId: proposal.proposalId,
+      currentEpoch,
+      koiosProposal,
+      minVotesEpoch: minVotesEpochOverride,
+      useCache,
+      voteRunCache,
+      inactivePowerRunCache,
+      inactivePowerMetrics,
+      proposalVotingPowerRunCache,
+    });
   const voteStats = voteResult.stats;
-
-  // 8. Fetch and update voting power summary data from Koios
-  // This populates the DRep/SPO voting power fields for accurate percentage calculations
-  // For completed proposals:
-  //   - drepTotalVotePower uses:
-  //     - ratified_epoch if proposal was ratified/enacted (voting snapshot at ratification)
-  //     - expiration epoch if proposal was not ratified/enacted (voting snapshot when voting closed)
-  //   - drepInactiveVotePower uses expiration epoch (for historical inactive calculation with certificate checking)
-  // For active proposals:
-  //   - Both use current epoch
-  //   - Uses /drep_info API for more accurate current active status
-  const isCompleted =
-    koiosProposal.expiration != null &&
-    koiosProposal.expiration <= currentEpoch;
-  const isActiveProposal = !isCompleted;
-
-  // Determine the epoch for DRep total voting power
-  // Ratified/enacted proposals use ratified_epoch, others use expiration epoch
-  let drepTotalPowerEpoch: number;
-  if (!isCompleted) {
-    drepTotalPowerEpoch = currentEpoch;
-  } else if (koiosProposal.ratified_epoch != null) {
-    drepTotalPowerEpoch = koiosProposal.ratified_epoch;
-  } else {
-    drepTotalPowerEpoch = koiosProposal.expiration!;
-  }
-
-  // Determine the epoch for SPO total voting power
-  // SPO voting power uses (epoch - 1) because SPO stake snapshot is taken at epoch boundary
-  // Ratified/enacted proposals: (ratified_epoch - 1)
-  // Non-ratified completed proposals: (expiration - 1)
-  // Active proposals: (currentEpoch - 1)
-  let spoTotalPowerEpoch: number;
-  if (!isCompleted) {
-    spoTotalPowerEpoch = currentEpoch - 1;
-  } else if (koiosProposal.ratified_epoch != null) {
-    spoTotalPowerEpoch = koiosProposal.ratified_epoch - 1;
-  } else {
-    spoTotalPowerEpoch = koiosProposal.expiration! - 1;
-  }
-
-  const inactivePowerEpoch = isCompleted
-    ? koiosProposal.expiration!
-    : currentEpoch;
-  const votingPowerResult = await updateProposalVotingPower(
-    proposal.proposalId,
-    drepTotalPowerEpoch,
-    spoTotalPowerEpoch,
-    inactivePowerEpoch,
-    isActiveProposal,
-    inactivePowerRunCache,
-    inactivePowerMetrics,
-    proposalVotingPowerRunCache
-  );
 
   const result: ProposalIngestionResult = {
     success: voteResult.success && votingPowerResult.success,
@@ -558,7 +497,8 @@ export async function syncAllProposals(): Promise<SyncAllProposalsResult> {
   // Reset long-lived process-local caches so each bulk run starts clean.
   clearVoteCache();
   clearVoterKoiosCaches();
-  const voteRunCache = createVoteIngestionRunCache();
+  const { voteRunCache, proposalVotingPowerRunCache } =
+    createProposalPipelineRunCaches();
 
   try {
     // 1. Snapshot existing proposals from DB (IDs + status)
@@ -642,7 +582,6 @@ export async function syncAllProposals(): Promise<SyncAllProposalsResult> {
     // 5. Get current epoch once for the whole run and reuse it
     const currentEpoch = await getCurrentEpoch();
     const inactivePowerRunCache = new Map<string, bigint>();
-    const proposalVotingPowerRunCache = createProposalVotingPowerRunCache();
     const inactivePowerMetrics = createInactivePowerMetrics();
     const voteRunTotals = {
       processed: 0,
@@ -721,6 +660,15 @@ export async function syncAllProposals(): Promise<SyncAllProposalsResult> {
     console.log(
       `[Proposal Sync] Run summary durationMs=${Date.now() - startedAtMs} votesProcessed=${voteRunTotals.processed} votesCreated=${voteRunTotals.created} votesUpdated=${voteRunTotals.updated} metadataAttempts=${voteRunTotals.metadataAttempts} metadataSuccess=${voteRunTotals.metadataSuccess} metadataFailed=${voteRunTotals.metadataFailed} metadataSkipped=${voteRunTotals.metadataSkipped}`
     );
+    logIntegrityEvent({
+      stream: "proposal",
+      unit: "sync-all",
+      outcome:
+        results.failed > 0 ? "failed" : results.partial > 0 ? "partial" : "success",
+      lagSeconds: Math.floor((Date.now() - startedAtMs) / 1000),
+      partialFailures: results.partial + results.failed,
+      retries: results.errors.length,
+    });
     logInactivePowerMetrics(inactivePowerMetrics);
 
     return results;

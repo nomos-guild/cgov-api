@@ -24,11 +24,11 @@ export const postTriggerPoolGroupsSync = async (
     });
 
     if (!acquired) {
-      return res.status(409).json({ success: false, message: "Pool groups sync is already running. Please try again later." });
+      return res.status(202).json({ success: true, accepted: false, message: "Pool groups sync is already running. Skipping duplicate trigger." });
     }
 
     console.log("[Pool Groups Sync] Triggered via API endpoint");
-    res.json({ success: true, message: "Pool groups sync started", jobName: JOB_NAME });
+    res.status(202).json({ success: true, accepted: true, message: "Pool groups sync started", jobName: JOB_NAME });
 
     (async () => {
       try {
