@@ -21,17 +21,19 @@ export const postTriggerSync = async (_req: Request, res: Response) => {
 
     if (!acquired) {
       console.log("[Manual Sync] Skipped - another sync is already running");
-      return res.status(409).json({
-        success: false,
-        message: "Proposal sync is already running. Please try again later.",
+      return res.status(202).json({
+        success: true,
+        accepted: false,
+        message: "Proposal sync is already running. Skipping duplicate trigger.",
       });
     }
 
     console.log("[Manual Sync] Triggered via API endpoint");
 
     // ✅ Respond immediately to avoid Cloud Scheduler timeout
-    res.json({
+    res.status(202).json({
       success: true,
+      accepted: true,
       message: "Proposal sync started",
       jobName: PROPOSAL_SYNC_JOB_NAME,
     });

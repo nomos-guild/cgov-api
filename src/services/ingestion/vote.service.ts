@@ -4,7 +4,6 @@
  */
 
 import { VoteType, VoterType } from "@prisma/client";
-import type { Prisma } from "@prisma/client";
 import { prisma } from "../prisma";
 import { getKoiosPressureState } from "../koios";
 import { listVotes } from "../governanceProvider";
@@ -19,6 +18,7 @@ import type { KoiosVote } from "../../types/koios.types";
 import {
   extractSurveyResponse,
 } from "../../libs/surveyMetadata";
+import type { IngestionDbClient } from "./dbSession";
 
 // Cache for vote metadata JSON keyed by anchor URL to avoid duplicate fetches
 const voteMetadataCache = new Map<string, string | null>();
@@ -144,7 +144,7 @@ export function clearVoteCache() {
  * Ingests all votes for a specific proposal
  *
  * @param proposalId - Cardano governance action ID (proposal_id from Koios)
- * @param tx - Prisma transaction client
+ * @param db - Prisma DB client (autocommit or transaction)
  * @param minEpoch - Optional minimum epoch to fetch votes from (inclusive).
  *                   Used to avoid fetching historical votes that cannot belong
  *                   to the proposals we are currently syncing.
@@ -157,7 +157,7 @@ export function clearVoteCache() {
  */
 export async function ingestVotesForProposal(
   proposalId: string,
-  tx: Prisma.TransactionClient,
+  db: IngestionDbClient,
   minEpoch?: number,
   options?: {
     useCache?: boolean;
@@ -261,7 +261,7 @@ export async function ingestVotesForProposal(
       `[Vote Ingestion] Found ${koiosVotes.length} votes for proposal ${proposalId}`
     );
 
-    const proposalSurveyContext = await tx.proposal.findUnique({
+    const proposalSurveyContext = await db.proposal.findUnique({
       where: { proposalId },
       select: { linkedSurveyTxId: true },
     });
@@ -284,7 +284,7 @@ export async function ingestVotesForProposal(
       await ingestSingleVote(
         koiosVote,
         proposalId,
-        tx,
+        db,
         stats,
         shouldFetchSurveyMetadata
       );
@@ -368,7 +368,7 @@ async function fetchVotesWithPagination(
 async function ingestSingleVote(
   koiosVote: KoiosVote,
   proposalId: string,
-  tx: Prisma.TransactionClient,
+  db: IngestionDbClient,
   stats: VoteIngestionStats,
   shouldFetchSurveyMetadata: boolean
 ): Promise<void> {
@@ -377,7 +377,7 @@ async function ingestSingleVote(
   const voterResult = await ensureVoterExists(
     koiosVote.voter_role,
     koiosVote.voter_id,
-    tx
+    db
   );
 
   // Update stats for voter creation/update
@@ -395,7 +395,7 @@ async function ingestSingleVote(
   if (koiosVote.voter_role === "ConstitutionalCommittee" && koiosVote.meta_json?.authors) {
     const memberName = koiosVote.meta_json.authors[0]?.name;
     if (memberName) {
-      await tx.cC.update({
+      await db.cC.update({
         where: { ccId: voterResult.voterId },
         data: { memberName: memberName },
       });
@@ -424,7 +424,7 @@ async function ingestSingleVote(
   const ccId = voterType === VoterType.CC ? voterResult.voterId : null;
 
   // 5. Get voter's voting power for this vote (stored in lovelace as BigInt)
-  const voter = await getVoterWithPower(voterType, voterResult.voterId, tx);
+  const voter = await getVoterWithPower(voterType, voterResult.voterId, db);
   const votingPower = voter?.votingPower ?? null;
 
   // 6. Fetch vote rationale/metadata JSON (stored as string in DB)
@@ -495,7 +495,7 @@ async function ingestSingleVote(
     ccId: ccId,
   };
 
-  await tx.onchainVote.upsert({
+  await db.onchainVote.upsert({
     where: { id: onchainVoteId },
     create: {
       id: onchainVoteId,
@@ -512,16 +512,16 @@ async function ingestSingleVote(
 async function getVoterWithPower(
   voterType: VoterType,
   voterId: string,
-  tx: Prisma.TransactionClient
+  db: IngestionDbClient
 ): Promise<{ votingPower: bigint } | null> {
   if (voterType === VoterType.DREP) {
-    const result = await tx.drep.findUnique({
+    const result = await db.drep.findUnique({
       where: { drepId: voterId },
       select: { votingPower: true },
     });
     return result ? { votingPower: result.votingPower } : null;
   } else if (voterType === VoterType.SPO) {
-    const result = await tx.sPO.findUnique({
+    const result = await db.sPO.findUnique({
       where: { poolId: voterId },
       select: { votingPower: true },
     });

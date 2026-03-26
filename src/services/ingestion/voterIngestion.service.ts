@@ -3,7 +3,6 @@
  * Handles creation and enrichment of DRep, SPO, and CC voters.
  */
 
-import type { Prisma } from "@prisma/client";
 import { koiosGet, koiosPost } from "../koios";
 import { getCommitteeInfo } from "../governanceProvider";
 import type {
@@ -12,6 +11,7 @@ import type {
   KoiosSpo,
   KoiosSpoVotingPower,
 } from "../../types/koios.types";
+import type { IngestionDbClient } from "./dbSession";
 import { getKoiosCurrentEpoch } from "./sync-utils";
 import {
   extractBooleanField,
@@ -74,7 +74,7 @@ export function clearVoterKoiosCaches(): void {
 export async function ensureVoterExists(
   voterRole: "DRep" | "SPO" | "ConstitutionalCommittee",
   voterId: string,
-  tx: Prisma.TransactionClient
+  tx: IngestionDbClient
 ): Promise<EnsureVoterResult> {
   if (voterRole === "DRep") {
     return ensureDrepExists(voterId, tx);
@@ -87,7 +87,7 @@ export async function ensureVoterExists(
 
 async function ensureDrepExists(
   drepId: string,
-  tx: Prisma.TransactionClient
+  tx: IngestionDbClient
 ): Promise<EnsureVoterResult> {
   const existing = await tx.drep.findUnique({
     where: { drepId },
@@ -207,7 +207,7 @@ async function ensureDrepExists(
 
 async function ensureSpoExists(
   poolId: string,
-  tx: Prisma.TransactionClient
+  tx: IngestionDbClient
 ): Promise<EnsureVoterResult> {
   const existing = await tx.sPO.findUnique({
     where: { poolId },
@@ -272,7 +272,7 @@ async function ensureSpoExists(
 
 async function ensureCcExists(
   ccId: string,
-  tx: Prisma.TransactionClient
+  tx: IngestionDbClient
 ): Promise<EnsureVoterResult> {
   const existing = await tx.cC.findUnique({
     where: { ccId },
@@ -314,21 +314,21 @@ async function ensureCcExists(
  */
 export async function ingestDrep(
   drepId: string,
-  prisma: Prisma.TransactionClient
+  prisma: IngestionDbClient
 ): Promise<EnsureVoterResult> {
   return ensureDrepExists(drepId, prisma);
 }
 
 export async function ingestSpo(
   poolId: string,
-  prisma: Prisma.TransactionClient
+  prisma: IngestionDbClient
 ): Promise<EnsureVoterResult> {
   return ensureSpoExists(poolId, prisma);
 }
 
 export async function ingestCc(
   ccId: string,
-  prisma: Prisma.TransactionClient
+  prisma: IngestionDbClient
 ): Promise<EnsureVoterResult> {
   return ensureCcExists(ccId, prisma);
 }

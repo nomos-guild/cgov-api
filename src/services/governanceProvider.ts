@@ -62,6 +62,10 @@ const KOIOS_DEFAULT_PAGE_DELAY_MS = parseInt(
   process.env.KOIOS_DEFAULT_PAGE_DELAY_MS || "100",
   10
 );
+const KOIOS_TIMING_SLOW_MS = parseInt(
+  process.env.KOIOS_TIMING_SLOW_MS || "2000",
+  10
+);
 
 function toKoiosContext(
   options?: GovernanceProviderOptions
@@ -75,12 +79,15 @@ function toKoiosContext(
 async function collectPaginated<T>(options: {
   pageSize: number;
   delayMs?: number;
+  label?: string;
   fetchPage: (params: { offset: number; limit: number }) => Promise<T[]>;
 }): Promise<T[]> {
+  const startedAt = Date.now();
   const rows: T[] = [];
   let offset = 0;
   let hasMore = true;
   let isFirstPage = true;
+  let pageCount = 0;
 
   while (hasMore) {
     // Delay between pages to avoid burst-limit pressure on Koios.
@@ -93,6 +100,7 @@ async function collectPaginated<T>(options: {
       offset,
       limit: options.pageSize,
     });
+    pageCount += 1;
 
     if (!page || page.length === 0) {
       hasMore = false;
@@ -102,6 +110,13 @@ async function collectPaginated<T>(options: {
     rows.push(...page);
     offset += page.length;
     hasMore = page.length === options.pageSize;
+  }
+
+  const durationMs = Date.now() - startedAt;
+  if (durationMs >= KOIOS_TIMING_SLOW_MS) {
+    console.log(
+      `[Koios Timing] label=${options.label ?? "paginate"} pages=${pageCount} rows=${rows.length} durationMs=${durationMs} pageSize=${options.pageSize} pageDelayMs=${options.delayMs ?? 0}`
+    );
   }
 
   return rows;
@@ -344,6 +359,7 @@ export async function listAllDrepDelegators(options: {
   return collectPaginated({
     pageSize: KOIOS_DREP_DELEGATORS_PAGE_SIZE,
     delayMs: KOIOS_DREP_DELEGATORS_PAGE_DELAY_MS,
+    label: "drep_delegators",
     fetchPage: ({ offset, limit }) =>
       listDrepDelegators({
         ...options,
@@ -400,6 +416,7 @@ export async function listAllDrepIds(
   const rows = await collectPaginated({
     pageSize: KOIOS_DREP_LIST_PAGE_SIZE,
     delayMs: KOIOS_DEFAULT_PAGE_DELAY_MS,
+    label: "drep_list",
     fetchPage: ({ offset, limit }) =>
       listDreps({
         offset,
@@ -438,6 +455,7 @@ export async function listAllDrepUpdates(
   return collectPaginated({
     pageSize: KOIOS_DREP_UPDATES_PAGE_SIZE,
     delayMs: KOIOS_DREP_UPDATES_PAGE_DELAY_MS,
+    label: "drep_updates",
     fetchPage: ({ offset, limit }) =>
       listDrepUpdates({
         drepId,

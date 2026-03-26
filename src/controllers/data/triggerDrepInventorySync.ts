@@ -24,11 +24,11 @@ export const postTriggerDrepInventorySync = async (
     });
 
     if (!acquired) {
-      return res.status(409).json({ success: false, message: "DRep inventory sync is already running. Please try again later." });
+      return res.status(202).json({ success: true, accepted: false, message: "DRep inventory sync is already running. Skipping duplicate trigger." });
     }
 
     console.log("[DRep Inventory Sync] Triggered via API endpoint");
-    res.json({ success: true, message: "DRep inventory sync started", jobName: JOB_NAME });
+    res.status(202).json({ success: true, accepted: true, message: "DRep inventory sync started", jobName: JOB_NAME });
 
     (async () => {
       try {

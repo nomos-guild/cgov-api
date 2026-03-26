@@ -19,15 +19,17 @@ export const postTriggerGithubDiscovery = async (_req: Request, res: Response) =
     source: "cloud-run-instance",
   });
   if (!acquired) {
-    return res.status(409).json({
-      success: false,
-      message: "GitHub discovery is already running. Please try again later.",
+    return res.status(202).json({
+      success: true,
+      accepted: false,
+      message: "GitHub discovery is already running. Skipping duplicate trigger.",
     });
   }
 
   // ✅ Respond immediately to avoid Cloud Scheduler timeout
-  res.json({
+  res.status(202).json({
     success: true,
+    accepted: true,
     message: `${displayName} started`,
     jobName,
   });
@@ -72,15 +74,17 @@ export const postTriggerGithubSync = async (req: Request, res: Response) => {
     source: "cloud-run-instance",
   });
   if (!acquired) {
-    return res.status(409).json({
-      success: false,
-      message: `GitHub sync (${tier}) is already running. Please try again later.`,
+    return res.status(202).json({
+      success: true,
+      accepted: false,
+      message: `GitHub sync (${tier}) is already running. Skipping duplicate trigger.`,
     });
   }
 
   // ✅ Respond immediately to avoid Cloud Scheduler timeout
-  res.json({
+  res.status(202).json({
     success: true,
+    accepted: true,
     message: `${displayName} started`,
     jobName,
   });
@@ -137,9 +141,10 @@ export const postTriggerGithubBackfill = async (req: Request, res: Response) => 
     source: "cloud-run-instance",
   });
   if (!acquired) {
-    return res.status(409).json({
-      success: false,
-      message: "GitHub backfill is already running. Please try again later.",
+    return res.status(202).json({
+      success: true,
+      accepted: false,
+      message: "GitHub backfill is already running. Skipping duplicate trigger.",
     });
   }
 
@@ -147,8 +152,9 @@ export const postTriggerGithubBackfill = async (req: Request, res: Response) => 
   const minStars = Math.max(0, parseInt((req.query.minStars as string) || "0", 10) || 0);
 
   // ✅ Respond immediately to avoid Cloud Scheduler timeout
-  res.json({
+  res.status(202).json({
     success: true,
+    accepted: true,
     message: `${displayName} started`,
     jobName,
   });
@@ -184,15 +190,17 @@ export const postTriggerGithubSnapshot = async (_req: Request, res: Response) =>
     source: "cloud-run-instance",
   });
   if (!acquired) {
-    return res.status(409).json({
-      success: false,
-      message: "GitHub snapshot is already running. Please try again later.",
+    return res.status(202).json({
+      success: true,
+      accepted: false,
+      message: "GitHub snapshot is already running. Skipping duplicate trigger.",
     });
   }
 
   // ✅ Respond immediately to avoid Cloud Scheduler timeout
-  res.json({
+  res.status(202).json({
     success: true,
+    accepted: true,
     message: `${displayName} started`,
     jobName,
   });
@@ -228,15 +236,17 @@ export const postTriggerGithubAggregate = async (_req: Request, res: Response) =
     source: "cloud-run-instance",
   });
   if (!acquired) {
-    return res.status(409).json({
-      success: false,
-      message: "GitHub aggregation is already running. Please try again later.",
+    return res.status(202).json({
+      success: true,
+      accepted: false,
+      message: "GitHub aggregation is already running. Skipping duplicate trigger.",
     });
   }
 
   // ✅ Respond immediately to avoid Cloud Scheduler timeout
-  res.json({
+  res.status(202).json({
     success: true,
+    accepted: true,
     message: `${displayName} started`,
     jobName,
   });

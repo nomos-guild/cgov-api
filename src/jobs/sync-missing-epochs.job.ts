@@ -6,25 +6,12 @@
  * to fill gaps (e.g., after first deployment or if prior syncs failed).
  */
 
-import cron from "node-cron";
 import { prisma } from "../services";
 import { syncMissingEpochAnalytics } from "../services/ingestion/epoch-analytics.service";
-import {
-  acquireJobLock,
-  getBoundedIntEnv,
-  releaseJobLock,
-} from "../services/ingestion/syncLock";
-import { shouldSkipForDbPressure } from "./dbPressureGuard";
-import {
-  acquireKoiosHeavyJobLane,
-  releaseKoiosHeavyJobLane,
-  shouldSkipForKoiosPressure,
-} from "./koiosPressureGuard";
-import { applyCronJitter } from "./jitter";
+import { getBoundedIntEnv } from "../services/ingestion/syncLock";
+import { startIngestionCronJob } from "./runIngestionCronJob";
 
-let isRunning = false;
 const JOB_NAME = "missing-epochs-sync";
-const DISPLAY_NAME = "Missing Epochs Backfill";
 const LOCK_TTL_MS = getBoundedIntEnv(
   "MISSING_EPOCHS_SYNC_LOCK_TTL_MS",
   30 * 60 * 1000,
@@ -32,141 +19,30 @@ const LOCK_TTL_MS = getBoundedIntEnv(
   60 * 60 * 1000
 );
 
-export const startMissingEpochsSyncJob = () => {
-  const schedule = process.env.MISSING_EPOCHS_SYNC_SCHEDULE || "5 1,13 * * *";
-  const enabled = process.env.ENABLE_CRON_JOBS !== "false";
-
-  if (!enabled) {
-    console.log(
-      "[Cron] Missing epochs backfill job disabled via ENABLE_CRON_JOBS env variable"
-    );
-    return;
-  }
-
-  if (!cron.validate(schedule)) {
-    console.error(
-      `[Cron] Invalid cron schedule: ${schedule}. Using default: 5 1,13 * * *`
-    );
-    return startMissingEpochsSyncJobWithSchedule("5 1,13 * * *");
-  }
-
-  startMissingEpochsSyncJobWithSchedule(schedule);
-};
-
-function startMissingEpochsSyncJobWithSchedule(schedule: string) {
-  cron.schedule(schedule, async () => {
-    if (isRunning) {
-      const timestamp = new Date().toISOString();
-      console.log(
-        `[${timestamp}] Missing epochs backfill job is still running from a previous trigger. Skipping this run.`
-      );
-      return;
-    }
-
-    isRunning = true;
-    await applyCronJitter("[Cron] Missing epochs backfill job");
-    const timestamp = new Date().toISOString();
-    const startedAt = Date.now();
-    console.log(`\n[${timestamp}] Starting missing epochs backfill job...`);
-    let acquired = false;
-    let laneAcquired = false;
-
-    try {
-      if (shouldSkipForDbPressure("missing-epochs-sync")) {
-        return;
-      }
-      if (shouldSkipForKoiosPressure("missing-epochs-sync")) {
-        return;
-      }
-      acquired = await acquireJobLock(JOB_NAME, DISPLAY_NAME, {
-        ttlMs: LOCK_TTL_MS,
-        source: "cron",
-      });
-      if (!acquired) {
-        console.log(
-          `[${timestamp}] Missing epochs backfill skipped because another instance already holds the DB lock.`
-        );
-        return;
-      }
-      laneAcquired = await acquireKoiosHeavyJobLane(JOB_NAME);
-      if (!laneAcquired) {
-        console.log(
-          `[${timestamp}] Missing epochs backfill skipped because Koios heavy lane is busy.`
-        );
-        await releaseJobLock(JOB_NAME, "success", 0);
-        acquired = false;
-        return;
-      }
-
+export const startMissingEpochsSyncJob = () =>
+  startIngestionCronJob({
+    jobName: JOB_NAME,
+    displayName: "Missing Epochs Backfill",
+    scheduleEnvKey: "MISSING_EPOCHS_SYNC_SCHEDULE",
+    defaultSchedule: "5 1,13 * * *",
+    lockOptions: {
+      ttlMs: LOCK_TTL_MS,
+      source: "cron",
+    },
+    skipDbPressure: true,
+    skipKoiosPressure: true,
+    useKoiosHeavyLane: true,
+    run: async () => {
       const backfill = await syncMissingEpochAnalytics(prisma);
-
-      console.log(
-        `[${timestamp}] Missing epochs backfill result:`
-      );
+      const timestamp = new Date().toISOString();
+      console.log(`[${timestamp}] Missing epochs backfill result:`);
       console.log(
         `  Range: ${backfill.startEpoch}-${backfill.endEpoch}, missing=${backfill.totals.missing.length}, synced=${backfill.totals.synced.length}, failed=${backfill.totals.failed.length}`
       );
       if (backfill.totals.failed.length > 0) {
-        console.error(
-          `  First failures:`,
-          backfill.totals.failed.slice(0, 10)
-        );
+        console.error("  First failures:", backfill.totals.failed.slice(0, 10));
       }
 
-      await releaseJobLock(
-        JOB_NAME,
-        "success",
-        backfill.totals.synced.length
-      );
-      if (laneAcquired) {
-        await releaseKoiosHeavyJobLane("success");
-        laneAcquired = false;
-      }
-    } catch (error: any) {
-      console.error(
-        `[${timestamp}] Missing epochs backfill job failed:`,
-        error?.message ?? String(error)
-      );
-      if (laneAcquired) {
-        try {
-          await releaseKoiosHeavyJobLane(
-            "failed",
-            error?.message ?? String(error)
-          );
-          laneAcquired = false;
-        } catch (laneError: any) {
-          console.error(
-            `[${timestamp}] Failed to release Koios heavy lane lock:`,
-            laneError?.message ?? laneError
-          );
-        }
-      }
-      if (acquired) {
-        try {
-          await releaseJobLock(
-            JOB_NAME,
-            "failed",
-            0,
-            error?.message ?? String(error)
-          );
-        } catch (releaseError: any) {
-          console.error(
-            `[${timestamp}] Failed to release missing epochs backfill lock:`,
-            releaseError?.message ?? releaseError
-          );
-        }
-      }
-    } finally {
-      const durationSeconds = ((Date.now() - startedAt) / 1000).toFixed(1);
-      const finishedTimestamp = new Date().toISOString();
-      console.log(
-        `[${finishedTimestamp}] Missing epochs backfill job finished (duration=${durationSeconds}s)`
-      );
-      isRunning = false;
-    }
+      return { itemsProcessed: backfill.totals.synced.length };
+    },
   });
-
-  console.log(
-    `[Cron] Missing epochs backfill job scheduled with cron: ${schedule}`
-  );
-}

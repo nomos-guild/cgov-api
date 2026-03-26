@@ -46,6 +46,10 @@ import {
   type ParsedProposalIdentifier,
   type ProposalIdentifierKind,
 } from "./proposalLookup";
+import {
+  runIngestionUnit,
+  successResult,
+} from "./ingestion/coordinator";
 
 type ProposalSnapshot = {
   proposalId: string;
@@ -486,7 +490,17 @@ async function maybeStartOverviewSync(): Promise<void> {
   lastOverviewSyncTime = now;
 
   // Run sync in background (non-blocking) - don't await
-  doOverviewSync()
+  runIngestionUnit(
+    {
+      trigger: "sync-on-read",
+      stream: "proposal",
+      unit: "overview",
+    },
+    async () => {
+      await doOverviewSync();
+      return successResult({ trigger: "overview" });
+    }
+  )
     .catch((error) => {
       console.error(
         "[Sync-on-Read] Background overview sync failed:",
@@ -686,7 +700,20 @@ async function maybeStartProposalSync(identifier: string): Promise<void> {
   pruneProposalSyncCooldowns(now);
 
   // Run sync in background (non-blocking) - don't await
-  doProposalSync(target)
+  runIngestionUnit(
+    {
+      trigger: "sync-on-read",
+      stream: "proposal",
+      unit: "details",
+    },
+    async () => {
+      await doProposalSync(target);
+      return successResult({
+        trigger: "proposal",
+        identifier: target.canonicalKey,
+      });
+    }
+  )
     .catch((error) => {
       console.error(
         `[Sync-on-Read] Background sync failed for ${target.canonicalKey}:`,

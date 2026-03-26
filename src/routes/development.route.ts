@@ -86,6 +86,17 @@ router.get("/health", developmentController.getHealth);
 
 /**
  * @openapi
+ * /development/ingestion-health:
+ *   get:
+ *     summary: Ingestion coordinator health/events snapshot
+ *     tags: [Development Activity]
+ *     responses:
+ *       200: { description: Recent ingestion integrity events and per-unit counters }
+ */
+router.get("/ingestion-health", developmentController.getIngestionHealth);
+
+/**
+ * @openapi
  * /development/stars:
  *   get:
  *     summary: Star and fork trends over time

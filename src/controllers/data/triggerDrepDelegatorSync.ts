@@ -39,18 +39,20 @@ export const postTriggerDrepDelegatorSync = async (
       console.log(
         "[DRep Delegator Sync] Skipped - another sync is already running"
       );
-      return res.status(409).json({
-        success: false,
+      return res.status(202).json({
+        success: true,
+        accepted: false,
         message:
-          "DRep delegator sync is already running. Please try again later.",
+          "DRep delegator sync is already running. Skipping duplicate trigger.",
       });
     }
 
     console.log("[DRep Delegator Sync] Triggered via API endpoint");
 
     // ✅ Respond immediately to avoid Cloud Scheduler timeout
-    res.json({
+    res.status(202).json({
       success: true,
+      accepted: true,
       message: "DRep delegator sync started",
       jobName: JOB_NAME,
     });

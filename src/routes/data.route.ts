@@ -75,6 +75,28 @@ router.get("/proposals", dataController.getProposals);
 
 /**
  * @openapi
+ * /data/sync-status:
+ *   get:
+ *     summary: Get current and recent sync lock/status rows
+ *     description: Returns distributed lock and last-result state from sync_status table. Optional query param `jobName` filters to one job.
+ *     tags:
+ *       - Data Ingestion
+ *     parameters:
+ *       - name: jobName
+ *         in: query
+ *         required: false
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Sync status rows
+ *       500:
+ *         description: Server error
+ */
+router.get("/sync-status", dataController.getSyncStatus);
+
+/**
+ * @openapi
  * /data/proposal/{proposal_hash}:
  *   post:
  *     summary: Ingest a single proposal

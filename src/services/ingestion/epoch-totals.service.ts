@@ -15,11 +15,10 @@ import {
   getDrepEpochSummary,
   getEpochInfo,
   getTotalsForEpoch,
-  listDrepDelegators,
+  listAllDrepDelegators,
   listDrepVotingPowerHistory,
 } from "../governanceProvider";
 import {
-  KOIOS_DREP_DELEGATORS_PAGE_SIZE,
   toBigIntOrNull,
   getKoiosCurrentEpoch,
   EPOCH_TOTALS_BACKFILL_CONCURRENCY,
@@ -182,37 +181,22 @@ async function getDrepDelegatorAggregatesForEpoch(
   epochNo: number,
   drepId: string
 ): Promise<{ delegatorCount: number; votingPower: bigint }> {
-  const pageSize = KOIOS_DREP_DELEGATORS_PAGE_SIZE;
-  let offset = 0;
-  let hasMore = true;
-
   // We intentionally do not retain stake addresses in memory; we only aggregate.
   // Koios /drep_delegators is expected to return one row per stake address.
   // `epoch_no` here represents the epoch when the vote delegation was made
   // (per Koios OpenAPI schema), so we filter on epoch_no=eq.<epoch>.
   let delegatorCount = 0;
 
-  while (hasMore) {
-    const page = await listDrepDelegators({
-      drepId,
-      epochNo,
-      limit: pageSize,
-      offset,
-      source: "ingestion.epoch-totals.special-drep-delegators",
-    });
+  const rows = await listAllDrepDelegators({
+    drepId,
+    epochNo,
+    source: "ingestion.epoch-totals.special-drep-delegators",
+  });
 
-    if (page && page.length > 0) {
-      for (const row of page) {
-        const stakeAddress = row?.stake_address;
-        if (typeof stakeAddress === "string" && stakeAddress) {
-          delegatorCount += 1;
-        }
-      }
-
-      offset += page.length;
-      hasMore = page.length === pageSize;
-    } else {
-      hasMore = false;
+  for (const row of rows) {
+    const stakeAddress = row?.stake_address;
+    if (typeof stakeAddress === "string" && stakeAddress) {
+      delegatorCount += 1;
     }
   }
 

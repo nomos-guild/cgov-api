@@ -1,20 +1,13 @@
-import cron from "node-cron";
 import {
   syncActiveRepos,
   syncModerateRepos,
   syncDormantRepos,
   reTierRepos,
 } from "../services/ingestion/github-activity";
-import {
-  acquireJobLock,
-  getBoundedIntEnv,
-  releaseJobLock,
-} from "../services/ingestion/syncLock";
-import { shouldSkipForDbPressure } from "./dbPressureGuard";
+import { getBoundedIntEnv } from "../services/ingestion/syncLock";
+import { startIngestionCronJob } from "./runIngestionCronJob";
 
-let isSyncRunning = false;
 const JOB_NAME = "github-activity-sync";
-const DISPLAY_NAME = "GitHub Activity Sync";
 const LOCK_TTL_MS = getBoundedIntEnv(
   "GITHUB_SYNC_LOCK_TTL_MS",
   25 * 60 * 1000,
@@ -22,103 +15,36 @@ const LOCK_TTL_MS = getBoundedIntEnv(
   2 * 60 * 60 * 1000
 );
 
-export const startSyncGithubActivityJob = () => {
-  const schedule = process.env.GITHUB_SYNC_SCHEDULE || "*/30 * * * *"; // Every 30 min
-  const enabled = process.env.ENABLE_CRON_JOBS !== "false";
-
-  if (!enabled) {
-    console.log("[Cron] GitHub activity sync job disabled via ENABLE_CRON_JOBS");
-    return;
-  }
-
-  if (!cron.validate(schedule)) {
-    console.error(`[Cron] Invalid sync schedule: ${schedule}. Using default.`);
-    return startWithSchedule("*/30 * * * *");
-  }
-
-  startWithSchedule(schedule);
-};
-
-function startWithSchedule(schedule: string) {
-  cron.schedule(schedule, async () => {
-    if (isSyncRunning) {
-      console.log(`[${new Date().toISOString()}] GitHub sync still running. Skipping.`);
-      return;
-    }
-
-    isSyncRunning = true;
-    const ts = new Date().toISOString();
-    console.log(`\n[${ts}] Starting GitHub activity sync...`);
-    let acquired = false;
-
-    try {
-      if (shouldSkipForDbPressure("github-activity-sync")) {
-        return;
-      }
-
-      acquired = await acquireJobLock(JOB_NAME, DISPLAY_NAME, {
-        ttlMs: LOCK_TTL_MS,
-        source: "cron",
-      });
-      if (!acquired) {
-        console.log(
-          `[${ts}] GitHub activity sync skipped because another instance already holds the DB lock.`
-        );
-        return;
-      }
-
-      // Always sync active repos
+export const startSyncGithubActivityJob = () =>
+  startIngestionCronJob({
+    jobName: JOB_NAME,
+    displayName: "GitHub Activity Sync",
+    scheduleEnvKey: "GITHUB_SYNC_SCHEDULE",
+    defaultSchedule: "*/30 * * * *",
+    skipDbPressure: true,
+    lockOptions: { ttlMs: LOCK_TTL_MS, source: "cron" },
+    run: async () => {
+      const ts = new Date().toISOString();
       const activeResult = await syncActiveRepos();
       logSyncResult("Active", activeResult, ts);
 
-      // Moderate repos: sync once per day (check if hour is 4am UTC)
       const hour = new Date().getUTCHours();
       if (hour === 4) {
-        const moderateResult = await syncModerateRepos();
-        logSyncResult("Moderate", moderateResult, ts);
+        logSyncResult("Moderate", await syncModerateRepos(), ts);
       }
-
-      // Dormant repos: sync once per week (Sunday 5am UTC)
       const day = new Date().getUTCDay();
       if (day === 0 && hour === 5) {
-        const dormantResult = await syncDormantRepos();
-        logSyncResult("Dormant", dormantResult, ts);
+        logSyncResult("Dormant", await syncDormantRepos(), ts);
       }
-
-      // Re-tier repos daily at 6am UTC
       if (hour === 6) {
         const tierResult = await reTierRepos();
         console.log(
           `[${ts}] Re-tier: ${tierResult.promoted} promoted, ${tierResult.demoted} demoted`
         );
       }
-
-      await releaseJobLock(JOB_NAME, "success");
-
-    } catch (error: any) {
-      console.error(`[${ts}] GitHub sync job failed:`, error.message);
-      if (acquired) {
-        try {
-          await releaseJobLock(
-            JOB_NAME,
-            "failed",
-            0,
-            error?.message ?? "Unknown error"
-          );
-        } catch (releaseError: any) {
-          console.error(
-            `[${ts}] Failed to release GitHub sync lock:`,
-            releaseError?.message ?? releaseError
-          );
-        }
-      }
-    } finally {
-      isSyncRunning = false;
-    }
+      return { itemsProcessed: activeResult.success };
+    },
   });
-
-  console.log(`[Cron] GitHub activity sync job scheduled: ${schedule}`);
-}
 
 function logSyncResult(
   tier: string,

@@ -4,191 +4,59 @@
  * Updates voting power based on the latest epoch data
  */
 
-import cron from "node-cron";
 import { prisma } from "../services";
 import { syncCommitteeState } from "../services/committeeState.service";
-import { acquireJobLock, releaseJobLock } from "../services/ingestion/syncLock";
 import { syncAllVoterVotingPower } from "../services/ingestion/voterPowerSync.service";
-import { applyCronJitter } from "./jitter";
-import {
-  acquireKoiosHeavyJobLane,
-  releaseKoiosHeavyJobLane,
-  shouldSkipForKoiosPressure,
-} from "./koiosPressureGuard";
+import { startIngestionCronJob } from "./runIngestionCronJob";
 
-// Simple in-process guard to prevent overlapping runs in a single Node process
-let isVoterPowerSyncRunning = false;
 const JOB_NAME = "voter-power-sync";
-const DISPLAY_NAME = "Voter Power Sync";
 
 /**
  * Starts the voter power sync cron job
  * Schedule is configurable via VOTER_POWER_SYNC_SCHEDULE env variable
  * Defaults to once daily at 00:08 UTC
  */
-export const startVoterPowerSyncJob = () => {
-  const schedule = process.env.VOTER_POWER_SYNC_SCHEDULE || "8 0 * * *";
-  const enabled = process.env.ENABLE_CRON_JOBS !== "false";
-
-  if (!enabled) {
-    console.log(
-      "[Cron] Voter power sync job disabled via ENABLE_CRON_JOBS env variable"
-    );
-    return;
-  }
-
-  // Validate cron schedule
-  if (!cron.validate(schedule)) {
-    console.error(
-      `[Cron] Invalid cron schedule: ${schedule}. Using default: 8 0 * * *`
-    );
-    return startVoterPowerSyncJobWithSchedule("8 0 * * *");
-  }
-
-  startVoterPowerSyncJobWithSchedule(schedule);
-};
-
-/**
- * Internal function to start the job with a specific schedule
- */
-function startVoterPowerSyncJobWithSchedule(schedule: string) {
-  cron.schedule(schedule, async () => {
-    // In-process guard: skip this run if the previous one is still in progress
-    if (isVoterPowerSyncRunning) {
+export const startVoterPowerSyncJob = () =>
+  startIngestionCronJob({
+    jobName: JOB_NAME,
+    displayName: "Voter Power Sync",
+    scheduleEnvKey: "VOTER_POWER_SYNC_SCHEDULE",
+    defaultSchedule: "8 0 * * *",
+    skipKoiosPressure: true,
+    useKoiosHeavyLane: true,
+    run: async () => {
       const timestamp = new Date().toISOString();
-      console.log(
-        `[${timestamp}] Voter power sync job is still running from a previous trigger. Skipping this run.`
-      );
-      return;
-    }
-
-    isVoterPowerSyncRunning = true;
-    await applyCronJitter("[Cron] Voter power sync job");
-    const timestamp = new Date().toISOString();
-    console.log(`\n[${timestamp}] Starting voter power sync job...`);
-    let acquired = false;
-    let laneAcquired = false;
-
-    try {
-      if (shouldSkipForKoiosPressure("voter-power-sync")) {
-        return;
-      }
-      acquired = await acquireJobLock(JOB_NAME, DISPLAY_NAME, {
-        source: "cron",
-      });
-      if (!acquired) {
-        console.log(
-          `[${timestamp}] Voter power sync skipped because another instance already holds the DB lock.`
-        );
-        return;
-      }
-      laneAcquired = await acquireKoiosHeavyJobLane(JOB_NAME);
-      if (!laneAcquired) {
-        console.log(
-          `[${timestamp}] Voter power sync skipped because Koios heavy lane is busy.`
-        );
-        await releaseJobLock(JOB_NAME, "success", 0);
-        acquired = false;
-        return;
-      }
-
       const results = await syncAllVoterVotingPower(prisma);
 
       console.log(
-        `[${timestamp}] Voter power sync completed for epoch ${results.epoch}:`,
-        `\n  DReps:`,
-        `\n    - Total: ${results.dreps.total}`,
-        `\n    - Updated: ${results.dreps.updated}`,
-        `\n    - Failed: ${results.dreps.failed}`,
-        `\n  SPOs:`,
-        `\n    - Total: ${results.spos.total}`,
-        `\n    - Updated: ${results.spos.updated}`,
-        `\n    - Failed: ${results.spos.failed}`
+        `[${timestamp}] Voter power sync completed for epoch ${results.epoch}: drepUpdated=${results.dreps.updated}/${results.dreps.total} spoUpdated=${results.spos.updated}/${results.spos.total}`
       );
 
-      // Log errors if any
       if (results.dreps.errors.length > 0) {
         console.error(
           `[${timestamp}] DRep sync errors:`,
-          results.dreps.errors.slice(0, 10) // Limit to first 10 errors
+          results.dreps.errors.slice(0, 10)
         );
       }
       if (results.spos.errors.length > 0) {
         console.error(
           `[${timestamp}] SPO sync errors:`,
-          results.spos.errors.slice(0, 10) // Limit to first 10 errors
+          results.spos.errors.slice(0, 10)
         );
       }
 
-      // Sync committee state (eligible CC member count)
       try {
         const ccStateResult = await syncCommitteeState(prisma);
         console.log(
-          `[${timestamp}] Committee state sync completed for epoch ${ccStateResult.epoch}:`,
-          `\n  - Total members: ${ccStateResult.totalMembers}`,
-          `\n  - Eligible members: ${ccStateResult.eligibleMembers}`,
-          `\n  - Committee valid: ${ccStateResult.isCommitteeValid}`
+          `[${timestamp}] Committee state sync completed for epoch ${ccStateResult.epoch}: eligible=${ccStateResult.eligibleMembers}/${ccStateResult.totalMembers}`
         );
       } catch (ccError: any) {
         console.error(
           `[${timestamp}] Committee state sync failed:`,
-          ccError.message
+          ccError?.message ?? String(ccError)
         );
       }
 
-      await releaseJobLock(
-        JOB_NAME,
-        "success",
-        results.dreps.updated + results.spos.updated
-      );
-      if (laneAcquired) {
-        await releaseKoiosHeavyJobLane("success");
-        laneAcquired = false;
-      }
-    } catch (error: any) {
-      console.error(
-        `[${timestamp}] Voter power sync job failed:`,
-        error.message
-      );
-      if (laneAcquired) {
-        try {
-          await releaseKoiosHeavyJobLane(
-            "failed",
-            error?.message ?? String(error)
-          );
-          laneAcquired = false;
-        } catch (laneError: any) {
-          console.error(
-            `[${timestamp}] Failed to release Koios heavy lane lock:`,
-            laneError?.message ?? laneError
-          );
-        }
-      }
-      if (acquired) {
-        try {
-          await releaseJobLock(
-            JOB_NAME,
-            "failed",
-            0,
-            error?.message ?? "Unknown error"
-          );
-        } catch (releaseError: any) {
-          console.error(
-            `[${timestamp}] Failed to release voter power sync lock:`,
-            releaseError?.message ?? releaseError
-          );
-        }
-      }
-    } finally {
-      isVoterPowerSyncRunning = false;
-    }
+      return { itemsProcessed: results.dreps.updated + results.spos.updated };
+    },
   });
-
-  console.log(`[Cron] Voter power sync job scheduled with cron: ${schedule}`);
-  console.log(`[Cron] Next execution times:`);
-
-  // Show next execution info
-  const cronJob = cron.schedule(schedule, () => {});
-  console.log(`  - Job will run at the specified schedule`);
-  cronJob.stop();
-}

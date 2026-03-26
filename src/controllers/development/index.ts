@@ -3,6 +3,7 @@ export { getActivity } from "./getActivity";
 export { getRepos } from "./getRepos";
 export { getContributors } from "./getContributors";
 export { getHealth } from "./getHealth";
+export { getIngestionHealth } from "./getIngestionHealth";
 export { getStars } from "./getStars";
 export { getLanguages } from "./getLanguages";
 export { getNetwork } from "./getNetwork";

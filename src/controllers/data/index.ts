@@ -1,4 +1,5 @@
 export * from "./getProposals";
+export * from "./getSyncStatus";
 export * from "./triggerSync";
 export * from "./triggerVoterSync";
 export * from "./triggerDrepInventorySync";
