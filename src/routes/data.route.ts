@@ -24,6 +24,7 @@ import { postTriggerDrepLifecycleSync } from "../controllers/data/triggerDrepLif
 import { postTriggerPoolGroupsSync } from "../controllers/data/triggerPoolGroupsSync";
 import { postTriggerMissingEpochsSync } from "../controllers/data/triggerMissingEpochsSync";
 import { postTriggerDrepDelegatorSync } from "../controllers/data/triggerDrepDelegatorSync";
+import { postUploadToIpfs } from "../controllers/data/uploadToIpfs";
 
 const router = express.Router();
 
@@ -373,6 +374,10 @@ router.post("/trigger-missing-epochs-sync", postTriggerMissingEpochsSync);
  *         description: Sync failed
  */
 router.post("/trigger-drep-delegator-sync", postTriggerDrepDelegatorSync);
+
+// ─── IPFS Upload ────────────────────────────────────────────────────────────
+
+router.post("/ipfs/upload", postUploadToIpfs);
 
 // ─── GitHub Admin Endpoints ─────────────────────────────────────────────────
 
