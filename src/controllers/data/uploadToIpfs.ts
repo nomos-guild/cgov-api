@@ -1,5 +1,4 @@
 import { Request, Response } from "express";
-import axios from "axios";
 
 /**
  * POST /data/ipfs/upload
@@ -35,24 +34,40 @@ export const postUploadToIpfs = async (req: Request, res: Response) => {
     formData.append("file", blob, "metadata.jsonld");
 
     // Upload to Blockfrost IPFS
-    const addResponse = await axios.post(
+    const addResponse = await fetch(
       "https://ipfs.blockfrost.io/api/v0/ipfs/add",
-      formData,
       {
+        method: "POST",
         headers: { project_id: projectId },
+        body: formData,
       }
     );
 
-    const cid = addResponse.data.ipfs_hash;
+    if (!addResponse.ok) {
+      const errorBody = await addResponse.text();
+      throw new Error(
+        `Blockfrost IPFS add failed (${addResponse.status}): ${errorBody}`
+      );
+    }
+
+    const addData = (await addResponse.json()) as { ipfs_hash: string };
+    const cid = addData.ipfs_hash;
 
     // Pin the uploaded content so it's not garbage collected
-    await axios.post(
+    const pinResponse = await fetch(
       `https://ipfs.blockfrost.io/api/v0/ipfs/pin/add/${cid}`,
-      null,
       {
+        method: "POST",
         headers: { project_id: projectId },
       }
     );
+
+    if (!pinResponse.ok) {
+      const errorBody = await pinResponse.text();
+      throw new Error(
+        `Blockfrost IPFS pin failed (${pinResponse.status}): ${errorBody}`
+      );
+    }
 
     console.log(`[IPFS Upload] ✓ Uploaded and pinned to IPFS: ${cid}`);
 
