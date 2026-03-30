@@ -2,6 +2,7 @@ import express from "express";
 import { dataController } from "../controllers";
 import { postIngestProposal } from "../controllers/data/ingestProposal";
 import { postIngestVote } from "../controllers/data/ingestVote";
+import { postFrontloadVote } from "../controllers/data/frontloadVote";
 import {
   postIngestDrep,
   postIngestSpo,
@@ -120,6 +121,63 @@ router.get("/sync-status", dataController.getSyncStatus);
  *         description: Server error
  */
 router.post("/proposal/:proposal_hash", postIngestProposal);
+
+/**
+ * @openapi
+ * /data/vote/frontload:
+ *   post:
+ *     summary: Frontload vote metadata from frontend
+ *     description: Immediately stores vote metadata in the database after tx submission, without waiting for cron job sync from Koios. Uses the same deterministic ID as the cron path so later upserts merge cleanly.
+ *     tags:
+ *       - Data Ingestion
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [txHash, proposalId, vote, voterType, voterId]
+ *             properties:
+ *               txHash:
+ *                 type: string
+ *                 description: Transaction hash (64 hex chars)
+ *               proposalId:
+ *                 type: string
+ *                 description: Governance action proposal ID
+ *               vote:
+ *                 type: string
+ *                 enum: [YES, NO, ABSTAIN]
+ *               voterType:
+ *                 type: string
+ *                 enum: [DREP, SPO, CC]
+ *               voterId:
+ *                 type: string
+ *                 description: Voter identifier (drepId, poolId, or ccId)
+ *               anchorUrl:
+ *                 type: string
+ *               anchorHash:
+ *                 type: string
+ *               rationale:
+ *                 type: string
+ *                 description: JSON string of vote rationale metadata
+ *               surveyResponse:
+ *                 type: string
+ *                 description: JSON string of survey response
+ *               surveyResponseSurveyTxId:
+ *                 type: string
+ *               surveyResponseResponderRole:
+ *                 type: string
+ *     responses:
+ *       200:
+ *         description: Vote metadata stored successfully
+ *       400:
+ *         description: Validation error
+ *       422:
+ *         description: Foreign key constraint violation
+ *       500:
+ *         description: Server error
+ */
+router.post("/vote/frontload", postFrontloadVote);
 
 /**
  * @openapi

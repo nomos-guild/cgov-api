@@ -10,3 +10,4 @@ export * from "./triggerPoolGroupsSync";
 export * from "./triggerMissingEpochsSync";
 export * from "./triggerDrepDelegatorSync";
 export * from "./triggerGithub";
+export * from "./frontloadVote";

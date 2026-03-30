@@ -501,7 +501,11 @@ async function ingestSingleVote(
       id: onchainVoteId,
       ...voteData,
     },
-    update: voteData,
+    update: {
+      ...voteData,
+      // Preserve frontloaded rationale if cron fetch returned null
+      ...(voteData.rationale == null ? { rationale: undefined } : {}),
+    },
   });
   stats.votesIngested++;
 }
@@ -529,6 +533,102 @@ async function getVoterWithPower(
   }
   // CC members don't have voting power tracked
   return null;
+}
+
+// ─── Frontload Vote (immediate write from frontend) ─────────────────────────
+
+export interface FrontloadVoteInput {
+  txHash: string;
+  proposalId: string;
+  vote: VoteType;
+  voterType: VoterType;
+  voterId: string;
+  anchorUrl?: string;
+  anchorHash?: string;
+  rationale?: string;
+  surveyResponse?: string;
+  surveyResponseSurveyTxId?: string;
+  surveyResponseResponderRole?: string;
+}
+
+/**
+ * Immediately writes vote metadata to the database when a vote is submitted
+ * through our frontend, bypassing the 20-40 min cron delay.
+ *
+ * Uses the same deterministic ID format as `ingestSingleVote` so when the
+ * cron job eventually processes the same vote from Koios, its upsert merges
+ * cleanly — filling in votingPower, responseEpoch, and votedAt.
+ */
+export async function frontloadVote(input: FrontloadVoteInput) {
+  const { txHash, proposalId, vote, voterType, voterId } = input;
+
+  const drepId = voterType === VoterType.DREP ? voterId : null;
+  const spoId = voterType === VoterType.SPO ? voterId : null;
+  const ccId = voterType === VoterType.CC ? voterId : null;
+
+  // Verify voter exists in DB (catches format mismatches early —
+  // e.g. CIP-105 sent instead of CIP-129)
+  const voterExists = drepId
+    ? await prisma.drep.findUnique({ where: { drepId }, select: { drepId: true } })
+    : spoId
+    ? await prisma.sPO.findUnique({ where: { poolId: spoId }, select: { poolId: true } })
+    : ccId
+    ? await prisma.cC.findUnique({ where: { ccId }, select: { ccId: true } })
+    : null;
+
+  if (!voterExists) {
+    throw new Error(
+      `Voter not found: ${voterType}:${voterId} — ensure the ID is in CIP-129 (bech32) format`
+    );
+  }
+
+  // Must match the ID format in ingestSingleVote exactly
+  const voterKey = drepId ?? spoId ?? ccId ?? "unknown";
+  const onchainVoteId = `${txHash}:${proposalId}:${voterType}:${voterKey}`;
+
+  const frontloadData = {
+    txHash,
+    proposalId,
+    vote,
+    voterType,
+    drepId,
+    spoId,
+    ccId,
+    anchorUrl: input.anchorUrl ?? null,
+    anchorHash: input.anchorHash ?? null,
+    rationale: input.rationale ?? null,
+    surveyResponse: input.surveyResponse,
+    surveyResponseSurveyTxId: input.surveyResponseSurveyTxId,
+    surveyResponseResponderRole: input.surveyResponseResponderRole,
+  };
+
+  return prisma.onchainVote.upsert({
+    where: { id: onchainVoteId },
+    create: {
+      id: onchainVoteId,
+      ...frontloadData,
+    },
+    update: {
+      // Only update metadata fields — do not overwrite chain-authoritative
+      // fields (votingPower, responseEpoch, votedAt) that the cron may have set
+      vote: frontloadData.vote,
+      anchorUrl: frontloadData.anchorUrl,
+      anchorHash: frontloadData.anchorHash,
+      rationale: frontloadData.rationale,
+      ...(frontloadData.surveyResponse !== undefined
+        ? { surveyResponse: frontloadData.surveyResponse }
+        : {}),
+      ...(frontloadData.surveyResponseSurveyTxId !== undefined
+        ? { surveyResponseSurveyTxId: frontloadData.surveyResponseSurveyTxId }
+        : {}),
+      ...(frontloadData.surveyResponseResponderRole !== undefined
+        ? {
+            surveyResponseResponderRole:
+              frontloadData.surveyResponseResponderRole,
+          }
+        : {}),
+    },
+  });
 }
 
 /**
