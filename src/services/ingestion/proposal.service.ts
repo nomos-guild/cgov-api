@@ -41,6 +41,7 @@ import {
 import type { ProposalVotingPowerRunCache } from "./proposalVotingPower.service";
 import type {
   KoiosProposal,
+  KoiosVote,
 } from "../../types/koios.types";
 import {
   createProposalPipelineRunCaches,
@@ -147,6 +148,10 @@ export interface IngestProposalOptions {
   currentEpoch?: number;
   /** Optional minimum epoch to fetch votes from */
   minVotesEpoch?: number;
+  /** Optional vote rows already fetched by caller (sync-on-read). */
+  prefetchedVotes?: KoiosVote[];
+  /** Join an in-flight ingestion for the same proposal ID (default: true). */
+  joinInFlight?: boolean;
   /** Optional per-run vote cache for bulk syncs */
   voteRunCache?: VoteIngestionRunCache;
   /** Optional per-run cache for inactive DRep power (scoped to syncAllProposals run) */
@@ -200,6 +205,11 @@ export function resolveDeferredProposalStatus(
   };
 }
 
+const proposalIngestionInFlight = new Map<
+  string,
+  Promise<ProposalIngestionResult>
+>();
+
 export function isProposalStatusLocallyRetryable(
   status: ProposalStatus | null | undefined
 ): boolean {
@@ -252,191 +262,220 @@ export async function ingestProposalData(
   koiosProposal: KoiosProposal,
   options?: IngestProposalOptions
 ): Promise<ProposalIngestionResult> {
-  if (shouldFailFastForDb("ingestion.proposal.ingest")) {
-    throw new Error("DB fail-fast active; skipping proposal ingestion");
+  const joinInFlight = options?.joinInFlight !== false;
+  const proposalInFlightKey = koiosProposal.proposal_id;
+
+  if (joinInFlight) {
+    const inFlight = proposalIngestionInFlight.get(proposalInFlightKey);
+    if (inFlight) {
+      console.log(
+        `[Proposal Ingest] action=single-flight-join proposalId=${proposalInFlightKey}`
+      );
+      return inFlight;
+    }
   }
-  const {
-    currentEpoch: currentEpochOverride,
-    minVotesEpoch: minVotesEpochOverride,
-    voteRunCache,
-    inactivePowerRunCache,
-    proposalVotingPowerRunCache,
-    inactivePowerMetrics,
-    useCache,
-    deferStatusFinalization,
-  } = options ?? {};
-  // Koios requests already retry inside `koios.ts`. We intentionally avoid
-  // replaying the whole proposal ingest on transient Prisma failures because
-  // that can re-enter Koios-heavy work. Later sync triggers can recover when
-  // the proposal remains missing from the DB or still ACTIVE.
-  // 1. Get current epoch for status calculation
-  //    Allow caller to provide it so we don't call Koios /tip for every proposal
-  const currentEpoch =
-    typeof currentEpochOverride === "number"
-      ? currentEpochOverride
-      : await getKoiosCurrentEpoch();
+
+  const execute = async (): Promise<ProposalIngestionResult> => {
+    if (shouldFailFastForDb("ingestion.proposal.ingest")) {
+      throw new Error("DB fail-fast active; skipping proposal ingestion");
+    }
+    const {
+      currentEpoch: currentEpochOverride,
+      minVotesEpoch: minVotesEpochOverride,
+      voteRunCache,
+      inactivePowerRunCache,
+      proposalVotingPowerRunCache,
+      inactivePowerMetrics,
+      useCache,
+      deferStatusFinalization,
+    } = options ?? {};
+    // Koios requests already retry inside `koios.ts`. We intentionally avoid
+    // replaying the whole proposal ingest on transient Prisma failures because
+    // that can re-enter Koios-heavy work. Later sync triggers can recover when
+    // the proposal remains missing from the DB or still ACTIVE.
+    // 1. Get current epoch for status calculation
+    //    Allow caller to provide it so we don't call Koios /tip for every proposal
+    const currentEpoch =
+      typeof currentEpochOverride === "number"
+        ? currentEpochOverride
+        : await getKoiosCurrentEpoch();
 
   // 2. Map Koios governance type to Prisma enum
-  const governanceActionType = mapGovernanceType(koiosProposal.proposal_type);
-  const withdrawalAmount = extractTreasuryWithdrawalAmount(koiosProposal);
+    const governanceActionType = mapGovernanceType(koiosProposal.proposal_type);
+    const withdrawalAmount = extractTreasuryWithdrawalAmount(koiosProposal);
 
   // If Koios sends a proposal_type we don't recognize, log it for debugging
-  if (koiosProposal.proposal_type && !governanceActionType) {
-    console.warn(
-      "[Proposal Ingest] Unmapped proposal_type from Koios:",
-      koiosProposal.proposal_type
-    );
-  }
+    if (koiosProposal.proposal_type && !governanceActionType) {
+      console.warn(
+        "[Proposal Ingest] Unmapped proposal_type from Koios:",
+        koiosProposal.proposal_type
+      );
+    }
 
   // 3. Derive status from epoch fields
-  const derivedStatus = deriveProposalStatus(koiosProposal, currentEpoch);
+    const derivedStatus = deriveProposalStatus(koiosProposal, currentEpoch);
 
   // 4. Check if proposal exists to determine if creating or updating
-  const existingProposal = await prisma.proposal.findUnique({
-    where: { proposalId: koiosProposal.proposal_id },
-    select: {
-      title: true,
-      description: true,
-      rationale: true,
-      status: true,
-    },
-  });
+    const existingProposal = await prisma.proposal.findUnique({
+      where: { proposalId: koiosProposal.proposal_id },
+      select: {
+        title: true,
+        description: true,
+        rationale: true,
+        status: true,
+      },
+    });
 
-  const isUpdate = !!existingProposal;
-  const { status, intendedStatus } = resolveDeferredProposalStatus(
-    derivedStatus,
-    existingProposal?.status,
-    deferStatusFinalization
-  );
+    const isUpdate = !!existingProposal;
+    const { status, intendedStatus } = resolveDeferredProposalStatus(
+      derivedStatus,
+      existingProposal?.status,
+      deferStatusFinalization
+    );
 
-  const shouldBackfillMissingMetadataFields =
-    !!existingProposal &&
-    existingProposal.status === ProposalStatus.ACTIVE &&
-    hasMissingProposalInfoFields(existingProposal);
+    const shouldBackfillMissingMetadataFields =
+      !!existingProposal &&
+      existingProposal.status === ProposalStatus.ACTIVE &&
+      hasMissingProposalInfoFields(existingProposal);
 
   // 5. Extract metadata (from meta_json or fetch from meta_url)
-  const { title, description, rationale, metadata } =
-    await extractProposalMetadata(koiosProposal, {
-      preferMetaUrlForMissingFields: shouldBackfillMissingMetadataFields,
-      retryMetaUrlFetch: shouldBackfillMissingMetadataFields,
-    });
-  const surveyLink = parseGovernanceSurveyLink(metadata);
-  const linkedSurveyDetails = surveyLink.surveyTxId
-    && surveyLink.kind === GOVERNANCE_SURVEY_LINK_KIND
-    && surveyLink.specVersion === "1.0.0"
-    ? await fetchLinkedSurveyDetails(surveyLink.surveyTxId)
-    : null;
-  const serializedLinkedSurveyDetails = linkedSurveyDetails
-    ? JSON.stringify(linkedSurveyDetails)
-    : null;
-  const shouldClearSurveyDetails = !surveyLink.surveyTxId;
+    const { title, description, rationale, metadata } =
+      await extractProposalMetadata(koiosProposal, {
+        preferMetaUrlForMissingFields: shouldBackfillMissingMetadataFields,
+        retryMetaUrlFetch: shouldBackfillMissingMetadataFields,
+      });
+    const surveyLink = parseGovernanceSurveyLink(metadata);
+    const linkedSurveyDetails = surveyLink.surveyTxId
+      && surveyLink.kind === GOVERNANCE_SURVEY_LINK_KIND
+      && surveyLink.specVersion === "1.0.0"
+      ? await fetchLinkedSurveyDetails(surveyLink.surveyTxId)
+      : null;
+    const serializedLinkedSurveyDetails = linkedSurveyDetails
+      ? JSON.stringify(linkedSurveyDetails)
+      : null;
+    const shouldClearSurveyDetails = !surveyLink.surveyTxId;
 
   // Always re-inject text fields for active proposals to ensure
   // sanitized data from Koios overwrites any corrupted values.
-  const updateInfoFields: {
-    title?: string;
-    description?: string | null;
-    rationale?: string | null;
-  } = {};
+    const updateInfoFields: {
+      title?: string;
+      description?: string | null;
+      rationale?: string | null;
+    } = {};
 
-  if (existingProposal && existingProposal.status === ProposalStatus.ACTIVE) {
-    updateInfoFields.title = title;
-    updateInfoFields.description = description;
-    updateInfoFields.rationale = rationale;
-  }
+    if (existingProposal && existingProposal.status === ProposalStatus.ACTIVE) {
+      updateInfoFields.title = title;
+      updateInfoFields.description = description;
+      updateInfoFields.rationale = rationale;
+    }
 
   // 6. Upsert proposal (single atomic DB operation, no long transaction)
-  const proposal = await prisma.proposal.upsert({
-    where: { proposalId: koiosProposal.proposal_id },
-    create: {
-      proposalId: koiosProposal.proposal_id,
-      txHash: koiosProposal.proposal_tx_hash,
-      certIndex: String(koiosProposal.proposal_index),
-      title,
-      description,
-      rationale,
-      governanceActionType: governanceActionType ?? undefined,
-      withdrawalAmount,
-      status,
-      submissionEpoch: koiosProposal.proposed_epoch,
-      ratifiedEpoch: koiosProposal.ratified_epoch,
-      enactedEpoch: koiosProposal.enacted_epoch,
-      droppedEpoch: koiosProposal.dropped_epoch,
-      expiredEpoch: koiosProposal.expired_epoch,
-      expirationEpoch: koiosProposal.expiration,
-      metadata,
-      linkedSurveyTxId: surveyLink.surveyTxId,
-      surveyDetails: serializedLinkedSurveyDetails,
-    },
-    update: {
-      // Only update mutable fields
-      status,
-      withdrawalAmount,
-      // Backfill governanceActionType when we have a valid mapping
-      ...(governanceActionType !== null && {
-        governanceActionType: governanceActionType,
-      }),
-      ratifiedEpoch: koiosProposal.ratified_epoch,
-      enactedEpoch: koiosProposal.enacted_epoch,
-      droppedEpoch: koiosProposal.dropped_epoch,
-      expiredEpoch: koiosProposal.expired_epoch,
-      expirationEpoch: koiosProposal.expiration,
-      metadata,
-      linkedSurveyTxId: surveyLink.surveyTxId,
-      ...(serializedLinkedSurveyDetails !== null
-        ? { surveyDetails: serializedLinkedSurveyDetails }
-        : shouldClearSurveyDetails
-        ? { surveyDetails: null }
-        : {}),
-      ...updateInfoFields,
-    },
-  });
-
-  console.log(
-    `[Proposal Ingest] ${isUpdate ? "Updated" : "Created"} proposal - ` +
-    `proposalId: ${proposal.proposalId}, ` +
-    `type: ${governanceActionType || "null"}, koios_type: "${koiosProposal.proposal_type}"`
-  );
-
-  const { votes: voteResult, votingPower: votingPowerResult } =
-    await runProposalDownstreamPipeline({
-      proposalId: proposal.proposalId,
-      currentEpoch,
-      koiosProposal,
-      minVotesEpoch: minVotesEpochOverride,
-      useCache,
-      voteRunCache,
-      inactivePowerRunCache,
-      inactivePowerMetrics,
-      proposalVotingPowerRunCache,
-    });
-  const voteStats = voteResult.stats;
-
-  const result: ProposalIngestionResult = {
-    success: voteResult.success && votingPowerResult.success,
-    downstream: {
-      votes: {
-        success: voteResult.success,
-        error: voteResult.error,
+    const proposal = await prisma.proposal.upsert({
+      where: { proposalId: koiosProposal.proposal_id },
+      create: {
+        proposalId: koiosProposal.proposal_id,
+        txHash: koiosProposal.proposal_tx_hash,
+        certIndex: String(koiosProposal.proposal_index),
+        title,
+        description,
+        rationale,
+        governanceActionType: governanceActionType ?? undefined,
+        withdrawalAmount,
+        status,
+        submissionEpoch: koiosProposal.proposed_epoch,
+        ratifiedEpoch: koiosProposal.ratified_epoch,
+        enactedEpoch: koiosProposal.enacted_epoch,
+        droppedEpoch: koiosProposal.dropped_epoch,
+        expiredEpoch: koiosProposal.expired_epoch,
+        expirationEpoch: koiosProposal.expiration,
+        metadata,
+        linkedSurveyTxId: surveyLink.surveyTxId,
+        surveyDetails: serializedLinkedSurveyDetails,
       },
-      votingPower: votingPowerResult,
-    },
-    proposal: {
-      id: proposal.id,
-      proposalId: proposal.proposalId,
-      status: proposal.status,
-    },
-    stats: voteStats,
-    intendedStatus,
+      update: {
+        // Only update mutable fields
+        status,
+        withdrawalAmount,
+        // Backfill governanceActionType when we have a valid mapping
+        ...(governanceActionType !== null && {
+          governanceActionType: governanceActionType,
+        }),
+        ratifiedEpoch: koiosProposal.ratified_epoch,
+        enactedEpoch: koiosProposal.enacted_epoch,
+        droppedEpoch: koiosProposal.dropped_epoch,
+        expiredEpoch: koiosProposal.expired_epoch,
+        expirationEpoch: koiosProposal.expiration,
+        metadata,
+        linkedSurveyTxId: surveyLink.surveyTxId,
+        ...(serializedLinkedSurveyDetails !== null
+          ? { surveyDetails: serializedLinkedSurveyDetails }
+          : shouldClearSurveyDetails
+          ? { surveyDetails: null }
+          : {}),
+        ...updateInfoFields,
+      },
+    });
+
+    console.log(
+      `[Proposal Ingest] ${isUpdate ? "Updated" : "Created"} proposal - ` +
+      `proposalId: ${proposal.proposalId}, ` +
+      `type: ${governanceActionType || "null"}, koios_type: "${koiosProposal.proposal_type}"`
+    );
+
+    const { votes: voteResult, votingPower: votingPowerResult } =
+      await runProposalDownstreamPipeline({
+        proposalId: proposal.proposalId,
+        currentEpoch,
+        koiosProposal,
+        minVotesEpoch: minVotesEpochOverride,
+        prefetchedVotes: options?.prefetchedVotes,
+        useCache,
+        voteRunCache,
+        inactivePowerRunCache,
+        inactivePowerMetrics,
+        proposalVotingPowerRunCache,
+      });
+    const voteStats = voteResult.stats;
+
+    const result: ProposalIngestionResult = {
+      success: voteResult.success && votingPowerResult.success,
+      downstream: {
+        votes: {
+          success: voteResult.success,
+          error: voteResult.error,
+        },
+        votingPower: votingPowerResult,
+      },
+      proposal: {
+        id: proposal.id,
+        proposalId: proposal.proposalId,
+        status: proposal.status,
+      },
+      stats: voteStats,
+      intendedStatus,
+    };
+
+    if (!result.success) {
+      console.warn(
+        `[Proposal Ingest] action=partial-failure proposalId=${proposal.proposalId} votesSuccess=${voteResult.success} votingPowerSuccess=${votingPowerResult.success} voteError=${voteResult.error ?? "none"} votingPowerError=${votingPowerResult.error ?? "none"}`
+      );
+    }
+
+    return result;
   };
 
-  if (!result.success) {
-    console.warn(
-      `[Proposal Ingest] action=partial-failure proposalId=${proposal.proposalId} votesSuccess=${voteResult.success} votingPowerSuccess=${votingPowerResult.success} voteError=${voteResult.error ?? "none"} votingPowerError=${votingPowerResult.error ?? "none"}`
-    );
+  const executePromise = execute();
+  if (joinInFlight) {
+    proposalIngestionInFlight.set(proposalInFlightKey, executePromise);
   }
 
-  return result;
+  try {
+    return await executePromise;
+  } finally {
+    if (joinInFlight && proposalIngestionInFlight.get(proposalInFlightKey) === executePromise) {
+      proposalIngestionInFlight.delete(proposalInFlightKey);
+    }
+  }
 }
 
 /**

@@ -36,6 +36,7 @@ async function loadSyncOnReadHarness(options: HarnessOptions) {
     updateMany: jest.fn().mockResolvedValue({ count: 0 }),
     findUnique: jest.fn().mockResolvedValue(null),
     upsert: jest.fn().mockResolvedValue({}),
+    update: jest.fn().mockResolvedValue({}),
   };
 
   const mockPrisma = {
@@ -63,6 +64,12 @@ async function loadSyncOnReadHarness(options: HarnessOptions) {
     $transaction: jest.fn(async (callback: any) =>
       callback({
         syncStatus: syncStatusTx,
+        $executeRaw: jest.fn().mockResolvedValue(1),
+        $queryRaw: jest
+          .fn()
+          .mockResolvedValue([
+            { is_running: false, expires_at: null, locked_by: null },
+          ]),
       })
     ),
   };
@@ -112,6 +119,12 @@ async function loadSyncOnReadHarness(options: HarnessOptions) {
 
   jest.doMock("../src/services/prisma", () => ({
     prisma: mockPrisma,
+    withDbWrite: jest.fn(async (_scope: string, operation: () => Promise<unknown>) =>
+      operation()
+    ),
+    withDbRead: jest.fn(async (_scope: string, operation: () => Promise<unknown>) =>
+      operation()
+    ),
   }));
   jest.doMock("../src/services/koios", () => ({
     getKoiosPressureState: jest.fn(() => ({

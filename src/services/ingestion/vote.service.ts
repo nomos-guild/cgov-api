@@ -132,6 +132,39 @@ export interface VoteIngestionResult {
   error?: string;
 }
 
+export interface VoteIngestionOptions {
+  useCache?: boolean;
+  runCache?: VoteIngestionRunCache;
+  fetchSurveyMetadata?: boolean;
+  prefetchedVotes?: KoiosVote[];
+}
+
+function getBoundedIntEnvLocal(
+  envKey: string,
+  defaultValue: number,
+  min: number,
+  max: number
+): number {
+  const rawValue = process.env[envKey];
+  if (!rawValue) return defaultValue;
+
+  const parsed = Number.parseInt(rawValue, 10);
+  if (!Number.isFinite(parsed) || parsed < min || parsed > max) {
+    return defaultValue;
+  }
+
+  return parsed;
+}
+
+const VOTE_INGEST_USE_PREFETCHED =
+  process.env.VOTE_INGEST_USE_PREFETCHED !== "false";
+const VOTE_INGEST_DB_CONCURRENCY = getBoundedIntEnvLocal(
+  "VOTE_INGEST_DB_CONCURRENCY",
+  4,
+  1,
+  20
+);
+
 /**
  * Clears the vote cache - should be called at the start of each sync
  */
@@ -159,11 +192,7 @@ export async function ingestVotesForProposal(
   proposalId: string,
   db: IngestionDbClient,
   minEpoch?: number,
-  options?: {
-    useCache?: boolean;
-    runCache?: VoteIngestionRunCache;
-    fetchSurveyMetadata?: boolean;
-  }
+  options?: VoteIngestionOptions
 ): Promise<VoteIngestionResult> {
   if (shouldFailFastForDb("ingestion.vote.ingest")) {
     return {
@@ -201,11 +230,21 @@ export async function ingestVotesForProposal(
   };
 
   const useCache = options?.useCache !== false;
+  const candidatePrefetchedVotes = options?.prefetchedVotes;
+  const prefetchedVotes =
+    VOTE_INGEST_USE_PREFETCHED && Array.isArray(candidatePrefetchedVotes)
+      ? candidatePrefetchedVotes
+      : undefined;
 
   try {
     let koiosVotes: KoiosVote[] = [];
 
-    if (useCache) {
+    if (prefetchedVotes) {
+      koiosVotes = prefetchedVotes;
+      console.log(
+        `[Vote Ingestion] metric=vote_ingest.prefetched_votes_used proposal=${proposalId} enabled=true count=${koiosVotes.length}`
+      );
+    } else if (useCache) {
       const runCache = options?.runCache;
       if (!runCache) {
         console.warn(
@@ -279,14 +318,31 @@ export async function ingestVotesForProposal(
       );
     }
 
-    // Process each vote
-    for (const koiosVote of koiosVotes) {
-      await ingestSingleVote(
-        koiosVote,
-        proposalId,
-        db,
-        stats,
-        shouldFetchSurveyMetadata
+    console.log(
+      `[Vote Ingestion] metric=vote_ingest.db_write_concurrency proposal=${proposalId} concurrency=${VOTE_INGEST_DB_CONCURRENCY}`
+    );
+
+    // Process votes in bounded chunks to reduce per-proposal ingestion time
+    // while avoiding unbounded pressure on Koios and the database.
+    for (
+      let startIndex = 0;
+      startIndex < koiosVotes.length;
+      startIndex += VOTE_INGEST_DB_CONCURRENCY
+    ) {
+      const batch = koiosVotes.slice(
+        startIndex,
+        startIndex + VOTE_INGEST_DB_CONCURRENCY
+      );
+      await Promise.all(
+        batch.map((koiosVote) =>
+          ingestSingleVote(
+            koiosVote,
+            proposalId,
+            db,
+            stats,
+            shouldFetchSurveyMetadata
+          )
+        )
       );
     }
   } catch (error: any) {
@@ -306,6 +362,9 @@ export async function ingestVotesForProposal(
 
   console.log(
     `[Vote Ingestion] Summary proposal=${proposalId} success=true durationMs=${Date.now() - startedAt} votesProcessed=${stats.votesProcessed} created=${stats.votesIngested} updated=${stats.votesUpdated} metadataAttempts=${stats.metadata.attempts} metadataSuccess=${stats.metadata.success} metadataFailed=${stats.metadata.failed} metadataSkipped=${stats.metadata.skipped}`
+  );
+  console.log(
+    `[Vote Ingestion] metric=vote_ingest.duration_ms proposal=${proposalId} value=${Date.now() - startedAt}`
   );
   return {
     success: true,
@@ -328,6 +387,7 @@ async function fetchVotesWithPagination(
   let offset = 0;
   const limit = 1000;
   let hasMore = true;
+  let requestCount = 0;
 
   console.log(
     `[Vote Ingestion] Fetching votes for proposal ${proposalId}${
@@ -336,6 +396,7 @@ async function fetchVotesWithPagination(
   );
 
   while (hasMore) {
+    requestCount++;
     const batch = await listVotes({
       proposalId,
       minEpoch,
@@ -358,6 +419,10 @@ async function fetchVotesWithPagination(
       hasMore = false;
     }
   }
+
+  console.log(
+    `[Vote Ingestion] metric=koios.vote_list.requests_per_proposal proposal=${proposalId} source=ingestion.vote.ingest.proposal.vote-list count=${requestCount}`
+  );
 
   return allVotes;
 }
