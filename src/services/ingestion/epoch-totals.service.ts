@@ -25,6 +25,12 @@ import {
 } from "./sync-utils";
 import { processInParallel } from "./parallel";
 
+const KOIOS_HEAVY_DREP_DELEGATORS_LANE_JOB_NAME =
+  "koios-heavy-drep-delegators-lane";
+const SPECIAL_DREP_DELEGATORS_GUARD_ENABLED =
+  process.env.EPOCH_TOTALS_DEFER_SPECIAL_DREP_DELEGATORS_WHEN_LANE_BUSY !==
+  "false";
+
 // ============================================================
 // Result Types
 // ============================================================
@@ -178,9 +184,25 @@ async function sumPoolVotingPowerForEpoch(epochNo: number): Promise<bigint> {
  * to avoid ballooning the stake address inventory.
  */
 async function getDrepDelegatorAggregatesForEpoch(
+  prisma: Prisma.TransactionClient,
   epochNo: number,
   drepId: string
-): Promise<{ delegatorCount: number; votingPower: bigint }> {
+): Promise<{ delegatorCount: number | null; votingPower: bigint }> {
+  if (SPECIAL_DREP_DELEGATORS_GUARD_ENABLED) {
+    const laneStatus = await (prisma as Prisma.TransactionClient & {
+      syncStatus: any;
+    }).syncStatus.findUnique({
+      where: { jobName: KOIOS_HEAVY_DREP_DELEGATORS_LANE_JOB_NAME },
+      select: { isRunning: true },
+    });
+    if (laneStatus?.isRunning) {
+      console.log(
+        `[Epoch Totals] Skipping special DRep /drep_delegators fetch for ${drepId} (shared heavy lane busy)`
+      );
+      return { delegatorCount: null, votingPower: BigInt(0) };
+    }
+  }
+
   // We intentionally do not retain stake addresses in memory; we only aggregate.
   // Koios /drep_delegators is expected to return one row per stake address.
   // `epoch_no` here represents the epoch when the vote delegation was made
@@ -218,6 +240,7 @@ async function getDrepVotingPowerForEpoch(
 }
 
 async function getSpecialDrepAggregatesForEpoch(
+  prisma: Prisma.TransactionClient,
   epochNo: number,
   drepId: string
 ): Promise<{ delegatorCount: number | null; votingPower: bigint | null }> {
@@ -225,7 +248,7 @@ async function getSpecialDrepAggregatesForEpoch(
     // Delegator count is "delegations made in epoch" (from /drep_delegators + epoch_no filter).
     // Voting power is the DRep's epoch voting power snapshot (from /drep_voting_power_history).
     const [delegatorAgg, votingPower] = await Promise.all([
-      getDrepDelegatorAggregatesForEpoch(epochNo, drepId),
+      getDrepDelegatorAggregatesForEpoch(prisma, epochNo, drepId),
       getDrepVotingPowerForEpoch(epochNo, drepId),
     ]);
     return { delegatorCount: delegatorAgg.delegatorCount, votingPower };
@@ -286,8 +309,16 @@ export async function syncEpochTotals(
       source: "ingestion.epoch-totals.fetch-row./epoch_info",
     }),
     sumPoolVotingPowerForEpoch(epochNo),
-    getSpecialDrepAggregatesForEpoch(epochNo, "drep_always_abstain"),
-    getSpecialDrepAggregatesForEpoch(epochNo, "drep_always_no_confidence"),
+    getSpecialDrepAggregatesForEpoch(
+      prisma,
+      epochNo,
+      "drep_always_abstain"
+    ),
+    getSpecialDrepAggregatesForEpoch(
+      prisma,
+      epochNo,
+      "drep_always_no_confidence"
+    ),
   ]);
 
   // Financial totals

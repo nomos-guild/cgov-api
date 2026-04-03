@@ -15,12 +15,21 @@ import {
 import {
   KOIOS_DREP_INFO_BATCH_SIZE,
   DREP_INFO_SYNC_CONCURRENCY,
+  DREP_DELEGATION_PHASE3_JOB_NAME,
   toBigIntOrNull,
   extractStringField,
   extractBooleanField,
 } from "./sync-utils";
 import { getDrepInfoBatch } from "../drep-lookup";
 import { processInParallel } from "./parallel";
+import { getBoundedIntEnv } from "./syncLock";
+
+const DREP_INFO_DELEGATOR_COUNT_REFRESH_COOLDOWN_MS = getBoundedIntEnv(
+  "DREP_INFO_DELEGATOR_COUNT_REFRESH_COOLDOWN_MS",
+  60 * 60 * 1000,
+  0,
+  24 * 60 * 60 * 1000
+);
 
 // ============================================================
 // Result Types
@@ -369,8 +378,31 @@ export async function syncAllDrepsInfo(
     `[DRep Sync] Metadata: fetched=${metadataFetched} skipped=${metadataSkipped} (${drepIds.length} total)`
   );
 
-  // Delegator counts come from our StakeDelegationState (Koios does not provide live_delegators)
-  await refreshDrepDelegatorCountsFromDelegationState(prisma);
+  // Delegator counts come from our StakeDelegationState (Koios does not provide live_delegators).
+  // Skip if delegation sync completed recently to avoid duplicate full-table refresh work.
+  const forceDelegatorCountRefresh =
+    process.env.DREP_INFO_FORCE_DELEGATOR_COUNT_REFRESH === "true";
+  const delegationPhase3Status = await (prisma as Prisma.TransactionClient & {
+    syncStatus: any;
+  }).syncStatus.findUnique({
+    where: { jobName: DREP_DELEGATION_PHASE3_JOB_NAME },
+    select: { completedAt: true },
+  });
+  const delegationSyncCompletedAt = delegationPhase3Status?.completedAt
+    ? new Date(delegationPhase3Status.completedAt).getTime()
+    : null;
+  const completedRecently =
+    delegationSyncCompletedAt !== null &&
+    Date.now() - delegationSyncCompletedAt <
+      DREP_INFO_DELEGATOR_COUNT_REFRESH_COOLDOWN_MS;
+
+  if (forceDelegatorCountRefresh || !completedRecently) {
+    await refreshDrepDelegatorCountsFromDelegationState(prisma);
+  } else {
+    console.log(
+      `[DRep Sync] Skipping delegator_count refresh (delegation sync completed recently within cooldownMs=${DREP_INFO_DELEGATOR_COUNT_REFRESH_COOLDOWN_MS})`
+    );
+  }
 
   return {
     totalDreps: drepIds.length,

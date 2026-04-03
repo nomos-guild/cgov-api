@@ -62,6 +62,10 @@ const KOIOS_DEFAULT_PAGE_DELAY_MS = parseInt(
   process.env.KOIOS_DEFAULT_PAGE_DELAY_MS || "100",
   10
 );
+const KOIOS_ACCOUNT_UPDATE_HISTORY_PAGE_DELAY_MS = parseInt(
+  process.env.KOIOS_ACCOUNT_UPDATE_HISTORY_PAGE_DELAY_MS || "150",
+  10
+);
 const KOIOS_TIMING_SLOW_MS = parseInt(
   process.env.KOIOS_TIMING_SLOW_MS || "2000",
   10
@@ -498,13 +502,27 @@ export async function getAccountUpdateHistoryBatch(
   const rows: KoiosAccountUpdateHistoryEntry[] = [];
   let offset = 0;
   let hasMore = true;
+  let isFirstPage = true;
+  let pageCount = 0;
+  const startedAt = Date.now();
 
   while (hasMore) {
+    if (
+      !isFirstPage &&
+      KOIOS_ACCOUNT_UPDATE_HISTORY_PAGE_DELAY_MS > 0
+    ) {
+      await new Promise((resolve) =>
+        setTimeout(resolve, KOIOS_ACCOUNT_UPDATE_HISTORY_PAGE_DELAY_MS)
+      );
+    }
+    isFirstPage = false;
+
     const page = await koiosPost<KoiosAccountUpdateHistoryEntry[]>(
       `/account_update_history?offset=${offset}&limit=${KOIOS_ACCOUNT_UPDATE_HISTORY_PAGE_SIZE}`,
       { _stake_addresses: uniqueStakeAddresses },
       toKoiosContext(options)
     );
+    pageCount += 1;
 
     if (!page || page.length === 0) {
       hasMore = false;
@@ -514,6 +532,13 @@ export async function getAccountUpdateHistoryBatch(
     rows.push(...page);
     offset += page.length;
     hasMore = page.length === KOIOS_ACCOUNT_UPDATE_HISTORY_PAGE_SIZE;
+  }
+
+  const durationMs = Date.now() - startedAt;
+  if (durationMs >= KOIOS_TIMING_SLOW_MS) {
+    console.log(
+      `[Koios Timing] label=account_update_history pages=${pageCount} rows=${rows.length} durationMs=${durationMs} pageSize=${KOIOS_ACCOUNT_UPDATE_HISTORY_PAGE_SIZE} pageDelayMs=${KOIOS_ACCOUNT_UPDATE_HISTORY_PAGE_DELAY_MS} stakeCount=${uniqueStakeAddresses.length}`
+    );
   }
 
   return rows;
