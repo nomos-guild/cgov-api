@@ -331,6 +331,24 @@ export async function listDrepVotingPowerHistory(options: {
   );
 }
 
+/**
+ * Fetches ALL DRep voting power records for an epoch, auto-paginating via
+ * koiosGetAll. Use this for epoch-wide syncs instead of one-call-per-DRep.
+ *
+ * Ordering by drep_id.asc gives deterministic pages so offset pagination
+ * remains stable across page boundaries.
+ */
+export async function getAllDrepVotingPowerHistoryForEpoch(options: {
+  epochNo: number;
+  source?: string;
+}): Promise<KoiosDrepVotingPower[]> {
+  return koiosGetAll<KoiosDrepVotingPower>(
+    "/drep_voting_power_history",
+    { _epoch_no: options.epochNo, order: "drep_id.asc" },
+    toKoiosContext(options)
+  );
+}
+
 export async function listDrepDelegators(options: {
   drepId: string;
   epochNo?: number;

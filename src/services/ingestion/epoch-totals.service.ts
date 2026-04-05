@@ -275,6 +275,12 @@ function unixToDate(timestamp: number | null | undefined): Date | null {
   return new Date(timestamp * 1000);
 }
 
+function areDatesEqual(a: Date | null, b: Date | null): boolean {
+  if (a == null && b == null) return true;
+  if (a == null || b == null) return false;
+  return a.getTime() === b.getTime();
+}
+
 // ============================================================
 // Public API
 // ============================================================
@@ -344,48 +350,92 @@ export async function syncEpochTotals(
   const blockCount = epochInfo?.blk_count ?? null;
   const txCount = epochInfo?.tx_count ?? null;
 
-  await prisma.epochTotals.upsert({
+  const payload = {
+    circulation,
+    treasury,
+    reward,
+    supply,
+    reserves,
+    delegatedDrepPower,
+    totalPoolVotePower,
+    drepAlwaysNoConfidenceDelegatorCount,
+    drepAlwaysNoConfidenceVotingPower,
+    drepAlwaysAbstainDelegatorCount,
+    drepAlwaysAbstainVotingPower,
+    startTime,
+    endTime,
+    firstBlockTime,
+    lastBlockTime,
+    blockCount,
+    txCount,
+  };
+  const existing = await prisma.epochTotals.findUnique({
     where: { epoch: epochNo },
-    update: {
-      circulation,
-      treasury,
-      reward,
-      supply,
-      reserves,
-      delegatedDrepPower,
-      totalPoolVotePower,
-      drepAlwaysNoConfidenceDelegatorCount,
-      drepAlwaysNoConfidenceVotingPower,
-      drepAlwaysAbstainDelegatorCount,
-      drepAlwaysAbstainVotingPower,
-      startTime,
-      endTime,
-      firstBlockTime,
-      lastBlockTime,
-      blockCount,
-      txCount,
-    },
-    create: {
-      epoch: epochNo,
-      circulation,
-      treasury,
-      reward,
-      supply,
-      reserves,
-      delegatedDrepPower,
-      totalPoolVotePower,
-      drepAlwaysNoConfidenceDelegatorCount,
-      drepAlwaysNoConfidenceVotingPower,
-      drepAlwaysAbstainDelegatorCount,
-      drepAlwaysAbstainVotingPower,
-      startTime,
-      endTime,
-      firstBlockTime,
-      lastBlockTime,
-      blockCount,
-      txCount,
+    select: {
+      circulation: true,
+      treasury: true,
+      reward: true,
+      supply: true,
+      reserves: true,
+      delegatedDrepPower: true,
+      totalPoolVotePower: true,
+      drepAlwaysNoConfidenceDelegatorCount: true,
+      drepAlwaysNoConfidenceVotingPower: true,
+      drepAlwaysAbstainDelegatorCount: true,
+      drepAlwaysAbstainVotingPower: true,
+      startTime: true,
+      endTime: true,
+      firstBlockTime: true,
+      lastBlockTime: true,
+      blockCount: true,
+      txCount: true,
     },
   });
+
+  if (!existing) {
+    await prisma.epochTotals.create({
+      data: {
+        epoch: epochNo,
+        ...payload,
+      },
+    });
+    console.log(`[Epoch Totals] epoch=${epochNo} action=create`);
+  } else {
+    const changed =
+      existing.circulation !== payload.circulation ||
+      existing.treasury !== payload.treasury ||
+      existing.reward !== payload.reward ||
+      existing.supply !== payload.supply ||
+      existing.reserves !== payload.reserves ||
+      existing.delegatedDrepPower !== payload.delegatedDrepPower ||
+      existing.totalPoolVotePower !== payload.totalPoolVotePower ||
+      existing.drepAlwaysNoConfidenceDelegatorCount !==
+        payload.drepAlwaysNoConfidenceDelegatorCount ||
+      existing.drepAlwaysNoConfidenceVotingPower !==
+        payload.drepAlwaysNoConfidenceVotingPower ||
+      existing.drepAlwaysAbstainDelegatorCount !==
+        payload.drepAlwaysAbstainDelegatorCount ||
+      existing.drepAlwaysAbstainVotingPower !==
+        payload.drepAlwaysAbstainVotingPower ||
+      !areDatesEqual(existing.startTime, payload.startTime) ||
+      !areDatesEqual(existing.endTime, payload.endTime) ||
+      existing.firstBlockTime !== payload.firstBlockTime ||
+      existing.lastBlockTime !== payload.lastBlockTime ||
+      existing.blockCount !== payload.blockCount ||
+      existing.txCount !== payload.txCount;
+
+    if (changed) {
+      await prisma.epochTotals.update({
+        where: { epoch: epochNo },
+        data: payload,
+      });
+      console.log(`[Epoch Totals] epoch=${epochNo} action=update`);
+    } else {
+      console.log(
+        `[Epoch Totals] epoch=${epochNo} action=skip-unchanged`
+      );
+    }
+  }
 
   return {
     epoch: epochNo,

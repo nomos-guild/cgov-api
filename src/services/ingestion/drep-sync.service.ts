@@ -30,6 +30,8 @@ const DREP_INFO_DELEGATOR_COUNT_REFRESH_COOLDOWN_MS = getBoundedIntEnv(
   0,
   24 * 60 * 60 * 1000
 );
+const DREP_INFO_WRITE_VOTING_POWER =
+  process.env.DREP_INFO_WRITE_VOTING_POWER === "true";
 
 // ============================================================
 // Result Types
@@ -275,6 +277,8 @@ export async function refreshDrepDelegatorCountsFromDelegationState(
  * Sync info for ALL DReps in the database from Koios /drep_info and /drep_updates.
  * Called once per epoch to capture changes in registration status, active status,
  * expiration epoch, metadata URL/hash, name, payment address, icon URL, and doNotList.
+ * By default this job no longer writes voting_power to avoid multi-writer churn;
+ * voterPowerSync is the authoritative writer for DRep/SPO voting power snapshots.
  * Also refreshes delegator_count from StakeDelegationState (Koios does not provide it).
  */
 export async function syncAllDrepsInfo(
@@ -337,7 +341,9 @@ export async function syncAllDrepsInfo(
           await prisma.drep.update({
             where: { drepId: info.drep_id },
             data: {
-              votingPower: toBigIntOrNull(info.amount) ?? BigInt(0),
+              ...(DREP_INFO_WRITE_VOTING_POWER && {
+                votingPower: toBigIntOrNull(info.amount) ?? BigInt(0),
+              }),
               registered: info.registered ?? undefined,
               active: info.active ?? undefined,
               expiresEpoch: info.expires_epoch_no ?? undefined,
