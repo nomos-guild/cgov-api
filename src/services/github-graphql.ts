@@ -40,6 +40,27 @@ interface GraphQLError {
   path?: string[];
 }
 
+export interface GitHubGraphQLErrorItem {
+  message: string;
+  type?: string;
+  path?: string[];
+}
+
+export class GitHubGraphQLError extends Error {
+  readonly errors: ReadonlyArray<GitHubGraphQLErrorItem>;
+
+  constructor(errors: GraphQLError[]) {
+    const msg = errors.map((e) => e.message).join("; ");
+    super(`GitHub GraphQL errors: ${msg}`);
+    this.name = "GitHubGraphQLError";
+    this.errors = errors.map((error) => ({
+      message: error.message,
+      type: error.type,
+      path: error.path,
+    }));
+  }
+}
+
 interface GraphQLResponse<T = Record<string, unknown>> {
   data: T | null;
   errors?: GraphQLError[];
@@ -129,8 +150,7 @@ export async function githubGraphQL<T = Record<string, unknown>>(
     );
 
     if (response.errors?.length) {
-      const msg = response.errors.map((e) => e.message).join("; ");
-      throw new Error(`GitHub GraphQL errors: ${msg}`);
+      throw new GitHubGraphQLError(response.errors);
     }
 
     if (!response.data) {

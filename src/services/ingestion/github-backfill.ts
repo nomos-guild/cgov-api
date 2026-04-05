@@ -111,6 +111,8 @@ const DEFAULT_OPTIONS: Required<BackfillOptions> = {
   minStars: 0,
   minRateLimit: 200,
 };
+const backfillTransientFailureThreshold = 3;
+const backfillTransientFailureCounts = new Map<string, number>();
 
 export async function backfillRepositories(
   opts?: BackfillOptions
@@ -152,11 +154,13 @@ export async function backfillRepositories(
 
     try {
       await backfillRepo(repo);
+      backfillTransientFailureCounts.delete(repo.id);
       result.success++;
       console.log(
         `[backfill] ${repo.id}: done (${result.success}/${result.total}, rl=${getRateLimitState().remaining})`
       );
     } catch (error: any) {
+      await handleBackfillRepoFailure(repo, error);
       result.failed++;
       result.errors.push({ repo: repo.id, error: error.message });
       console.error(`[backfill] ${repo.id}: failed — ${error.message}`);
@@ -167,6 +171,50 @@ export async function backfillRepositories(
     `[backfill] Complete: ${result.success} ok, ${result.failed} failed, ${result.skipped} skipped`
   );
   return result;
+}
+
+function isTransientBackfillFailure(error: unknown): boolean {
+  const message = String((error as { message?: string })?.message ?? "").toLowerCase();
+  return (
+    message.includes("github graphql 502") ||
+    message.includes("github graphql 503") ||
+    message.includes("github graphql 504") ||
+    message.includes("fetch failed") ||
+    message.includes("socket hang up") ||
+    message.includes("timed out") ||
+    message.includes("econnreset") ||
+    message.includes("eai_again")
+  );
+}
+
+async function handleBackfillRepoFailure(
+  repo: GithubRepository,
+  error: unknown
+): Promise<void> {
+  if (!isTransientBackfillFailure(error)) {
+    backfillTransientFailureCounts.delete(repo.id);
+    return;
+  }
+
+  const nextCount = (backfillTransientFailureCounts.get(repo.id) ?? 0) + 1;
+  backfillTransientFailureCounts.set(repo.id, nextCount);
+  console.warn(
+    `[github-repo-health] action=transient-backfill-failure repo=${repo.id} count=${nextCount} threshold=${backfillTransientFailureThreshold}`
+  );
+
+  if (nextCount < backfillTransientFailureThreshold) {
+    return;
+  }
+
+  const deactivated = await prisma.githubRepository.updateMany({
+    where: { id: repo.id, isActive: true },
+    data: { isActive: false },
+  });
+  if (deactivated.count > 0) {
+    console.warn(
+      `[github-repo-health] action=deactivate scope=ingestion.github-backfill repo=${repo.id} reason=consecutive-transient-failures count=${nextCount}`
+    );
+  }
 }
 
 // ─── Per-Repo Backfill ───────────────────────────────────────────────────────

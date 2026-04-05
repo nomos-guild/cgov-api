@@ -1,6 +1,11 @@
 import { Prisma, type GithubRepository } from "@prisma/client";
 import { prisma } from "../prisma";
-import { githubGraphQL, buildBatchRepoQuery, getRateLimitState } from "../github-graphql";
+import {
+  githubGraphQL,
+  buildBatchRepoQuery,
+  getRateLimitState,
+  GitHubGraphQLError,
+} from "../github-graphql";
 import {
   recordDbFailureForFailFast,
   shouldFailFastForDb,
@@ -80,6 +85,22 @@ const RECENT_WINDOW_DAYS = 7;
 const DB_BATCH_SIZE = 200;
 const batchedGithubActivityWritesEnabled =
   process.env.GITHUB_ACTIVITY_BATCHED_DB_WRITES_ENABLED !== "false";
+const unresolvedRepoDisableThreshold = 2;
+const unresolvedRepoFailureCounts = new Map<string, number>();
+const unresolvedRepoRegex =
+  /Could not resolve to a Repository with the name '([^']+)'/g;
+
+interface RepoHealthSummary {
+  unresolvedSeen: number;
+  reposDeactivated: number;
+  transientBatchFailures: number;
+}
+
+interface RepoRef {
+  id: string;
+  owner: string;
+  name: string;
+}
 
 // ─── Sync Entry Points ──────────────────────────────────────────────────────
 
@@ -138,13 +159,19 @@ async function syncRepos(repos: GithubRepository[]): Promise<SyncResult> {
   ).toISOString();
   const today = new Date();
   today.setUTCHours(0, 0, 0, 0);
+  const healthSummary: RepoHealthSummary = {
+    unresolvedSeen: 0,
+    reposDeactivated: 0,
+    transientBatchFailures: 0,
+  };
 
   for (let i = 0; i < repos.length; i += BATCH_SIZE) {
     const batch = repos.slice(i, i + BATCH_SIZE);
     try {
-      await syncBatch(batch, since, today, result);
+      await syncBatch(batch, since, today, result, healthSummary);
     } catch (error: any) {
       recordDbFailureForFailFast(error, "ingestion.github-activity.sync-batch");
+      healthSummary.transientBatchFailures += 1;
       console.error(`[sync] Batch ${i / BATCH_SIZE} failed:`, error.message);
       for (const repo of batch) {
         result.failed++;
@@ -158,6 +185,9 @@ async function syncRepos(repos: GithubRepository[]): Promise<SyncResult> {
       `${result.eventsCreated} events, ${result.developersUpserted} devs, ` +
       `${result.snapshotsTaken} snapshots (rate limit: ${getRateLimitState().remaining})`
   );
+  console.log(
+    `[github-repo-health] scope=ingestion.github-activity.sync-repos unresolvedSeen=${healthSummary.unresolvedSeen} reposDeactivated=${healthSummary.reposDeactivated} transientBatchFailures=${healthSummary.transientBatchFailures}`
+  );
   return result;
 }
 
@@ -165,20 +195,24 @@ async function syncBatch(
   batch: GithubRepository[],
   since: string,
   today: Date,
-  result: SyncResult
+  result: SyncResult,
+  healthSummary: RepoHealthSummary
 ): Promise<void> {
-  const fragment = buildActivityFragment(since);
-  const query = buildBatchRepoQuery(
-    batch.map((r) => ({ owner: r.owner, name: r.name })),
-    fragment
-  );
+  const { batch: filteredBatch, data } =
+    await fetchBatchDataWithUnresolvedHandling<RepoActivityData>(
+      batch,
+      buildActivityFragment(since),
+      result,
+      healthSummary,
+      "ingestion.github-activity.sync-batch-item"
+    );
+  if (filteredBatch.length === 0) return;
 
-  const data = await githubGraphQL<Record<string, RepoActivityData>>(query);
   const allAuthors = new Map<string, string | null>(); // login -> avatarUrl
   const allEvents: Array<{ repoId: string; eventType: string; authorLogin: string | null; eventDate: Date }> = [];
 
-  for (let j = 0; j < batch.length; j++) {
-    const repo = batch[j];
+  for (let j = 0; j < filteredBatch.length; j++) {
+    const repo = filteredBatch[j];
     const repoData = data[`repo${j}`];
 
     if (!repoData) {
@@ -651,6 +685,11 @@ export async function snapshotAllRepos(): Promise<SnapshotResult> {
   });
 
   const result: SnapshotResult = { total: repos.length, success: 0, failed: 0, errors: [] };
+  const healthSummary: RepoHealthSummary = {
+    unresolvedSeen: 0,
+    reposDeactivated: 0,
+    transientBatchFailures: 0,
+  };
   if (repos.length === 0) return result;
   if (shouldFailFastForDb("ingestion.github-activity.snapshot")) {
     result.failed = repos.length;
@@ -670,20 +709,25 @@ export async function snapshotAllRepos(): Promise<SnapshotResult> {
     const batch = repos.slice(i, i + SNAPSHOT_BATCH_SIZE);
 
     try {
-      const query = buildBatchRepoQuery(
-        batch.map((r) => ({ owner: r.owner, name: r.name })),
-        fragment
-      );
+      const { batch: filteredBatch, data } =
+        await fetchBatchDataWithUnresolvedHandling<{
+          stargazerCount: number;
+          forkCount: number;
+          openIssueCount: { totalCount: number };
+          watchers: { totalCount: number };
+        }>(
+          batch,
+          fragment,
+          result,
+          healthSummary,
+          "ingestion.github-activity.snapshot-item"
+        );
+      if (filteredBatch.length === 0) {
+        continue;
+      }
 
-      const data = await githubGraphQL<Record<string, {
-        stargazerCount: number;
-        forkCount: number;
-        openIssueCount: { totalCount: number };
-        watchers: { totalCount: number };
-      }>>(query);
-
-      for (let j = 0; j < batch.length; j++) {
-        const repo = batch[j];
+      for (let j = 0; j < filteredBatch.length; j++) {
+        const repo = filteredBatch[j];
         const repoData = data[`repo${j}`];
 
         if (!repoData) {
@@ -734,6 +778,7 @@ export async function snapshotAllRepos(): Promise<SnapshotResult> {
       }
     } catch (error: any) {
       recordDbFailureForFailFast(error, "ingestion.github-activity.snapshot-batch");
+      healthSummary.transientBatchFailures += 1;
       for (const repo of batch) {
         result.failed++;
         result.errors.push({ repo: `${repo.owner}/${repo.name}`, error: error.message });
@@ -745,7 +790,108 @@ export async function snapshotAllRepos(): Promise<SnapshotResult> {
     `[snapshot] Complete: ${result.success}/${result.total} repos ` +
       `(rate limit: ${getRateLimitState().remaining})`
   );
+  console.log(
+    `[github-repo-health] scope=ingestion.github-activity.snapshot unresolvedSeen=${healthSummary.unresolvedSeen} reposDeactivated=${healthSummary.reposDeactivated} transientBatchFailures=${healthSummary.transientBatchFailures}`
+  );
   return result;
+}
+
+async function fetchBatchDataWithUnresolvedHandling<T>(
+  initialBatch: RepoRef[],
+  fragment: string,
+  result: { failed: number; errors: Array<{ repo: string; error: string }> },
+  healthSummary: RepoHealthSummary,
+  scope: string
+): Promise<{ batch: RepoRef[]; data: Record<string, T> }> {
+  let batch = initialBatch;
+
+  while (true) {
+    const query = buildBatchRepoQuery(
+      batch.map((r) => ({ owner: r.owner, name: r.name })),
+      fragment
+    );
+
+    try {
+      const data = await githubGraphQL<Record<string, T>>(query);
+      return { batch, data };
+    } catch (error: unknown) {
+      const unresolvedNames = getUnresolvedRepoNamesFromGraphQLError(error);
+      if (unresolvedNames.size === 0) {
+        throw error;
+      }
+
+      const unresolvedRepos = batch.filter((repo) =>
+        unresolvedNames.has(`${repo.owner}/${repo.name}`)
+      );
+      if (unresolvedRepos.length === 0) {
+        throw error;
+      }
+
+      for (const repo of unresolvedRepos) {
+        await markRepoUnresolved(repo, result, healthSummary, scope);
+      }
+
+      batch = batch.filter(
+        (repo) => !unresolvedNames.has(`${repo.owner}/${repo.name}`)
+      );
+      if (batch.length === 0) {
+        return { batch, data: {} };
+      }
+
+      console.warn(
+        `[github-repo-health] action=retry-without-unresolved scope=${scope} removed=${unresolvedRepos.length} remaining=${batch.length}`
+      );
+    }
+  }
+}
+
+function getUnresolvedRepoNamesFromGraphQLError(error: unknown): Set<string> {
+  if (!(error instanceof GitHubGraphQLError)) {
+    return new Set();
+  }
+
+  const unresolved = new Set<string>();
+  for (const gqlError of error.errors) {
+    for (const match of gqlError.message.matchAll(unresolvedRepoRegex)) {
+      if (match[1]) unresolved.add(match[1]);
+    }
+  }
+  return unresolved;
+}
+
+async function markRepoUnresolved(
+  repo: RepoRef,
+  result: { failed: number; errors: Array<{ repo: string; error: string }> },
+  healthSummary: RepoHealthSummary,
+  scope: string
+): Promise<void> {
+  const nextCount = (unresolvedRepoFailureCounts.get(repo.id) ?? 0) + 1;
+  unresolvedRepoFailureCounts.set(repo.id, nextCount);
+  healthSummary.unresolvedSeen += 1;
+  result.failed += 1;
+  result.errors.push({
+    repo: repo.id,
+    error: "GitHub repo unresolved (not found or inaccessible)",
+  });
+
+  console.warn(
+    `[github-repo-health] action=unresolved scope=${scope} repo=${repo.id} count=${nextCount} threshold=${unresolvedRepoDisableThreshold}`
+  );
+
+  if (nextCount < unresolvedRepoDisableThreshold) {
+    return;
+  }
+
+  const deactivated = await prisma.githubRepository.updateMany({
+    where: { id: repo.id, isActive: true },
+    data: { isActive: false },
+  });
+  if (deactivated.count > 0) {
+    healthSummary.reposDeactivated += 1;
+    console.warn(
+      `[github-repo-health] action=deactivate scope=${scope} repo=${repo.id} count=${nextCount}`
+    );
+  }
 }
 
 // ─── Cleanup ─────────────────────────────────────────────────────────────────
