@@ -18,7 +18,6 @@ import type {
 } from "../../types/koios.types";
 import { processInParallel } from "./parallel";
 import {
-  DREP_DELEGATOR_MIN_VOTING_POWER,
   DREP_DELEGATION_SYNC_CONCURRENCY,
   STAKE_DELEGATION_SYNC_STATE_ID,
   DREP_DELEGATION_BACKFILL_JOB_NAME,
@@ -41,6 +40,7 @@ const KOIOS_HEAVY_DREP_DELEGATORS_LANE_JOB_NAME =
 const DELEGATION_FULL_SCAN_WINDOW_JOB_NAME =
   "drep-delegation-full-scan-window";
 const DELEGATION_FULL_SCAN_WINDOW_DEFAULT_MS = 55 * 60 * 1000;
+const DREP_DELEGATION_MAX_FETCH_FAILURES = 1;
 const HEAVY_LANE_LOCK_TTL_MS = 2 * 60 * 60 * 1000;
 
 // ============================================================
@@ -593,14 +593,13 @@ export async function syncDrepDelegationChanges(
     }
   }
 
-  const minVotingPower = DREP_DELEGATOR_MIN_VOTING_POWER;
   // These "special" DRep options can have massive delegator sets.
   // We intentionally exclude them from stake-address delegation tracking to avoid
   // ballooning the stake address inventory; we ingest only per-epoch aggregates elsewhere.
   const excludedDrepIds = ["drep_always_abstain", "drep_always_no_confidence"];
   let drepRows = await prisma.drep.findMany({
     select: { drepId: true },
-    where: { votingPower: { gt: minVotingPower }, drepId: { notIn: excludedDrepIds } },
+    where: { drepId: { notIn: excludedDrepIds } },
     orderBy: { drepId: "asc" },
   });
 
@@ -609,7 +608,7 @@ export async function syncDrepDelegationChanges(
     await syncAllDrepsInventory(prisma);
     drepRows = await prisma.drep.findMany({
       select: { drepId: true },
-      where: { votingPower: { gt: minVotingPower }, drepId: { notIn: excludedDrepIds } },
+      where: { drepId: { notIn: excludedDrepIds } },
       orderBy: { drepId: "asc" },
     });
   }
@@ -617,7 +616,7 @@ export async function syncDrepDelegationChanges(
   const drepIds = drepRows.map((row) => row.drepId).filter(Boolean);
 
   console.log(
-    `[DRep Delegation Sync] currentEpoch=${currentEpoch} lastProcessedEpoch=${lastProcessedEpoch} minVotingPower=${minVotingPower.toString()} drepCount=${drepIds.length}`
+    `[DRep Delegation Sync] currentEpoch=${currentEpoch} lastProcessedEpoch=${lastProcessedEpoch} drepCount=${drepIds.length}`
   );
 
   // ============================================================
@@ -694,6 +693,59 @@ export async function syncDrepDelegationChanges(
       allStakeAddresses.add(stakeAddress);
       allDelegatorsByStake.set(stakeAddress, { drepId, delegator });
     }
+  }
+
+  const failed = delegatorFetchResult.failed.map((f) => ({
+    drepId: f.id,
+    error: f.error,
+  }));
+  const maxFetchFailures = Math.min(
+    DREP_DELEGATION_MAX_FETCH_FAILURES,
+    Math.max(1, drepIds.length)
+  );
+  const shouldFailClosed = failed.length > maxFetchFailures;
+  if (failed.length > 0) {
+    const failureSummary = JSON.stringify({
+      type: "phase1-fetch-failures",
+      failedCount: failed.length,
+      maxAllowedFailures: maxFetchFailures,
+      failClosed: shouldFailClosed,
+      drepIds: failed.slice(0, 20).map((entry) => entry.drepId),
+    });
+    await (prisma as any).syncStatus.upsert({
+      where: { jobName: DELEGATION_FULL_SCAN_WINDOW_JOB_NAME },
+      create: {
+        jobName: DELEGATION_FULL_SCAN_WINDOW_JOB_NAME,
+        displayName: "DRep Delegation Full Scan Window",
+        isRunning: false,
+        completedAt: new Date(),
+        lastResult: shouldFailClosed ? "error" : "success",
+        itemsProcessed: allDelegatorsByStake.size,
+        errorMessage: failureSummary,
+      },
+      update: {
+        isRunning: false,
+        completedAt: new Date(),
+        lastResult: shouldFailClosed ? "error" : "success",
+        itemsProcessed: allDelegatorsByStake.size,
+        errorMessage: failureSummary,
+      },
+    });
+    if (shouldFailClosed) {
+      return {
+        currentEpoch,
+        lastProcessedEpoch,
+        maxDelegationEpoch: lastProcessedEpoch,
+        drepsProcessed: delegatorFetchResult.successful.length,
+        delegatorsProcessed: allDelegatorsByStake.size,
+        statesUpdated: 0,
+        changesInserted: 0,
+        failed,
+      };
+    }
+    console.warn(
+      `[DRep Delegation Sync] Continuing with partial data: failures=${failed.length} maxAllowedFailures=${maxFetchFailures}`
+    );
   }
 
   console.log(
@@ -866,6 +918,7 @@ export async function syncDrepDelegationChanges(
     amount: bigint;
     delegatedEpoch: number | null;
   }> = [];
+  const toClear: string[] = [];
   const changeLog: Array<{
     stakeAddress: string;
     fromDrepId: string;      // "" = no previous DRep (sentinel)
@@ -915,6 +968,25 @@ export async function syncDrepDelegationChanges(
         toUpdate.push({ stakeAddress, drepId, amount, delegatedEpoch });
       }
     }
+  }
+
+  // Reconcile stale states only when we have a complete snapshot.
+  // If there are fetch failures, skip this destructive step to avoid false clears.
+  if (failed.length === 0) {
+    const activeDelegationStates: Array<{ stakeAddress: string }> =
+      await delegationClient.stakeDelegationState.findMany({
+        where: { drepId: { not: null } },
+        select: { stakeAddress: true },
+      });
+    for (const row of activeDelegationStates) {
+      if (!allStakeAddresses.has(row.stakeAddress)) {
+        toClear.push(row.stakeAddress);
+      }
+    }
+  } else {
+    console.warn(
+      `[DRep Delegation Sync] Skipping stale-state reconciliation due to fetch failures=${failed.length}`
+    );
   }
 
   // Deduplicate: skip Phase 3 change log entries when a row for (stakeAddress, toDrepId, delegatedEpoch)
@@ -1057,6 +1129,29 @@ export async function syncDrepDelegationChanges(
     }
   }
 
+  if (toClear.length > 0) {
+    const clearChunkSize = getBoundedIntEnv(
+      "DELEGATION_PHASE3_CLEAR_CHUNK_SIZE",
+      500,
+      50,
+      5000
+    );
+    for (let i = 0; i < toClear.length; i += clearChunkSize) {
+      const chunk = toClear.slice(i, i + clearChunkSize);
+      await delegationClient.stakeDelegationState.updateMany({
+        where: {
+          stakeAddress: { in: chunk },
+          drepId: { not: null },
+        },
+        data: {
+          drepId: null,
+          amount: null,
+          delegatedEpoch: null,
+        },
+      });
+    }
+  }
+
   // Ensure all from/to DReps referenced in the change log exist in the DRep table (e.g. retired "from" DReps).
   if (changeLogToInsert.length > 0) {
     const drepIdsFromChanges = new Set<string>();
@@ -1119,33 +1214,21 @@ export async function syncDrepDelegationChanges(
     data: { backfillCursor: null, backfillCompletedAt: new Date() },
   });
 
-  const hasDelegationStateMutations = toCreate.length > 0 || toUpdate.length > 0;
-  if (hasDelegationStateMutations) {
-    // Refresh DRep delegator_count from StakeDelegationState (Koios does not provide it)
-    const refreshResult = await refreshDrepDelegatorCountsFromDelegationState(
-      delegationClient as Prisma.TransactionClient
-    );
-    if (refreshResult.updated > 0) {
-      console.log(
-        `[DRep Delegation Sync] Refreshed delegator_count for ${refreshResult.updated} DRep(s)`
-      );
-    }
-  } else {
+  // Always refresh DRep delegator_count after a successful reconciliation pass.
+  const refreshResult = await refreshDrepDelegatorCountsFromDelegationState(
+    delegationClient as Prisma.TransactionClient
+  );
+  if (refreshResult.updated > 0) {
     console.log(
-      `[DRep Delegation Sync] Skipping delegator_count refresh (no delegation state mutations)`
+      `[DRep Delegation Sync] Refreshed delegator_count for ${refreshResult.updated} DRep(s)`
     );
   }
 
   console.log(
-    `[DRep Delegation Sync] Phase 3 complete: created=${toCreate.length}, updated=${toUpdate.length}, changes=${changeLogToInsert.length}`
+    `[DRep Delegation Sync] Phase 3 complete: created=${toCreate.length}, updated=${toUpdate.length}, cleared=${toClear.length}, changes=${changeLogToInsert.length}`
   );
 
   // Update sync state
-  const failed = delegatorFetchResult.failed.map((f) => ({
-    drepId: f.id,
-    error: f.error,
-  }));
-
   if (failed.length === 0 && maxDelegationEpoch >= lastProcessedEpoch) {
     await delegationClient.stakeDelegationSyncState.update({
       where: { id: STAKE_DELEGATION_SYNC_STATE_ID },
@@ -1174,7 +1257,7 @@ export async function syncDrepDelegationChanges(
   });
 
   console.log(
-    `[DRep Delegation Sync] metrics phase1Dreps=${drepIds.length} phase1Rows=${phase1DelegatorRows} uniqueStakes=${allStakeAddresses.size} newStakes=${newStakeAddresses.length} creates=${toCreate.length} updates=${toUpdate.length} changesCandidate=${changeLog.length} changesInserted=${changeLogToInsert.length}`
+    `[DRep Delegation Sync] metrics phase1Dreps=${drepIds.length} phase1Rows=${phase1DelegatorRows} uniqueStakes=${allStakeAddresses.size} newStakes=${newStakeAddresses.length} creates=${toCreate.length} updates=${toUpdate.length} cleared=${toClear.length} changesCandidate=${changeLog.length} changesInserted=${changeLogToInsert.length} fetchFailures=${failed.length}`
   );
 
   return {
@@ -1183,7 +1266,7 @@ export async function syncDrepDelegationChanges(
     maxDelegationEpoch,
     drepsProcessed: delegatorFetchResult.successful.length,
     delegatorsProcessed: allDelegatorsByStake.size,
-    statesUpdated: toCreate.length + toUpdate.length,
+    statesUpdated: toCreate.length + toUpdate.length + toClear.length,
     changesInserted: changeLogToInsert.length,
     failed,
   };

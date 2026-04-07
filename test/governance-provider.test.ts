@@ -130,13 +130,13 @@ describe("governanceProvider", () => {
     expect(mockKoiosGet).toHaveBeenNthCalledWith(
       1,
       "/drep_list",
-      { limit: 1000, offset: 0 },
+      { order: "drep_id.asc", limit: 1000, offset: 0 },
       { source: "test.drep-list" }
     );
     expect(mockKoiosGet).toHaveBeenNthCalledWith(
       2,
       "/drep_list",
-      { limit: 1000, offset: 1000 },
+      { order: "drep_id.asc", limit: 1000, offset: 1000 },
       { source: "test.drep-list" }
     );
   });
@@ -166,13 +166,25 @@ describe("governanceProvider", () => {
     expect(mockKoiosGet).toHaveBeenNthCalledWith(
       1,
       "/drep_updates",
-      { _drep_id: "drep1", limit: 1000, offset: 0 },
+      {
+        _drep_id: "drep1",
+        order: "block_time.asc,update_tx_hash.asc",
+        limit: 1000,
+        offset: 0,
+        select: "drep_id,action,block_time,update_tx_hash,meta_json",
+      },
       { source: "test.drep-updates" }
     );
     expect(mockKoiosGet).toHaveBeenNthCalledWith(
       2,
       "/drep_updates",
-      { _drep_id: "drep1", limit: 1000, offset: 1000 },
+      {
+        _drep_id: "drep1",
+        order: "block_time.asc,update_tx_hash.asc",
+        limit: 1000,
+        offset: 1000,
+        select: "drep_id,action,block_time,update_tx_hash,meta_json",
+      },
       { source: "test.drep-updates" }
     );
   });
@@ -272,13 +284,13 @@ describe("governanceProvider", () => {
     expect(mockKoiosGet).toHaveBeenNthCalledWith(
       1,
       "/pool_groups",
-      { limit: 1000, offset: 0 },
+      { order: "pool_id_bech32.asc", limit: 1000, offset: 0 },
       { source: "test.pool-groups" }
     );
     expect(mockKoiosGet).toHaveBeenNthCalledWith(
       2,
       "/pool_groups",
-      { limit: 1000, offset: 1000 },
+      { order: "pool_id_bech32.asc", limit: 1000, offset: 1000 },
       { source: "test.pool-groups" }
     );
   });

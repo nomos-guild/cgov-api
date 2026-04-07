@@ -425,6 +425,7 @@ export async function listDreps(options?: {
   return koiosGet<KoiosDrepListEntry[]>(
     "/drep_list",
     {
+      order: "drep_id.asc",
       limit: options?.limit ?? KOIOS_DREP_LIST_PAGE_SIZE,
       offset: options?.offset ?? 0,
     },
@@ -462,6 +463,7 @@ export async function listDrepUpdates(options: {
     "/drep_updates",
     {
       _drep_id: options.drepId,
+      order: "block_time.asc,update_tx_hash.asc",
       limit: options.limit ?? KOIOS_DREP_UPDATES_PAGE_SIZE,
       offset: options.offset ?? 0,
       select: "drep_id,action,block_time,update_tx_hash,meta_json",
@@ -632,6 +634,7 @@ export async function listPoolGroups(options?: {
   return koiosGet<KoiosPoolGroup[]>(
     "/pool_groups",
     {
+      order: "pool_id_bech32.asc",
       limit: options?.limit ?? KOIOS_POOL_GROUPS_PAGE_SIZE,
       offset: options?.offset ?? 0,
     },

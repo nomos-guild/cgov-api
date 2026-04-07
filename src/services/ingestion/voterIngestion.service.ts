@@ -209,14 +209,6 @@ async function ensureSpoExists(
   poolId: string,
   tx: IngestionDbClient
 ): Promise<EnsureVoterResult> {
-  const existing = await tx.sPO.findUnique({
-    where: { poolId },
-  });
-
-  if (existing) {
-    return { voterId: existing.poolId, created: false, updated: false };
-  }
-
   let koiosSpo = spoInfoCache.get(poolId);
   if (koiosSpo === undefined) {
     const koiosSpoResponse = await koiosPost<KoiosSpo[]>(
@@ -257,7 +249,7 @@ async function ensureSpoExists(
 
   const { poolName, ticker, iconUrl } = await fetchPoolMetadata(koiosSpo);
 
-  const newSpo = await tx.sPO.create({
+  const createResult = await tx.sPO.createMany({
     data: {
       poolId,
       poolName,
@@ -265,23 +257,30 @@ async function ensureSpoExists(
       votingPower,
       ...(iconUrl && { iconUrl }),
     },
+    skipDuplicates: true,
   });
 
-  return { voterId: newSpo.poolId, created: true, updated: false };
+  if (createResult.count > 0) {
+    return { voterId: poolId, created: true, updated: false };
+  }
+
+  const existing = await tx.sPO.findUnique({
+    where: { poolId },
+  });
+
+  if (!existing) {
+    throw new Error(
+      `[Voter Service] Expected existing SPO after duplicate-safe insert: ${poolId}`
+    );
+  }
+
+  return { voterId: existing.poolId, created: false, updated: false };
 }
 
 async function ensureCcExists(
   ccId: string,
   tx: IngestionDbClient
 ): Promise<EnsureVoterResult> {
-  const existing = await tx.cC.findUnique({
-    where: { ccId },
-  });
-
-  if (existing) {
-    return { voterId: existing.ccId, created: false, updated: false };
-  }
-
   const committeeInfo = await getCommitteeInfo({
     source: "ingestion.voter.ensure-cc.committee-info",
   });
@@ -296,7 +295,7 @@ async function ensureCcExists(
     status = "expired";
   }
 
-  const newCc = await tx.cC.create({
+  const createResult = await tx.cC.createMany({
     data: {
       ccId,
       hotCredential: ccMember?.cc_hot_id || ccId,
@@ -304,9 +303,24 @@ async function ensureCcExists(
       status,
       memberName: null,
     },
+    skipDuplicates: true,
   });
 
-  return { voterId: newCc.ccId, created: true, updated: false };
+  if (createResult.count > 0) {
+    return { voterId: ccId, created: true, updated: false };
+  }
+
+  const existing = await tx.cC.findUnique({
+    where: { ccId },
+  });
+
+  if (!existing) {
+    throw new Error(
+      `[Voter Service] Expected existing CC after duplicate-safe insert: ${ccId}`
+    );
+  }
+
+  return { voterId: existing.ccId, created: false, updated: false };
 }
 
 /**

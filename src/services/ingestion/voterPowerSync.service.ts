@@ -13,18 +13,29 @@ import {
   getAllDrepVotingPowerHistoryForEpoch,
   getAllPoolVotingPowerHistoryForEpoch,
   listDrepVotingPowerHistory,
+  listPoolVotingPowerHistory,
 } from "../governanceProvider";
 import { getKoiosCurrentEpoch } from "./sync-utils";
 import { processInParallel } from "./parallel";
 
 const VOTER_POWER_UPDATE_CHUNK_SIZE = 500;
 const DREP_MISSING_CONFIRM_CONCURRENCY = 5;
+const SPO_MISSING_CONFIRM_CONCURRENCY = 5;
 
 type MissingDrepConfirmationStatus = "confirmed-empty" | "has-data" | "unresolved";
 
 interface MissingDrepConfirmationResult {
   drepId: string;
   status: MissingDrepConfirmationStatus;
+  votingPower?: bigint;
+  error?: string;
+}
+
+type MissingSpoConfirmationStatus = "confirmed-empty" | "has-data" | "unresolved";
+
+interface MissingSpoConfirmationResult {
+  poolId: string;
+  status: MissingSpoConfirmationStatus;
   votingPower?: bigint;
   error?: string;
 }
@@ -265,6 +276,7 @@ async function syncSpoVotingPower(
   const errors: string[] = [];
   const dbPowerByPoolId = new Map(spos.map((spo) => [spo.poolId, spo.votingPower]));
   const koiosPowerByPoolId = new Map<string, bigint>();
+  let rawKoiosRows = 0;
 
   try {
     const rows = await getAllPoolVotingPowerHistoryForEpoch({
@@ -277,6 +289,7 @@ async function syncSpoVotingPower(
       if (!row?.pool_id_bech32 || !row?.amount) continue;
       try {
         koiosPowerByPoolId.set(row.pool_id_bech32, BigInt(row.amount));
+        rawKoiosRows++;
       } catch {
         errors.push(
           `SPO ${row.pool_id_bech32}: invalid Koios amount "${row.amount}"`
@@ -293,9 +306,103 @@ async function syncSpoVotingPower(
     };
   }
 
+  async function confirmMissingSpoVotingPower(
+    poolId: string
+  ): Promise<MissingSpoConfirmationResult> {
+    try {
+      const rows = await listPoolVotingPowerHistory({
+        epochNo: epoch,
+        poolId,
+        limit: 1,
+        offset: 0,
+        source: "ingestion.voter.sync-spo-voting-power.confirm-missing",
+      });
+
+      if (!Array.isArray(rows) || rows.length === 0) {
+        return { poolId, status: "confirmed-empty" };
+      }
+
+      const row = rows[0];
+      if (!row?.amount) {
+        return {
+          poolId,
+          status: "unresolved",
+          error: "missing amount in per-SPO confirmation row",
+        };
+      }
+
+      try {
+        return {
+          poolId,
+          status: "has-data",
+          votingPower: BigInt(row.amount),
+        };
+      } catch {
+        return {
+          poolId,
+          status: "unresolved",
+          error: `invalid per-SPO amount "${row.amount}"`,
+        };
+      }
+    } catch (error: any) {
+      return {
+        poolId,
+        status: "unresolved",
+        error: error?.message ?? String(error),
+      };
+    }
+  }
+
+  const missingPoolIds = spos
+    .map((spo) => spo.poolId)
+    .filter((poolId) => !koiosPowerByPoolId.has(poolId));
+  const confirmedEmptyPoolIds: string[] = [];
+  const unresolvedPoolIds: string[] = [];
+  let recoveredFromPerPool = 0;
+
+  if (missingPoolIds.length > 0) {
+    const confirmation = await processInParallel(
+      missingPoolIds,
+      (poolId) => poolId,
+      async (poolId) => confirmMissingSpoVotingPower(poolId),
+      SPO_MISSING_CONFIRM_CONCURRENCY
+    );
+
+    for (const result of confirmation.successful) {
+      if (result.status === "confirmed-empty") {
+        confirmedEmptyPoolIds.push(result.poolId);
+        continue;
+      }
+
+      if (result.status === "has-data" && result.votingPower !== undefined) {
+        koiosPowerByPoolId.set(result.poolId, result.votingPower);
+        recoveredFromPerPool++;
+        continue;
+      }
+
+      unresolvedPoolIds.push(result.poolId);
+      if (result.error) {
+        errors.push(`SPO ${result.poolId}: ${result.error}`);
+      }
+    }
+
+    if (confirmation.failed.length > 0) {
+      for (const failure of confirmation.failed) {
+        unresolvedPoolIds.push(failure.id);
+        errors.push(`SPO ${failure.id}: ${failure.error}`);
+      }
+    }
+  }
+
+  const confirmedEmptySet = new Set(confirmedEmptyPoolIds);
   const rowsToUpdate: Array<{ poolId: string; votingPower: bigint }> = [];
+  let zeroCandidates = 0;
   for (const spo of spos) {
-    const nextPower = koiosPowerByPoolId.get(spo.poolId);
+    let nextPower = koiosPowerByPoolId.get(spo.poolId);
+    if (nextPower == null && confirmedEmptySet.has(spo.poolId)) {
+      nextPower = BigInt(0);
+      zeroCandidates++;
+    }
     if (nextPower == null) continue;
     const currentPower = dbPowerByPoolId.get(spo.poolId);
     if (currentPower === nextPower) continue;
@@ -325,6 +432,9 @@ async function syncSpoVotingPower(
       0,
       unchanged
     )} missingInKoios=${Math.max(0, spos.length - koiosPowerByPoolId.size)}`
+  );
+  console.log(
+    `[Voter Service] SPO omission-confirmation metrics: epoch=${epoch} rawKoiosRows=${rawKoiosRows} initialMissing=${missingPoolIds.length} confirmedEmpty=${confirmedEmptyPoolIds.length} recoveredFromPerPool=${recoveredFromPerPool} unresolved=${unresolvedPoolIds.length} zeroCandidates=${zeroCandidates}`
   );
 
   console.log(

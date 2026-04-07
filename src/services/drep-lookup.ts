@@ -79,28 +79,23 @@ export async function getDrepInfoBatch(
           });
         }
 
-        // 3. Upsert into DB so future lookups skip Koios
-        for (const info of koiosResults) {
-          if (!info?.drep_id) continue;
-          await prisma.drep.upsert({
-            where: { drepId: info.drep_id },
-            create: {
-              drepId: info.drep_id,
-              votingPower: toBigIntOrNull(info.amount) ?? BigInt(0),
-              registered: info.registered ?? null,
-              active: info.active ?? null,
-              expiresEpoch: info.expires_epoch_no ?? null,
-              metaUrl: info.meta_url ?? null,
-              metaHash: info.meta_hash ?? null,
-            },
-            update: {
-              votingPower: toBigIntOrNull(info.amount) ?? BigInt(0),
-              registered: info.registered ?? null,
-              active: info.active ?? null,
-              expiresEpoch: info.expires_epoch_no ?? null,
-              metaUrl: info.meta_url ?? null,
-              metaHash: info.meta_hash ?? null,
-            },
+        // 3. Insert into DB in bulk so future lookups skip Koios
+        const createData = koiosResults
+          .filter((info): info is NonNullable<typeof info> => Boolean(info?.drep_id))
+          .map((info) => ({
+            drepId: info.drep_id,
+            votingPower: toBigIntOrNull(info.amount) ?? BigInt(0),
+            registered: info.registered ?? null,
+            active: info.active ?? null,
+            expiresEpoch: info.expires_epoch_no ?? null,
+            metaUrl: info.meta_url ?? null,
+            metaHash: info.meta_hash ?? null,
+          }));
+
+        if (createData.length > 0) {
+          await prisma.drep.createMany({
+            data: createData,
+            skipDuplicates: true,
           });
         }
       } catch (error: any) {
