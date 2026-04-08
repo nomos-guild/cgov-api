@@ -1,15 +1,44 @@
 /**
  * Voter power sync service.
  * Refreshes voting power for existing DRep and SPO records.
+ *
+ * Ownership boundary:
+ * - This service is the authoritative writer for DRep/SPO voting power snapshots.
+ * - drep-sync focuses on DRep metadata/registration info and does not write
+ *   voting power by default.
  */
 
-import type { Prisma } from "@prisma/client";
+import { Prisma } from "@prisma/client";
 import {
+  getAllDrepVotingPowerHistoryForEpoch,
+  getAllPoolVotingPowerHistoryForEpoch,
   listDrepVotingPowerHistory,
   listPoolVotingPowerHistory,
 } from "../governanceProvider";
-import { processInParallel, getVoterSyncConcurrency } from "./parallel";
 import { getKoiosCurrentEpoch } from "./sync-utils";
+import { processInParallel } from "./parallel";
+
+const VOTER_POWER_UPDATE_CHUNK_SIZE = 500;
+const DREP_MISSING_CONFIRM_CONCURRENCY = 5;
+const SPO_MISSING_CONFIRM_CONCURRENCY = 5;
+
+type MissingDrepConfirmationStatus = "confirmed-empty" | "has-data" | "unresolved";
+
+interface MissingDrepConfirmationResult {
+  drepId: string;
+  status: MissingDrepConfirmationStatus;
+  votingPower?: bigint;
+  error?: string;
+}
+
+type MissingSpoConfirmationStatus = "confirmed-empty" | "has-data" | "unresolved";
+
+interface MissingSpoConfirmationResult {
+  poolId: string;
+  status: MissingSpoConfirmationStatus;
+  votingPower?: bigint;
+  error?: string;
+}
 
 /**
  * Result of syncing voter voting powers.
@@ -54,7 +83,7 @@ async function syncDrepVotingPower(
   epoch: number
 ): Promise<{ total: number; updated: number; failed: number; errors: string[] }> {
   const dreps = await prisma.drep.findMany({
-    select: { drepId: true },
+    select: { drepId: true, votingPower: true },
   });
 
   if (dreps.length === 0) {
@@ -62,44 +91,173 @@ async function syncDrepVotingPower(
     return { total: 0, updated: 0, failed: 0, errors: [] };
   }
 
-  const concurrency = getVoterSyncConcurrency();
-  console.log(
-    `[Voter Service] Syncing voting power and delegator count for ${dreps.length} DReps (concurrency: ${concurrency})...`
-  );
+  const errors: string[] = [];
+  const dbPowerByDrepId = new Map(dreps.map((drep) => [drep.drepId, drep.votingPower]));
+  const koiosPowerByDrepId = new Map<string, bigint>();
+  let rawKoiosRows = 0;
 
-  const result = await processInParallel(
-    dreps,
-    (drep) => drep.drepId,
-    async (drep) => {
-      const votingPowerHistory = await listDrepVotingPowerHistory({
+  try {
+    const rows = await getAllDrepVotingPowerHistoryForEpoch({
+      epochNo: epoch,
+      source: "ingestion.voter.sync-drep-voting-power.bulk",
+    });
+
+    for (const row of rows) {
+      if (row?.epoch_no !== epoch) continue;
+      if (!row?.drep_id || !row?.amount) continue;
+      try {
+        koiosPowerByDrepId.set(row.drep_id, BigInt(row.amount));
+        rawKoiosRows++;
+      } catch {
+        errors.push(`DRep ${row.drep_id}: invalid Koios amount "${row.amount}"`);
+      }
+    }
+  } catch (error: any) {
+    const message = error?.message ?? String(error);
+    return {
+      total: dreps.length,
+      updated: 0,
+      failed: dreps.length,
+      errors: [`DRep bulk fetch failed: ${message}`],
+    };
+  }
+
+  async function confirmMissingDrepVotingPower(
+    drepId: string
+  ): Promise<MissingDrepConfirmationResult> {
+    try {
+      const rows = await listDrepVotingPowerHistory({
         epochNo: epoch,
-        drepId: drep.drepId,
-        source: "ingestion.voter.sync-drep-voting-power",
+        drepId,
+        limit: 1,
+        offset: 0,
+        source: "ingestion.voter.sync-drep-voting-power.confirm-missing",
       });
 
-      const votingPowerLovelace = votingPowerHistory?.[0]?.amount;
-      if (votingPowerLovelace) {
-        await prisma.drep.update({
-          where: { drepId: drep.drepId },
-          data: { votingPower: BigInt(votingPowerLovelace) },
-        });
-        return drep.drepId;
+      if (!Array.isArray(rows) || rows.length === 0) {
+        return { drepId, status: "confirmed-empty" };
       }
 
-      return null;
-    },
-    concurrency
-  );
+      const row = rows[0];
+      if (!row?.amount) {
+        return {
+          drepId,
+          status: "unresolved",
+          error: "missing amount in per-DRep confirmation row",
+        };
+      }
 
-  const updated = result.successful.length;
-  const failed = result.failed.length;
-  const errors = result.failed.map((entry) => `DRep ${entry.id}: ${entry.error}`);
+      try {
+        return {
+          drepId,
+          status: "has-data",
+          votingPower: BigInt(row.amount),
+        };
+      } catch {
+        return {
+          drepId,
+          status: "unresolved",
+          error: `invalid per-DRep amount "${row.amount}"`,
+        };
+      }
+    } catch (error: any) {
+      return {
+        drepId,
+        status: "unresolved",
+        error: error?.message ?? String(error),
+      };
+    }
+  }
+
+  const missingDrepIds = dreps
+    .map((drep) => drep.drepId)
+    .filter((drepId) => !koiosPowerByDrepId.has(drepId));
+  const confirmedEmptyDrepIds: string[] = [];
+  const unresolvedDrepIds: string[] = [];
+  let recoveredFromPerDrep = 0;
+
+  if (missingDrepIds.length > 0) {
+    const confirmation = await processInParallel(
+      missingDrepIds,
+      (drepId) => drepId,
+      async (drepId) => confirmMissingDrepVotingPower(drepId),
+      DREP_MISSING_CONFIRM_CONCURRENCY
+    );
+
+    for (const result of confirmation.successful) {
+      if (result.status === "confirmed-empty") {
+        confirmedEmptyDrepIds.push(result.drepId);
+        continue;
+      }
+
+      if (result.status === "has-data" && result.votingPower !== undefined) {
+        koiosPowerByDrepId.set(result.drepId, result.votingPower);
+        recoveredFromPerDrep++;
+        continue;
+      }
+
+      unresolvedDrepIds.push(result.drepId);
+      if (result.error) {
+        errors.push(`DRep ${result.drepId}: ${result.error}`);
+      }
+    }
+
+    if (confirmation.failed.length > 0) {
+      for (const failure of confirmation.failed) {
+        unresolvedDrepIds.push(failure.id);
+        errors.push(`DRep ${failure.id}: ${failure.error}`);
+      }
+    }
+  }
+
+  const confirmedEmptySet = new Set(confirmedEmptyDrepIds);
+  const rowsToUpdate: Array<{ drepId: string; votingPower: bigint }> = [];
+  let zeroCandidates = 0;
+  for (const drep of dreps) {
+    let nextPower = koiosPowerByDrepId.get(drep.drepId);
+    if (nextPower == null && confirmedEmptySet.has(drep.drepId)) {
+      nextPower = BigInt(0);
+      zeroCandidates++;
+    }
+    if (nextPower == null) continue;
+    const currentPower = dbPowerByDrepId.get(drep.drepId);
+    if (currentPower === nextPower) continue;
+    rowsToUpdate.push({ drepId: drep.drepId, votingPower: nextPower });
+  }
+
+  let updated = 0;
+  try {
+    for (let i = 0; i < rowsToUpdate.length; i += VOTER_POWER_UPDATE_CHUNK_SIZE) {
+      const chunk = rowsToUpdate.slice(i, i + VOTER_POWER_UPDATE_CHUNK_SIZE);
+      updated += await updateDrepVotingPowerBatch(prisma, chunk);
+    }
+  } catch (error: any) {
+    const message = error?.message ?? String(error);
+    errors.push(`DRep batch update failed: ${message}`);
+    return {
+      total: dreps.length,
+      updated,
+      failed: dreps.length - updated,
+      errors,
+    };
+  }
+
+  const unchanged = koiosPowerByDrepId.size - updated;
+  console.log(
+    `[Voter Service] DRep sync metrics: epoch=${epoch} dbRows=${dreps.length} koiosRows=${koiosPowerByDrepId.size} changed=${updated} unchanged=${Math.max(
+      0,
+      unchanged
+    )} missingInKoios=${Math.max(0, dreps.length - koiosPowerByDrepId.size)}`
+  );
+  console.log(
+    `[Voter Service] DRep omission-confirmation metrics: epoch=${epoch} rawKoiosRows=${rawKoiosRows} initialMissing=${missingDrepIds.length} confirmedEmpty=${confirmedEmptyDrepIds.length} recoveredFromPerDrep=${recoveredFromPerDrep} unresolved=${unresolvedDrepIds.length} zeroCandidates=${zeroCandidates}`
+  );
 
   console.log(
-    `[Voter Service] DRep sync complete: ${updated} updated, ${failed} failed`
+    `[Voter Service] DRep sync complete: ${updated} updated, ${errors.length} errors`
   );
 
-  return { total: dreps.length, updated, failed, errors };
+  return { total: dreps.length, updated, failed: errors.length, errors };
 }
 
 async function syncSpoVotingPower(
@@ -107,7 +265,7 @@ async function syncSpoVotingPower(
   epoch: number
 ): Promise<{ total: number; updated: number; failed: number; errors: string[] }> {
   const spos = await prisma.sPO.findMany({
-    select: { poolId: true },
+    select: { poolId: true, votingPower: true },
   });
 
   if (spos.length === 0) {
@@ -115,42 +273,213 @@ async function syncSpoVotingPower(
     return { total: 0, updated: 0, failed: 0, errors: [] };
   }
 
-  const concurrency = getVoterSyncConcurrency();
-  console.log(
-    `[Voter Service] Syncing voting power for ${spos.length} SPOs (concurrency: ${concurrency})...`
-  );
+  const errors: string[] = [];
+  const dbPowerByPoolId = new Map(spos.map((spo) => [spo.poolId, spo.votingPower]));
+  const koiosPowerByPoolId = new Map<string, bigint>();
+  let rawKoiosRows = 0;
 
-  const result = await processInParallel(
-    spos,
-    (spo) => spo.poolId,
-    async (spo) => {
-      const votingPowerHistory = await listPoolVotingPowerHistory({
+  try {
+    const rows = await getAllPoolVotingPowerHistoryForEpoch({
+      epochNo: epoch,
+      source: "ingestion.voter.sync-spo-voting-power.bulk",
+    });
+
+    for (const row of rows) {
+      if (row?.epoch_no !== epoch) continue;
+      if (!row?.pool_id_bech32 || !row?.amount) continue;
+      try {
+        koiosPowerByPoolId.set(row.pool_id_bech32, BigInt(row.amount));
+        rawKoiosRows++;
+      } catch {
+        errors.push(
+          `SPO ${row.pool_id_bech32}: invalid Koios amount "${row.amount}"`
+        );
+      }
+    }
+  } catch (error: any) {
+    const message = error?.message ?? String(error);
+    return {
+      total: spos.length,
+      updated: 0,
+      failed: spos.length,
+      errors: [`SPO bulk fetch failed: ${message}`],
+    };
+  }
+
+  async function confirmMissingSpoVotingPower(
+    poolId: string
+  ): Promise<MissingSpoConfirmationResult> {
+    try {
+      const rows = await listPoolVotingPowerHistory({
         epochNo: epoch,
-        poolId: spo.poolId,
-        source: "ingestion.voter.sync-spo-voting-power",
+        poolId,
+        limit: 1,
+        offset: 0,
+        source: "ingestion.voter.sync-spo-voting-power.confirm-missing",
       });
 
-      const votingPowerLovelace = votingPowerHistory?.[0]?.amount;
-      if (votingPowerLovelace) {
-        await prisma.sPO.update({
-          where: { poolId: spo.poolId },
-          data: { votingPower: BigInt(votingPowerLovelace) },
-        });
-        return spo.poolId;
+      if (!Array.isArray(rows) || rows.length === 0) {
+        return { poolId, status: "confirmed-empty" };
       }
 
-      return null;
-    },
-    concurrency
-  );
+      const row = rows[0];
+      if (!row?.amount) {
+        return {
+          poolId,
+          status: "unresolved",
+          error: "missing amount in per-SPO confirmation row",
+        };
+      }
 
-  const updated = result.successful.length;
-  const failed = result.failed.length;
-  const errors = result.failed.map((entry) => `SPO ${entry.id}: ${entry.error}`);
+      try {
+        return {
+          poolId,
+          status: "has-data",
+          votingPower: BigInt(row.amount),
+        };
+      } catch {
+        return {
+          poolId,
+          status: "unresolved",
+          error: `invalid per-SPO amount "${row.amount}"`,
+        };
+      }
+    } catch (error: any) {
+      return {
+        poolId,
+        status: "unresolved",
+        error: error?.message ?? String(error),
+      };
+    }
+  }
+
+  const missingPoolIds = spos
+    .map((spo) => spo.poolId)
+    .filter((poolId) => !koiosPowerByPoolId.has(poolId));
+  const confirmedEmptyPoolIds: string[] = [];
+  const unresolvedPoolIds: string[] = [];
+  let recoveredFromPerPool = 0;
+
+  if (missingPoolIds.length > 0) {
+    const confirmation = await processInParallel(
+      missingPoolIds,
+      (poolId) => poolId,
+      async (poolId) => confirmMissingSpoVotingPower(poolId),
+      SPO_MISSING_CONFIRM_CONCURRENCY
+    );
+
+    for (const result of confirmation.successful) {
+      if (result.status === "confirmed-empty") {
+        confirmedEmptyPoolIds.push(result.poolId);
+        continue;
+      }
+
+      if (result.status === "has-data" && result.votingPower !== undefined) {
+        koiosPowerByPoolId.set(result.poolId, result.votingPower);
+        recoveredFromPerPool++;
+        continue;
+      }
+
+      unresolvedPoolIds.push(result.poolId);
+      if (result.error) {
+        errors.push(`SPO ${result.poolId}: ${result.error}`);
+      }
+    }
+
+    if (confirmation.failed.length > 0) {
+      for (const failure of confirmation.failed) {
+        unresolvedPoolIds.push(failure.id);
+        errors.push(`SPO ${failure.id}: ${failure.error}`);
+      }
+    }
+  }
+
+  const confirmedEmptySet = new Set(confirmedEmptyPoolIds);
+  const rowsToUpdate: Array<{ poolId: string; votingPower: bigint }> = [];
+  let zeroCandidates = 0;
+  for (const spo of spos) {
+    let nextPower = koiosPowerByPoolId.get(spo.poolId);
+    if (nextPower == null && confirmedEmptySet.has(spo.poolId)) {
+      nextPower = BigInt(0);
+      zeroCandidates++;
+    }
+    if (nextPower == null) continue;
+    const currentPower = dbPowerByPoolId.get(spo.poolId);
+    if (currentPower === nextPower) continue;
+    rowsToUpdate.push({ poolId: spo.poolId, votingPower: nextPower });
+  }
+
+  let updated = 0;
+  try {
+    for (let i = 0; i < rowsToUpdate.length; i += VOTER_POWER_UPDATE_CHUNK_SIZE) {
+      const chunk = rowsToUpdate.slice(i, i + VOTER_POWER_UPDATE_CHUNK_SIZE);
+      updated += await updateSpoVotingPowerBatch(prisma, chunk);
+    }
+  } catch (error: any) {
+    const message = error?.message ?? String(error);
+    errors.push(`SPO batch update failed: ${message}`);
+    return {
+      total: spos.length,
+      updated,
+      failed: spos.length - updated,
+      errors,
+    };
+  }
+
+  const unchanged = koiosPowerByPoolId.size - updated;
+  console.log(
+    `[Voter Service] SPO sync metrics: epoch=${epoch} dbRows=${spos.length} koiosRows=${koiosPowerByPoolId.size} changed=${updated} unchanged=${Math.max(
+      0,
+      unchanged
+    )} missingInKoios=${Math.max(0, spos.length - koiosPowerByPoolId.size)}`
+  );
+  console.log(
+    `[Voter Service] SPO omission-confirmation metrics: epoch=${epoch} rawKoiosRows=${rawKoiosRows} initialMissing=${missingPoolIds.length} confirmedEmpty=${confirmedEmptyPoolIds.length} recoveredFromPerPool=${recoveredFromPerPool} unresolved=${unresolvedPoolIds.length} zeroCandidates=${zeroCandidates}`
+  );
 
   console.log(
-    `[Voter Service] SPO sync complete: ${updated} updated, ${failed} failed`
+    `[Voter Service] SPO sync complete: ${updated} updated, ${errors.length} errors`
   );
 
-  return { total: spos.length, updated, failed, errors };
+  return { total: spos.length, updated, failed: errors.length, errors };
+}
+
+async function updateDrepVotingPowerBatch(
+  prisma: Prisma.TransactionClient,
+  rows: Array<{ drepId: string; votingPower: bigint }>
+): Promise<number> {
+  if (rows.length === 0) return 0;
+  const values = Prisma.join(
+    rows.map((row) => Prisma.sql`(${row.drepId}, ${row.votingPower})`)
+  );
+  const updated = await prisma.$executeRaw`
+    UPDATE "drep" AS d
+    SET "voting_power" = v."voting_power"
+    FROM (
+      VALUES ${values}
+    ) AS v("drep_id", "voting_power")
+    WHERE d."drep_id" = v."drep_id"
+      AND d."voting_power" IS DISTINCT FROM v."voting_power"
+  `;
+  return Number(updated);
+}
+
+async function updateSpoVotingPowerBatch(
+  prisma: Prisma.TransactionClient,
+  rows: Array<{ poolId: string; votingPower: bigint }>
+): Promise<number> {
+  if (rows.length === 0) return 0;
+  const values = Prisma.join(
+    rows.map((row) => Prisma.sql`(${row.poolId}, ${row.votingPower})`)
+  );
+  const updated = await prisma.$executeRaw`
+    UPDATE "spo" AS s
+    SET "voting_power" = v."voting_power"
+    FROM (
+      VALUES ${values}
+    ) AS v("pool_id", "voting_power")
+    WHERE s."pool_id" = v."pool_id"
+      AND s."voting_power" IS DISTINCT FROM v."voting_power"
+  `;
+  return Number(updated);
 }

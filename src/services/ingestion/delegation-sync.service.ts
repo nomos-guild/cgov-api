@@ -5,7 +5,7 @@
  * - syncDrepDelegationChanges: Syncs delegation states and change log
  */
 
-import type { Prisma } from "@prisma/client";
+import { Prisma } from "@prisma/client";
 import {
   getAccountUpdateHistoryBatch,
   getTxInfoBatch,
@@ -18,9 +18,7 @@ import type {
 } from "../../types/koios.types";
 import { processInParallel } from "./parallel";
 import {
-  DREP_DELEGATOR_MIN_VOTING_POWER,
   DREP_DELEGATION_SYNC_CONCURRENCY,
-  DREP_DELEGATION_DB_UPDATE_CONCURRENCY,
   STAKE_DELEGATION_SYNC_STATE_ID,
   DREP_DELEGATION_BACKFILL_JOB_NAME,
   FORCE_DREP_DELEGATION_BACKFILL_JOB_NAME,
@@ -36,6 +34,20 @@ import {
   ensureDrepsExist,
   refreshDrepDelegatorCountsFromDelegationState,
 } from "./drep-sync.service";
+import { logIntegrityEvent } from "./integrityMetrics";
+
+const KOIOS_HEAVY_DREP_DELEGATORS_LANE_JOB_NAME =
+  "koios-heavy-drep-delegators-lane";
+const DELEGATION_FULL_SCAN_WINDOW_JOB_NAME =
+  "drep-delegation-full-scan-window";
+const DELEGATION_CLEAR_GUARD_JOB_NAME = "drep-delegation-clear-guard";
+const DELEGATION_FULL_SCAN_WINDOW_DEFAULT_MS = 55 * 60 * 1000;
+const DREP_DELEGATION_MAX_FETCH_FAILURES = 1;
+const HEAVY_LANE_LOCK_TTL_MS = 2 * 60 * 60 * 1000;
+const DELEGATION_CLEAR_MIN_COVERAGE_RATIO = 0.9;
+const DELEGATION_CLEAR_HIGH_CLEAR_RATIO = 0.35;
+const DELEGATION_CLEAR_BASELINE_MIN_ACTIVE_STAKES = 200;
+const DELEGATION_CONFLICT_STAKE_SAMPLE_LIMIT = 10;
 
 // ============================================================
 // Result Types
@@ -50,6 +62,8 @@ export interface SyncDrepDelegationChangesResult {
   statesUpdated: number;
   changesInserted: number;
   failed: Array<{ drepId: string; error: string }>;
+  skipped?: boolean;
+  skipReason?: string;
 }
 
 // ============================================================
@@ -92,6 +106,181 @@ function sortAccountUpdates(
     const timeB = b.block_time ?? -1;
     return timeA - timeB;
   });
+}
+
+type DelegatorCandidate = { drepId: string; delegator: KoiosDrepDelegator };
+
+type DuplicateConflictResolutionMethod =
+  | "history-epoch-slot-block-time"
+  | "epoch"
+  | "deterministic-tie-break";
+
+function chooseDeterministicCandidate(
+  candidates: DelegatorCandidate[]
+): {
+  winner: DelegatorCandidate;
+  method: Exclude<DuplicateConflictResolutionMethod, "history-epoch-slot-block-time">;
+} {
+  const sorted = [...candidates].sort((a, b) => {
+    const epochA = a.delegator.epoch_no ?? -1;
+    const epochB = b.delegator.epoch_no ?? -1;
+    if (epochA !== epochB) return epochB - epochA;
+
+    const amountA = BigInt(a.delegator.amount);
+    const amountB = BigInt(b.delegator.amount);
+    if (amountA !== amountB) return amountA > amountB ? -1 : 1;
+
+    return a.drepId.localeCompare(b.drepId);
+  });
+
+  const winner = sorted[0]!;
+  const winnerEpoch = winner.delegator.epoch_no ?? -1;
+  const nextEpoch = sorted[1]?.delegator.epoch_no ?? -1;
+  return {
+    winner,
+    method: winnerEpoch !== nextEpoch ? "epoch" : "deterministic-tie-break",
+  };
+}
+
+function resolveConflictWithHistory(
+  candidates: DelegatorCandidate[],
+  historyEntries: KoiosAccountUpdateHistoryEntry[] | undefined
+): DelegatorCandidate | null {
+  if (!historyEntries || historyEntries.length === 0) return null;
+  const latestDelegation = sortAccountUpdates(historyEntries)
+    .filter((entry) => entry?.action_type?.includes("delegation_drep"))
+    .reverse()
+    .find((entry) => extractDelegatedDrepId(entry));
+  const delegatedDrepId = latestDelegation
+    ? extractDelegatedDrepId(latestDelegation)
+    : null;
+  if (!delegatedDrepId) return null;
+  return candidates.find((candidate) => candidate.drepId === delegatedDrepId) ?? null;
+}
+
+interface ClearGuardCheckpoint {
+  pendingConfirmation: boolean;
+  fingerprint: string;
+  reasons: string[];
+  activeDelegationStateCount: number;
+  snapshotStakeCount: number;
+  toClearCount: number;
+  coverageRatio: number;
+  clearRatio: number;
+  observedAt: string;
+}
+
+function buildClearGuardFingerprint(input: {
+  activeDelegationStateCount: number;
+  snapshotStakeCount: number;
+  toClearCount: number;
+}): string {
+  return `${input.activeDelegationStateCount}|${input.snapshotStakeCount}|${input.toClearCount}`;
+}
+
+function parseClearGuardCheckpoint(raw: unknown): ClearGuardCheckpoint | null {
+  if (typeof raw !== "string" || raw.length === 0) return null;
+  try {
+    const parsed = JSON.parse(raw) as Partial<ClearGuardCheckpoint>;
+    if (
+      typeof parsed?.pendingConfirmation === "boolean" &&
+      typeof parsed?.fingerprint === "string"
+    ) {
+      return parsed as ClearGuardCheckpoint;
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+function evaluateClearGuard(input: {
+  activeDelegationStateCount: number;
+  snapshotStakeCount: number;
+  toClearCount: number;
+  phase1DelegatorRows: number;
+  priorCheckpoint: ClearGuardCheckpoint | null;
+}): {
+  allowClear: boolean;
+  confirmedBySecondRun: boolean;
+  reasons: string[];
+  checkpoint: ClearGuardCheckpoint;
+} {
+  const {
+    activeDelegationStateCount,
+    snapshotStakeCount,
+    toClearCount,
+    phase1DelegatorRows,
+    priorCheckpoint,
+  } = input;
+
+  const coverageRatio =
+    activeDelegationStateCount > 0
+      ? snapshotStakeCount / activeDelegationStateCount
+      : 1;
+  const clearRatio =
+    activeDelegationStateCount > 0
+      ? toClearCount / activeDelegationStateCount
+      : 0;
+
+  const reasons: string[] = [];
+  if (
+    activeDelegationStateCount >= DELEGATION_CLEAR_BASELINE_MIN_ACTIVE_STAKES &&
+    coverageRatio < DELEGATION_CLEAR_MIN_COVERAGE_RATIO
+  ) {
+    reasons.push("low-coverage-ratio");
+  }
+  if (
+    activeDelegationStateCount >= DELEGATION_CLEAR_BASELINE_MIN_ACTIVE_STAKES &&
+    clearRatio > DELEGATION_CLEAR_HIGH_CLEAR_RATIO
+  ) {
+    reasons.push("high-clear-ratio");
+  }
+  if (
+    activeDelegationStateCount >= DELEGATION_CLEAR_BASELINE_MIN_ACTIVE_STAKES &&
+    snapshotStakeCount === 0
+  ) {
+    reasons.push("empty-snapshot-with-active-state");
+  }
+  if (phase1DelegatorRows < snapshotStakeCount) {
+    reasons.push("invalid-snapshot-cardinality");
+  }
+
+  const checkpoint: ClearGuardCheckpoint = {
+    pendingConfirmation: reasons.length > 0,
+    fingerprint: buildClearGuardFingerprint({
+      activeDelegationStateCount,
+      snapshotStakeCount,
+      toClearCount,
+    }),
+    reasons,
+    activeDelegationStateCount,
+    snapshotStakeCount,
+    toClearCount,
+    coverageRatio,
+    clearRatio,
+    observedAt: new Date().toISOString(),
+  };
+
+  if (reasons.length === 0) {
+    return {
+      allowClear: true,
+      confirmedBySecondRun: false,
+      reasons,
+      checkpoint,
+    };
+  }
+
+  const confirmedBySecondRun =
+    priorCheckpoint?.pendingConfirmation === true &&
+    priorCheckpoint.fingerprint === checkpoint.fingerprint;
+
+  return {
+    allowClear: confirmedBySecondRun,
+    confirmedBySecondRun,
+    reasons,
+    checkpoint,
+  };
 }
 
 function buildDrepChangeLogForStake(
@@ -215,6 +404,47 @@ async function fetchTxInfoByHashes(txHashes: string[]): Promise<KoiosTxInfo[]> {
     includeBytecode: false,
     source: "ingestion.delegation-sync.tx-info",
   });
+}
+
+function delegationChangeKey(entry: {
+  stakeAddress: string;
+  fromDrepId: string;
+  toDrepId: string;
+  delegatedEpoch: number;
+}): string {
+  return `${entry.stakeAddress}|${entry.fromDrepId}|${entry.toDrepId}|${entry.delegatedEpoch}`;
+}
+
+async function updateStakeDelegationStateBatch(
+  prisma: Prisma.TransactionClient,
+  rows: Array<{
+    stakeAddress: string;
+    drepId: string;
+    amount: bigint;
+    delegatedEpoch: number | null;
+  }>
+): Promise<number> {
+  if (rows.length === 0) return 0;
+
+  const values = Prisma.join(
+    rows.map((row) =>
+      Prisma.sql`(${row.stakeAddress}, ${row.drepId}, ${row.amount}, ${row.delegatedEpoch})`
+    )
+  );
+
+  const updated = await prisma.$executeRaw`
+    UPDATE "stake_delegation_state" AS s
+    SET
+      "drep_id" = v."drep_id",
+      "amount" = v."amount",
+      "delegated_epoch_no" = v."delegated_epoch_no"
+    FROM (
+      VALUES ${values}
+    ) AS v("stake_address", "drep_id", "amount", "delegated_epoch_no")
+    WHERE s."stake_address" = v."stake_address"
+  `;
+
+  return Number(updated);
 }
 
 async function backfillStakeDelegationHistory(
@@ -446,6 +676,7 @@ async function backfillStakeDelegationHistory(
 export async function syncDrepDelegationChanges(
   prisma: Prisma.TransactionClient
 ): Promise<SyncDrepDelegationChangesResult> {
+  const startedAtMs = Date.now();
   const delegationClient = prisma as Prisma.TransactionClient & {
     stakeAddress: any;
     stakeDelegationState: any;
@@ -480,6 +711,55 @@ export async function syncDrepDelegationChanges(
     !!backfillStatus?.backfillCursor && !backfillCompleted;
   const shouldBackfill = !backfillCompleted;
 
+  const fullScanThrottleEnabled =
+    process.env.DELEGATION_SYNC_FULL_SCAN_THROTTLE_ENABLED !== "false";
+  const fullScanMinIntervalMs = getBoundedIntEnv(
+    "DELEGATION_SYNC_FULL_SCAN_MIN_INTERVAL_MS",
+    DELEGATION_FULL_SCAN_WINDOW_DEFAULT_MS,
+    0,
+    24 * 60 * 60 * 1000
+  );
+  const fullScanWindowStatus = await (prisma as any).syncStatus.findUnique({
+    where: { jobName: DELEGATION_FULL_SCAN_WINDOW_JOB_NAME },
+  });
+  const lastFullScanAt = fullScanWindowStatus?.completedAt
+    ? new Date(fullScanWindowStatus.completedAt).getTime()
+    : 0;
+  const fullScanAgeMs = lastFullScanAt > 0 ? Date.now() - lastFullScanAt : null;
+  const shouldThrottleThisRun =
+    fullScanThrottleEnabled &&
+    fullScanMinIntervalMs > 0 &&
+    !shouldForceBackfill &&
+    !shouldBackfill &&
+    fullScanAgeMs !== null &&
+    fullScanAgeMs < fullScanMinIntervalMs;
+  if (shouldThrottleThisRun) {
+    const remainingMs = fullScanMinIntervalMs - (fullScanAgeMs ?? 0);
+    console.log(
+      `[DRep Delegation Sync] Skipping full scan due to throttle window: remainingMs=${remainingMs}`
+    );
+    const result = {
+      currentEpoch,
+      lastProcessedEpoch,
+      maxDelegationEpoch: lastProcessedEpoch,
+      drepsProcessed: 0,
+      delegatorsProcessed: 0,
+      statesUpdated: 0,
+      changesInserted: 0,
+      failed: [],
+      skipped: true,
+      skipReason: "full-scan-throttle-window",
+    };
+    logIntegrityEvent({
+      stream: "delegation",
+      unit: "drep-delegation-sync",
+      outcome: "skipped",
+      lagSeconds: Math.floor((Date.now() - startedAtMs) / 1000),
+      partialFailures: 0,
+    });
+    return result;
+  }
+
   // For initial backfill, ensure DRep inventory is complete before proceeding.
   // Check if EpochAnalyticsSync has a recent drepsSyncedAt entry.
   if (shouldBackfill) {
@@ -503,14 +783,13 @@ export async function syncDrepDelegationChanges(
     }
   }
 
-  const minVotingPower = DREP_DELEGATOR_MIN_VOTING_POWER;
   // These "special" DRep options can have massive delegator sets.
   // We intentionally exclude them from stake-address delegation tracking to avoid
   // ballooning the stake address inventory; we ingest only per-epoch aggregates elsewhere.
   const excludedDrepIds = ["drep_always_abstain", "drep_always_no_confidence"];
   let drepRows = await prisma.drep.findMany({
     select: { drepId: true },
-    where: { votingPower: { gt: minVotingPower }, drepId: { notIn: excludedDrepIds } },
+    where: { drepId: { notIn: excludedDrepIds } },
     orderBy: { drepId: "asc" },
   });
 
@@ -519,7 +798,7 @@ export async function syncDrepDelegationChanges(
     await syncAllDrepsInventory(prisma);
     drepRows = await prisma.drep.findMany({
       select: { drepId: true },
-      where: { votingPower: { gt: minVotingPower }, drepId: { notIn: excludedDrepIds } },
+      where: { drepId: { notIn: excludedDrepIds } },
       orderBy: { drepId: "asc" },
     });
   }
@@ -527,7 +806,7 @@ export async function syncDrepDelegationChanges(
   const drepIds = drepRows.map((row) => row.drepId).filter(Boolean);
 
   console.log(
-    `[DRep Delegation Sync] currentEpoch=${currentEpoch} lastProcessedEpoch=${lastProcessedEpoch} minVotingPower=${minVotingPower.toString()} drepCount=${drepIds.length}`
+    `[DRep Delegation Sync] currentEpoch=${currentEpoch} lastProcessedEpoch=${lastProcessedEpoch} drepCount=${drepIds.length}`
   );
 
   // ============================================================
@@ -535,24 +814,60 @@ export async function syncDrepDelegationChanges(
   // ============================================================
   console.log(`[DRep Delegation Sync] Phase 1: Collecting delegators from all DReps...`);
 
-  const allDelegatorsByStake = new Map<
-    string,
-    { drepId: string; delegator: KoiosDrepDelegator }
-  >();
+  const allDelegatorsByStake = new Map<string, DelegatorCandidate>();
+  const delegatorCandidatesByStake = new Map<string, DelegatorCandidate[]>();
   const allStakeAddresses = new Set<string>();
-
-  const delegatorFetchResult = await processInParallel(
-    drepIds,
-    (drepId) => drepId,
-    async (drepId) => {
-      const delegators = await fetchDelegatorsForDrep(drepId);
-      const validDelegators = (delegators ?? []).filter(
-        (row) => row?.stake_address && row?.amount
-      );
-      return { drepId, delegators: validDelegators };
+  let phase1DelegatorRows = 0;
+  const heavyLaneClient = prisma as Prisma.TransactionClient & { syncStatus: any };
+  const heavyLaneStartedAt = new Date();
+  await heavyLaneClient.syncStatus.upsert({
+    where: { jobName: KOIOS_HEAVY_DREP_DELEGATORS_LANE_JOB_NAME },
+    create: {
+      jobName: KOIOS_HEAVY_DREP_DELEGATORS_LANE_JOB_NAME,
+      displayName: "Koios Heavy /drep_delegators Lane",
+      isRunning: true,
+      startedAt: heavyLaneStartedAt,
+      completedAt: null,
+      expiresAt: new Date(heavyLaneStartedAt.getTime() + HEAVY_LANE_LOCK_TTL_MS),
+      errorMessage: null,
     },
-    DREP_DELEGATION_SYNC_CONCURRENCY
-  );
+    update: {
+      isRunning: true,
+      startedAt: heavyLaneStartedAt,
+      completedAt: null,
+      expiresAt: new Date(heavyLaneStartedAt.getTime() + HEAVY_LANE_LOCK_TTL_MS),
+      errorMessage: null,
+    },
+  });
+
+  let delegatorFetchResult: {
+    successful: Array<{ drepId: string; delegators: KoiosDrepDelegator[] }>;
+    failed: Array<{ id: string; error: string }>;
+  };
+  try {
+    delegatorFetchResult = await processInParallel(
+      drepIds,
+      (drepId) => drepId,
+      async (drepId) => {
+        const delegators = await fetchDelegatorsForDrep(drepId);
+        const validDelegators = (delegators ?? []).filter(
+          (row) => row?.stake_address && row?.amount
+        );
+        phase1DelegatorRows += validDelegators.length;
+        return { drepId, delegators: validDelegators };
+      },
+      DREP_DELEGATION_SYNC_CONCURRENCY
+    );
+  } finally {
+    await heavyLaneClient.syncStatus.update({
+      where: { jobName: KOIOS_HEAVY_DREP_DELEGATORS_LANE_JOB_NAME },
+      data: {
+        isRunning: false,
+        completedAt: new Date(),
+        expiresAt: null,
+      },
+    });
+  }
 
   if (delegatorFetchResult.failed.length > 0) {
     console.warn(
@@ -563,9 +878,146 @@ export async function syncDrepDelegationChanges(
   for (const { drepId, delegators } of delegatorFetchResult.successful) {
     for (const delegator of delegators) {
       const stakeAddress = delegator.stake_address;
-      allStakeAddresses.add(stakeAddress);
-      allDelegatorsByStake.set(stakeAddress, { drepId, delegator });
+      const candidates = delegatorCandidatesByStake.get(stakeAddress);
+      if (candidates) {
+        candidates.push({ drepId, delegator });
+      } else {
+        delegatorCandidatesByStake.set(stakeAddress, [{ drepId, delegator }]);
+      }
     }
+  }
+
+  const duplicateConflictStats: {
+    total: number;
+    resolvedByHistory: number;
+    resolvedByEpoch: number;
+    resolvedByTieBreak: number;
+    sampleStakeAddresses: string[];
+  } = {
+    total: 0,
+    resolvedByHistory: 0,
+    resolvedByEpoch: 0,
+    resolvedByTieBreak: 0,
+    sampleStakeAddresses: [],
+  };
+
+  const conflictStakeAddresses: string[] = [];
+  for (const [stakeAddress, candidates] of delegatorCandidatesByStake.entries()) {
+    if (candidates.length <= 1) {
+      allStakeAddresses.add(stakeAddress);
+      allDelegatorsByStake.set(stakeAddress, candidates[0]!);
+      continue;
+    }
+    duplicateConflictStats.total += 1;
+    if (duplicateConflictStats.sampleStakeAddresses.length < DELEGATION_CONFLICT_STAKE_SAMPLE_LIMIT) {
+      duplicateConflictStats.sampleStakeAddresses.push(stakeAddress);
+    }
+    conflictStakeAddresses.push(stakeAddress);
+  }
+
+  let conflictHistoryByStake = new Map<string, KoiosAccountUpdateHistoryEntry[]>();
+  if (conflictStakeAddresses.length > 0) {
+    try {
+      conflictHistoryByStake =
+        await fetchAccountUpdateHistoryForStakes(conflictStakeAddresses);
+    } catch (error: any) {
+      console.warn(
+        `[Integrity] duplicate_stake_conflict_history_fetch_failed stakeCount=${conflictStakeAddresses.length} error=${error?.message ?? String(error)}`
+      );
+    }
+  }
+
+  for (const stakeAddress of conflictStakeAddresses) {
+    const candidates = delegatorCandidatesByStake.get(stakeAddress) ?? [];
+    if (candidates.length === 0) continue;
+
+    const historyWinner = resolveConflictWithHistory(
+      candidates,
+      conflictHistoryByStake.get(stakeAddress)
+    );
+
+    if (historyWinner) {
+      allStakeAddresses.add(stakeAddress);
+      allDelegatorsByStake.set(stakeAddress, historyWinner);
+      duplicateConflictStats.resolvedByHistory += 1;
+      continue;
+    }
+
+    const deterministic = chooseDeterministicCandidate(candidates);
+    allStakeAddresses.add(stakeAddress);
+    allDelegatorsByStake.set(stakeAddress, deterministic.winner);
+    if (deterministic.method === "epoch") {
+      duplicateConflictStats.resolvedByEpoch += 1;
+    } else {
+      duplicateConflictStats.resolvedByTieBreak += 1;
+    }
+  }
+
+  if (duplicateConflictStats.total > 0) {
+    console.warn(
+      `[Integrity] duplicate_stake_conflicts total=${duplicateConflictStats.total} resolvedByHistory=${duplicateConflictStats.resolvedByHistory} resolvedByEpoch=${duplicateConflictStats.resolvedByEpoch} resolvedByTieBreak=${duplicateConflictStats.resolvedByTieBreak} sampleStakes=${duplicateConflictStats.sampleStakeAddresses.join(",")}`
+    );
+  }
+
+  const failed = delegatorFetchResult.failed.map((f) => ({
+    drepId: f.id,
+    error: f.error,
+  }));
+  const maxFetchFailures = Math.min(
+    DREP_DELEGATION_MAX_FETCH_FAILURES,
+    Math.max(1, drepIds.length)
+  );
+  const shouldFailClosed = failed.length > maxFetchFailures;
+  if (failed.length > 0) {
+    const failureSummary = JSON.stringify({
+      type: "phase1-fetch-failures",
+      failedCount: failed.length,
+      maxAllowedFailures: maxFetchFailures,
+      failClosed: shouldFailClosed,
+      drepIds: failed.slice(0, 20).map((entry) => entry.drepId),
+    });
+    await (prisma as any).syncStatus.upsert({
+      where: { jobName: DELEGATION_FULL_SCAN_WINDOW_JOB_NAME },
+      create: {
+        jobName: DELEGATION_FULL_SCAN_WINDOW_JOB_NAME,
+        displayName: "DRep Delegation Full Scan Window",
+        isRunning: false,
+        completedAt: new Date(),
+        lastResult: shouldFailClosed ? "error" : "success",
+        itemsProcessed: allDelegatorsByStake.size,
+        errorMessage: failureSummary,
+      },
+      update: {
+        isRunning: false,
+        completedAt: new Date(),
+        lastResult: shouldFailClosed ? "error" : "success",
+        itemsProcessed: allDelegatorsByStake.size,
+        errorMessage: failureSummary,
+      },
+    });
+    if (shouldFailClosed) {
+      const result = {
+        currentEpoch,
+        lastProcessedEpoch,
+        maxDelegationEpoch: lastProcessedEpoch,
+        drepsProcessed: delegatorFetchResult.successful.length,
+        delegatorsProcessed: allDelegatorsByStake.size,
+        statesUpdated: 0,
+        changesInserted: 0,
+        failed,
+      };
+      logIntegrityEvent({
+        stream: "delegation",
+        unit: "drep-delegation-sync",
+        outcome: "failed",
+        lagSeconds: Math.floor((Date.now() - startedAtMs) / 1000),
+        partialFailures: failed.length,
+      });
+      return result;
+    }
+    console.warn(
+      `[DRep Delegation Sync] Continuing with partial data: failures=${failed.length} maxAllowedFailures=${maxFetchFailures}`
+    );
   }
 
   console.log(
@@ -738,6 +1190,7 @@ export async function syncDrepDelegationChanges(
     amount: bigint;
     delegatedEpoch: number | null;
   }> = [];
+  const toClear: string[] = [];
   const changeLog: Array<{
     stakeAddress: string;
     fromDrepId: string;      // "" = no previous DRep (sentinel)
@@ -789,29 +1242,135 @@ export async function syncDrepDelegationChanges(
     }
   }
 
+  // Reconcile stale states only when we have a complete snapshot.
+  // If there are fetch failures, skip this destructive step to avoid false clears.
+  if (failed.length === 0) {
+    const activeDelegationStates: Array<{ stakeAddress: string }> =
+      await delegationClient.stakeDelegationState.findMany({
+        where: { drepId: { not: null } },
+        select: { stakeAddress: true },
+      });
+    for (const row of activeDelegationStates) {
+      if (!allStakeAddresses.has(row.stakeAddress)) {
+        toClear.push(row.stakeAddress);
+      }
+    }
+
+    if (toClear.length > 0) {
+      const clearGuardStatus = await (prisma as any).syncStatus.findUnique({
+        where: { jobName: DELEGATION_CLEAR_GUARD_JOB_NAME },
+      });
+      const priorCheckpoint = parseClearGuardCheckpoint(
+        clearGuardStatus?.errorMessage
+      );
+      const clearGuard = evaluateClearGuard({
+        activeDelegationStateCount: activeDelegationStates.length,
+        snapshotStakeCount: allStakeAddresses.size,
+        toClearCount: toClear.length,
+        phase1DelegatorRows,
+        priorCheckpoint,
+      });
+
+      if (!clearGuard.allowClear) {
+        toClear.length = 0;
+        await (prisma as any).syncStatus.upsert({
+          where: { jobName: DELEGATION_CLEAR_GUARD_JOB_NAME },
+          create: {
+            jobName: DELEGATION_CLEAR_GUARD_JOB_NAME,
+            displayName: "DRep Delegation Clear Guard",
+            isRunning: false,
+            completedAt: new Date(),
+            lastResult: "error",
+            itemsProcessed: clearGuard.checkpoint.toClearCount,
+            errorMessage: JSON.stringify(clearGuard.checkpoint),
+          },
+          update: {
+            isRunning: false,
+            completedAt: new Date(),
+            lastResult: "error",
+            itemsProcessed: clearGuard.checkpoint.toClearCount,
+            errorMessage: JSON.stringify(clearGuard.checkpoint),
+          },
+        });
+        console.warn(
+          `[Integrity] delegation_clear_guard_blocked reasons=${clearGuard.reasons.join(",")} activeStates=${clearGuard.checkpoint.activeDelegationStateCount} snapshotStakes=${clearGuard.checkpoint.snapshotStakeCount} toClear=${clearGuard.checkpoint.toClearCount} coverageRatio=${clearGuard.checkpoint.coverageRatio.toFixed(4)}`
+        );
+      } else {
+        await (prisma as any).syncStatus.upsert({
+          where: { jobName: DELEGATION_CLEAR_GUARD_JOB_NAME },
+          create: {
+            jobName: DELEGATION_CLEAR_GUARD_JOB_NAME,
+            displayName: "DRep Delegation Clear Guard",
+            isRunning: false,
+            completedAt: new Date(),
+            lastResult: "success",
+            itemsProcessed: toClear.length,
+            errorMessage: null,
+          },
+          update: {
+            isRunning: false,
+            completedAt: new Date(),
+            lastResult: "success",
+            itemsProcessed: toClear.length,
+            errorMessage: null,
+          },
+        });
+        if (clearGuard.confirmedBySecondRun) {
+          console.warn(
+            `[Integrity] delegation_clear_guard_confirmed_second_run activeStates=${clearGuard.checkpoint.activeDelegationStateCount} snapshotStakes=${clearGuard.checkpoint.snapshotStakeCount} toClear=${clearGuard.checkpoint.toClearCount}`
+          );
+        }
+      }
+    }
+  } else {
+    console.warn(
+      `[DRep Delegation Sync] Skipping stale-state reconciliation due to fetch failures=${failed.length}`
+    );
+  }
+
   // Deduplicate: skip Phase 3 change log entries when a row for (stakeAddress, toDrepId, delegatedEpoch)
   // already exists (e.g. from backfill), so we don't insert a second row with amount for the same delegation.
   let changeLogToInsert = changeLog;
   if (changeLog.length > 0) {
-    const stakeAddressesInChangeLog = [...new Set(changeLog.map((c) => c.stakeAddress))];
-    const existingChunks = chunkArray(stakeAddressesInChangeLog, 5000);
+    const dedupeLookupChunkSize = getBoundedIntEnv(
+      "DELEGATION_CHANGE_DEDUPE_LOOKUP_CHUNK_SIZE",
+      400,
+      50,
+      2000
+    );
+    const dedupedCandidates = Array.from(
+      new Map(changeLog.map((entry) => [delegationChangeKey(entry), entry])).values()
+    );
     const existingRows: Array<{
       stakeAddress: string;
+      fromDrepId: string;
       toDrepId: string;
       delegatedEpoch: number;
     }> = [];
-    for (const sc of existingChunks) {
+    const candidateChunks = chunkArray(dedupedCandidates, dedupeLookupChunkSize);
+    for (const chunk of candidateChunks) {
+      if (chunk.length === 0) continue;
       const rows = await delegationClient.stakeDelegationChange.findMany({
-        where: { stakeAddress: { in: sc } },
-        select: { stakeAddress: true, toDrepId: true, delegatedEpoch: true },
+        where: {
+          OR: chunk.map((entry) => ({
+            stakeAddress: entry.stakeAddress,
+            fromDrepId: entry.fromDrepId,
+            toDrepId: entry.toDrepId,
+            delegatedEpoch: entry.delegatedEpoch,
+          })),
+        },
+        select: {
+          stakeAddress: true,
+          fromDrepId: true,
+          toDrepId: true,
+          delegatedEpoch: true,
+        },
       });
       existingRows.push(...rows);
     }
-    const existingKeySet = new Set(
-      existingRows.map((r) => `${r.stakeAddress}|${r.toDrepId}|${r.delegatedEpoch}`)
-    );
-    changeLogToInsert = changeLog.filter(
-      (c) => !existingKeySet.has(`${c.stakeAddress}|${c.toDrepId}|${c.delegatedEpoch}`)
+    const existingKeySet = new Set(existingRows.map((entry) => delegationChangeKey(entry)));
+    changeLogToInsert = dedupedCandidates.filter(
+      (entry) => !existingKeySet.has(delegationChangeKey(entry))
     );
   }
 
@@ -900,32 +1459,35 @@ export async function syncDrepDelegationChanges(
       const chunkIndex = Math.floor(i / updateChunkSize);
       const chunk = toUpdate.slice(i, i + updateChunkSize);
       const { next, data: checkpointData } = buildCheckpointData({ updateChunkIndex: chunkIndex + 1 });
-      const updateResult = await processInParallel(
-        chunk,
-        (row) => row.stakeAddress,
-        async (row) => {
-          await delegationClient.stakeDelegationState.update({
-            where: { stakeAddress: row.stakeAddress },
-            data: {
-              drepId: row.drepId,
-              amount: row.amount,
-              delegatedEpoch: row.delegatedEpoch,
-            },
-          });
-          return row;
-        },
-        DREP_DELEGATION_DB_UPDATE_CONCURRENCY
-      );
-      if (updateResult.failed.length > 0) {
-        throw new Error(
-          `[DRep Delegation Sync] Phase 3 update failures: ${updateResult.failed.length}`
-        );
-      }
+      await updateStakeDelegationStateBatch(delegationClient, chunk);
       await syncStatusClient.syncStatus.update({
         where: { jobName: DREP_DELEGATION_PHASE3_JOB_NAME },
         data: checkpointData,
       });
       checkpoint = next;
+    }
+  }
+
+  if (toClear.length > 0) {
+    const clearChunkSize = getBoundedIntEnv(
+      "DELEGATION_PHASE3_CLEAR_CHUNK_SIZE",
+      500,
+      50,
+      5000
+    );
+    for (let i = 0; i < toClear.length; i += clearChunkSize) {
+      const chunk = toClear.slice(i, i + clearChunkSize);
+      await delegationClient.stakeDelegationState.updateMany({
+        where: {
+          stakeAddress: { in: chunk },
+          drepId: { not: null },
+        },
+        data: {
+          drepId: null,
+          amount: null,
+          delegatedEpoch: null,
+        },
+      });
     }
   }
 
@@ -991,7 +1553,7 @@ export async function syncDrepDelegationChanges(
     data: { backfillCursor: null, backfillCompletedAt: new Date() },
   });
 
-  // Refresh DRep delegator_count from StakeDelegationState (Koios does not provide it)
+  // Always refresh DRep delegator_count after a successful reconciliation pass.
   const refreshResult = await refreshDrepDelegatorCountsFromDelegationState(
     delegationClient as Prisma.TransactionClient
   );
@@ -1002,15 +1564,10 @@ export async function syncDrepDelegationChanges(
   }
 
   console.log(
-    `[DRep Delegation Sync] Phase 3 complete: created=${toCreate.length}, updated=${toUpdate.length}, changes=${changeLogToInsert.length}`
+    `[DRep Delegation Sync] Phase 3 complete: created=${toCreate.length}, updated=${toUpdate.length}, cleared=${toClear.length}, changes=${changeLogToInsert.length}`
   );
 
   // Update sync state
-  const failed = delegatorFetchResult.failed.map((f) => ({
-    drepId: f.id,
-    error: f.error,
-  }));
-
   if (failed.length === 0 && maxDelegationEpoch >= lastProcessedEpoch) {
     await delegationClient.stakeDelegationSyncState.update({
       where: { id: STAKE_DELEGATION_SYNC_STATE_ID },
@@ -1018,14 +1575,46 @@ export async function syncDrepDelegationChanges(
     });
   }
 
-  return {
+  await (prisma as any).syncStatus.upsert({
+    where: { jobName: DELEGATION_FULL_SCAN_WINDOW_JOB_NAME },
+    create: {
+      jobName: DELEGATION_FULL_SCAN_WINDOW_JOB_NAME,
+      displayName: "DRep Delegation Full Scan Window",
+      isRunning: false,
+      completedAt: new Date(),
+      lastResult: "success",
+      itemsProcessed: allDelegatorsByStake.size,
+      errorMessage: null,
+    },
+    update: {
+      isRunning: false,
+      completedAt: new Date(),
+      lastResult: "success",
+      itemsProcessed: allDelegatorsByStake.size,
+      errorMessage: null,
+    },
+  });
+
+  console.log(
+    `[DRep Delegation Sync] metrics phase1Dreps=${drepIds.length} phase1Rows=${phase1DelegatorRows} uniqueStakes=${allStakeAddresses.size} duplicateStakeConflicts=${duplicateConflictStats.total} newStakes=${newStakeAddresses.length} creates=${toCreate.length} updates=${toUpdate.length} cleared=${toClear.length} changesCandidate=${changeLog.length} changesInserted=${changeLogToInsert.length} fetchFailures=${failed.length}`
+  );
+
+  const result = {
     currentEpoch,
     lastProcessedEpoch,
     maxDelegationEpoch,
     drepsProcessed: delegatorFetchResult.successful.length,
     delegatorsProcessed: allDelegatorsByStake.size,
-    statesUpdated: toCreate.length + toUpdate.length,
+    statesUpdated: toCreate.length + toUpdate.length + toClear.length,
     changesInserted: changeLogToInsert.length,
     failed,
   };
+  logIntegrityEvent({
+    stream: "delegation",
+    unit: "drep-delegation-sync",
+    outcome: failed.length > 0 ? "partial" : "success",
+    lagSeconds: Math.floor((Date.now() - startedAtMs) / 1000),
+    partialFailures: failed.length,
+  });
+  return result;
 }

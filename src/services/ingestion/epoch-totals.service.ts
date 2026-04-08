@@ -25,6 +25,12 @@ import {
 } from "./sync-utils";
 import { processInParallel } from "./parallel";
 
+const KOIOS_HEAVY_DREP_DELEGATORS_LANE_JOB_NAME =
+  "koios-heavy-drep-delegators-lane";
+const SPECIAL_DREP_DELEGATORS_GUARD_ENABLED =
+  process.env.EPOCH_TOTALS_DEFER_SPECIAL_DREP_DELEGATORS_WHEN_LANE_BUSY !==
+  "false";
+
 // ============================================================
 // Result Types
 // ============================================================
@@ -178,9 +184,25 @@ async function sumPoolVotingPowerForEpoch(epochNo: number): Promise<bigint> {
  * to avoid ballooning the stake address inventory.
  */
 async function getDrepDelegatorAggregatesForEpoch(
+  prisma: Prisma.TransactionClient,
   epochNo: number,
   drepId: string
-): Promise<{ delegatorCount: number; votingPower: bigint }> {
+): Promise<{ delegatorCount: number | null; votingPower: bigint }> {
+  if (SPECIAL_DREP_DELEGATORS_GUARD_ENABLED) {
+    const laneStatus = await (prisma as Prisma.TransactionClient & {
+      syncStatus: any;
+    }).syncStatus.findUnique({
+      where: { jobName: KOIOS_HEAVY_DREP_DELEGATORS_LANE_JOB_NAME },
+      select: { isRunning: true },
+    });
+    if (laneStatus?.isRunning) {
+      console.log(
+        `[Epoch Totals] Skipping special DRep /drep_delegators fetch for ${drepId} (shared heavy lane busy)`
+      );
+      return { delegatorCount: null, votingPower: BigInt(0) };
+    }
+  }
+
   // We intentionally do not retain stake addresses in memory; we only aggregate.
   // Koios /drep_delegators is expected to return one row per stake address.
   // `epoch_no` here represents the epoch when the vote delegation was made
@@ -218,6 +240,7 @@ async function getDrepVotingPowerForEpoch(
 }
 
 async function getSpecialDrepAggregatesForEpoch(
+  prisma: Prisma.TransactionClient,
   epochNo: number,
   drepId: string
 ): Promise<{ delegatorCount: number | null; votingPower: bigint | null }> {
@@ -225,7 +248,7 @@ async function getSpecialDrepAggregatesForEpoch(
     // Delegator count is "delegations made in epoch" (from /drep_delegators + epoch_no filter).
     // Voting power is the DRep's epoch voting power snapshot (from /drep_voting_power_history).
     const [delegatorAgg, votingPower] = await Promise.all([
-      getDrepDelegatorAggregatesForEpoch(epochNo, drepId),
+      getDrepDelegatorAggregatesForEpoch(prisma, epochNo, drepId),
       getDrepVotingPowerForEpoch(epochNo, drepId),
     ]);
     return { delegatorCount: delegatorAgg.delegatorCount, votingPower };
@@ -250,6 +273,12 @@ async function getSpecialDrepAggregatesForEpoch(
 function unixToDate(timestamp: number | null | undefined): Date | null {
   if (timestamp == null || timestamp <= 0) return null;
   return new Date(timestamp * 1000);
+}
+
+function areDatesEqual(a: Date | null, b: Date | null): boolean {
+  if (a == null && b == null) return true;
+  if (a == null || b == null) return false;
+  return a.getTime() === b.getTime();
 }
 
 // ============================================================
@@ -286,8 +315,16 @@ export async function syncEpochTotals(
       source: "ingestion.epoch-totals.fetch-row./epoch_info",
     }),
     sumPoolVotingPowerForEpoch(epochNo),
-    getSpecialDrepAggregatesForEpoch(epochNo, "drep_always_abstain"),
-    getSpecialDrepAggregatesForEpoch(epochNo, "drep_always_no_confidence"),
+    getSpecialDrepAggregatesForEpoch(
+      prisma,
+      epochNo,
+      "drep_always_abstain"
+    ),
+    getSpecialDrepAggregatesForEpoch(
+      prisma,
+      epochNo,
+      "drep_always_no_confidence"
+    ),
   ]);
 
   // Financial totals
@@ -313,48 +350,92 @@ export async function syncEpochTotals(
   const blockCount = epochInfo?.blk_count ?? null;
   const txCount = epochInfo?.tx_count ?? null;
 
-  await prisma.epochTotals.upsert({
+  const payload = {
+    circulation,
+    treasury,
+    reward,
+    supply,
+    reserves,
+    delegatedDrepPower,
+    totalPoolVotePower,
+    drepAlwaysNoConfidenceDelegatorCount,
+    drepAlwaysNoConfidenceVotingPower,
+    drepAlwaysAbstainDelegatorCount,
+    drepAlwaysAbstainVotingPower,
+    startTime,
+    endTime,
+    firstBlockTime,
+    lastBlockTime,
+    blockCount,
+    txCount,
+  };
+  const existing = await prisma.epochTotals.findUnique({
     where: { epoch: epochNo },
-    update: {
-      circulation,
-      treasury,
-      reward,
-      supply,
-      reserves,
-      delegatedDrepPower,
-      totalPoolVotePower,
-      drepAlwaysNoConfidenceDelegatorCount,
-      drepAlwaysNoConfidenceVotingPower,
-      drepAlwaysAbstainDelegatorCount,
-      drepAlwaysAbstainVotingPower,
-      startTime,
-      endTime,
-      firstBlockTime,
-      lastBlockTime,
-      blockCount,
-      txCount,
-    },
-    create: {
-      epoch: epochNo,
-      circulation,
-      treasury,
-      reward,
-      supply,
-      reserves,
-      delegatedDrepPower,
-      totalPoolVotePower,
-      drepAlwaysNoConfidenceDelegatorCount,
-      drepAlwaysNoConfidenceVotingPower,
-      drepAlwaysAbstainDelegatorCount,
-      drepAlwaysAbstainVotingPower,
-      startTime,
-      endTime,
-      firstBlockTime,
-      lastBlockTime,
-      blockCount,
-      txCount,
+    select: {
+      circulation: true,
+      treasury: true,
+      reward: true,
+      supply: true,
+      reserves: true,
+      delegatedDrepPower: true,
+      totalPoolVotePower: true,
+      drepAlwaysNoConfidenceDelegatorCount: true,
+      drepAlwaysNoConfidenceVotingPower: true,
+      drepAlwaysAbstainDelegatorCount: true,
+      drepAlwaysAbstainVotingPower: true,
+      startTime: true,
+      endTime: true,
+      firstBlockTime: true,
+      lastBlockTime: true,
+      blockCount: true,
+      txCount: true,
     },
   });
+
+  if (!existing) {
+    await prisma.epochTotals.create({
+      data: {
+        epoch: epochNo,
+        ...payload,
+      },
+    });
+    console.log(`[Epoch Totals] epoch=${epochNo} action=create`);
+  } else {
+    const changed =
+      existing.circulation !== payload.circulation ||
+      existing.treasury !== payload.treasury ||
+      existing.reward !== payload.reward ||
+      existing.supply !== payload.supply ||
+      existing.reserves !== payload.reserves ||
+      existing.delegatedDrepPower !== payload.delegatedDrepPower ||
+      existing.totalPoolVotePower !== payload.totalPoolVotePower ||
+      existing.drepAlwaysNoConfidenceDelegatorCount !==
+        payload.drepAlwaysNoConfidenceDelegatorCount ||
+      existing.drepAlwaysNoConfidenceVotingPower !==
+        payload.drepAlwaysNoConfidenceVotingPower ||
+      existing.drepAlwaysAbstainDelegatorCount !==
+        payload.drepAlwaysAbstainDelegatorCount ||
+      existing.drepAlwaysAbstainVotingPower !==
+        payload.drepAlwaysAbstainVotingPower ||
+      !areDatesEqual(existing.startTime, payload.startTime) ||
+      !areDatesEqual(existing.endTime, payload.endTime) ||
+      existing.firstBlockTime !== payload.firstBlockTime ||
+      existing.lastBlockTime !== payload.lastBlockTime ||
+      existing.blockCount !== payload.blockCount ||
+      existing.txCount !== payload.txCount;
+
+    if (changed) {
+      await prisma.epochTotals.update({
+        where: { epoch: epochNo },
+        data: payload,
+      });
+      console.log(`[Epoch Totals] epoch=${epochNo} action=update`);
+    } else {
+      console.log(
+        `[Epoch Totals] epoch=${epochNo} action=skip-unchanged`
+      );
+    }
+  }
 
   return {
     epoch: epochNo,

@@ -106,6 +106,8 @@ interface KoiosRetryProfile {
 
 export interface KoiosRequestContext {
   source?: string;
+  onRetryAttempt?: (attempt: RetryAttemptContext) => void;
+  signal?: AbortSignal;
 }
 
 interface InteractiveProposalListCacheEntry {
@@ -400,13 +402,17 @@ function getKoiosRetryProfile(url: string): KoiosRetryProfile {
 function onKoiosRetry(
   url: string,
   profileName: KoiosRetryProfileName,
-  context?: KoiosRequestContext
+  requestContext?: KoiosRequestContext
 ) {
   const endpoint = normalizeKoiosEndpoint(url);
-  const source = context?.source ?? "unknown";
-  return (context: RetryAttemptContext) => {
+  const source = requestContext?.source ?? "unknown";
+  return (attemptContext: RetryAttemptContext) => {
+    if (requestContext?.signal?.aborted) {
+      return;
+    }
+    requestContext?.onRetryAttempt?.(attemptContext);
     console.warn(
-      `[Koios Retry] source=${source} endpoint=${endpoint} profile=${profileName} attempt=${context.attempt}/${context.maxRetries} waitMs=${context.delayMs} status=${context.status ?? "unknown"} class=${context.errorClass} code=${context.code ?? "none"}`
+      `[Koios Retry] source=${source} endpoint=${endpoint} profile=${profileName} attempt=${attemptContext.attempt}/${attemptContext.maxRetries} waitMs=${attemptContext.delayMs} status=${attemptContext.status ?? "unknown"} class=${attemptContext.errorClass} code=${attemptContext.code ?? "none"}`
     );
   };
 }
@@ -509,6 +515,20 @@ function isKoiosTimeoutLikeError(error: any): boolean {
     message.includes("aborted") ||
     code === "ETIMEDOUT" ||
     code === "ECONNABORTED"
+  );
+}
+
+function isKoiosAbortError(error: any): boolean {
+  const message = String(error?.message ?? "").toLowerCase();
+  const code = String(error?.code ?? "").toUpperCase();
+  const name = String(error?.name ?? "");
+  return (
+    name === "AbortError"
+    || code === "ERR_CANCELED"
+    || code === "ABORT_ERR"
+    || message.includes("aborted")
+    || message.includes("canceled")
+    || message.includes("cancelled")
   );
 }
 
@@ -893,6 +913,9 @@ export const getKoiosService = (): AxiosInstance => {
   koiosInstance.interceptors.response.use(
     (response) => response,
     (error) => {
+      if (isKoiosAbortError(error)) {
+        return Promise.reject(error);
+      }
       if (error.response?.status === 429) {
         // Prefer the server-supplied Retry-After value so the global backoff
         // reflects the actual penalty period rather than the hardcoded default.
@@ -954,6 +977,7 @@ async function koiosGetInternal<T>(
             params: request.params,
             timeout: attemptTimeoutMs,
             __koiosSource: source,
+            signal: context?.signal,
           };
           const response = await koios.get<T>(request.url, requestConfig);
           const contentRange =
@@ -967,12 +991,15 @@ async function koiosGetInternal<T>(
             retryProfile.timeoutByAttemptMs?.[attempt] ?? retryProfile.timeoutMs;
         },
         onRetry: onKoiosRetry(request.url, retryProfile.name, context),
+        signal: context?.signal,
       }
     );
   } catch (error: any) {
-    console.error(
-      `[Koios Request Failed] source=${source} endpoint=${endpoint} profile=${retryProfile.name} timeoutMs=${attemptTimeoutMs} message=${error?.message ?? error}`
-    );
+    if (!isKoiosAbortError(error)) {
+      console.error(
+        `[Koios Request Failed] source=${source} endpoint=${endpoint} profile=${retryProfile.name} timeoutMs=${attemptTimeoutMs} message=${error?.message ?? error}`
+      );
+    }
     throw error;
   }
 }
@@ -1025,15 +1052,34 @@ export async function koiosGet<T>(
 export async function koiosGetAll<T>(
   url: string,
   params?: any,
-  context?: KoiosRequestContext
+  context?: KoiosRequestContext,
+  options?: {
+    overlapRows?: number;
+    dedupeKey?: (row: T) => string;
+  }
 ): Promise<T[]> {
-  const results: T[] = [];
+  const passOneResults: T[] = [];
   let offset = 0;
+  const endpoint = normalizeKoiosEndpoint(url);
+  const isHighVolumeEndpoint = KOIOS_HIGH_VOLUME_ENDPOINTS.has(endpoint);
+  let isFirstPage = true;
 
   while (true) {
+    const pressureState = getKoiosPressureState();
+    const adaptiveLimit =
+      isHighVolumeEndpoint && pressureState.active
+        ? Math.max(200, Math.floor(KOIOS_MAX_PAGE_LIMIT / 2))
+        : KOIOS_MAX_PAGE_LIMIT;
+    const adaptiveDelayMs =
+      isHighVolumeEndpoint && pressureState.active ? 150 : 0;
+    if (!isFirstPage && adaptiveDelayMs > 0) {
+      await sleep(adaptiveDelayMs);
+    }
+    isFirstPage = false;
+
     const pageParams = {
       ...params,
-      limit: KOIOS_MAX_PAGE_LIMIT,
+      limit: adaptiveLimit,
       offset,
     };
     const { data, contentRange } = await koiosGetInternal<T[]>(
@@ -1043,7 +1089,7 @@ export async function koiosGetAll<T>(
     );
 
     if (Array.isArray(data) && data.length > 0) {
-      results.push(...data);
+      passOneResults.push(...data);
     }
 
     // Use Content-Range to detect the last page when available.
@@ -1052,21 +1098,93 @@ export async function koiosGetAll<T>(
       if (match) {
         const lower = parseInt(match[1], 10);
         const upper = parseInt(match[2], 10);
-        if (upper - lower + 1 < KOIOS_MAX_PAGE_LIMIT) {
+        if (upper - lower + 1 < adaptiveLimit) {
           break;
         }
       }
     }
 
     // Fall back to item count: a short page means no more records.
-    if (!Array.isArray(data) || data.length < KOIOS_MAX_PAGE_LIMIT) {
+    if (!Array.isArray(data) || data.length < adaptiveLimit) {
       break;
     }
 
-    offset += KOIOS_MAX_PAGE_LIMIT;
+    offset += adaptiveLimit;
   }
 
-  return results;
+  const overlapRows = Math.max(0, options?.overlapRows ?? 0);
+  if (overlapRows === 0 || passOneResults.length === 0) {
+    return passOneResults;
+  }
+
+  const overlapOffset = Math.max(0, passOneResults.length - overlapRows);
+  const passTwoResults: T[] = [];
+  offset = overlapOffset;
+  isFirstPage = true;
+
+  while (true) {
+    const pressureState = getKoiosPressureState();
+    const adaptiveLimit =
+      isHighVolumeEndpoint && pressureState.active
+        ? Math.max(200, Math.floor(KOIOS_MAX_PAGE_LIMIT / 2))
+        : KOIOS_MAX_PAGE_LIMIT;
+    const adaptiveDelayMs =
+      isHighVolumeEndpoint && pressureState.active ? 150 : 0;
+    if (!isFirstPage && adaptiveDelayMs > 0) {
+      await sleep(adaptiveDelayMs);
+    }
+    isFirstPage = false;
+
+    const pageParams = {
+      ...params,
+      limit: adaptiveLimit,
+      offset,
+    };
+    const { data, contentRange } = await koiosGetInternal<T[]>(
+      url,
+      pageParams,
+      context
+    );
+
+    if (!Array.isArray(data) || data.length === 0) {
+      break;
+    }
+
+    passTwoResults.push(...data);
+
+    if (contentRange) {
+      const match = /^(\d+)-(\d+)\//.exec(contentRange);
+      if (match) {
+        const lower = parseInt(match[1], 10);
+        const upper = parseInt(match[2], 10);
+        if (upper - lower + 1 < adaptiveLimit) {
+          break;
+        }
+      }
+    }
+    if (data.length < adaptiveLimit) {
+      break;
+    }
+    offset += adaptiveLimit;
+  }
+
+  const dedupeKey =
+    options?.dedupeKey ??
+    ((row: T) => {
+      try {
+        return JSON.stringify(row);
+      } catch {
+        return String(row);
+      }
+    });
+  const merged = new Map<string, T>();
+  for (const row of passOneResults) {
+    merged.set(dedupeKey(row), row);
+  }
+  for (const row of passTwoResults) {
+    merged.set(dedupeKey(row), row);
+  }
+  return Array.from(merged.values());
 }
 
 export async function getKoiosProposalList(options?: {

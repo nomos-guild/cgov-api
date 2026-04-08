@@ -1,5 +1,6 @@
 import {
   getKoiosProposalList,
+  getKoiosPressureState,
   koiosGet,
   koiosGetAll,
   koiosPost,
@@ -7,7 +8,6 @@ import {
 } from "./koios";
 import {
   KOIOS_ACCOUNT_UPDATE_HISTORY_PAGE_SIZE,
-  KOIOS_DREP_DELEGATORS_PAGE_SIZE,
   KOIOS_DREP_LIST_PAGE_SIZE,
   KOIOS_TX_INFO_BATCH_SIZE,
   chunkArray,
@@ -34,6 +34,8 @@ import type {
 
 export interface GovernanceProviderOptions {
   source?: string;
+  onRetryAttempt?: KoiosRequestContext["onRetryAttempt"];
+  signal?: KoiosRequestContext["signal"];
 }
 
 export interface TxInfoBatchOptions extends GovernanceProviderOptions {
@@ -48,18 +50,19 @@ export interface TxInfoBatchOptions extends GovernanceProviderOptions {
 
 const KOIOS_DREP_UPDATES_PAGE_SIZE = 1000;
 const KOIOS_POOL_GROUPS_PAGE_SIZE = 1000;
+const KOIOS_MUTABLE_PAGE_OVERLAP_ROWS = 200;
 
 // Delay between paginated pages to stay under Koios burst limits (100 req/10s).
-const KOIOS_DREP_DELEGATORS_PAGE_DELAY_MS = parseInt(
-  process.env.KOIOS_DREP_DELEGATORS_PAGE_DELAY_MS || "300",
-  10
-);
 const KOIOS_DREP_UPDATES_PAGE_DELAY_MS = parseInt(
   process.env.KOIOS_DREP_UPDATES_PAGE_DELAY_MS || "150",
   10
 );
 const KOIOS_DEFAULT_PAGE_DELAY_MS = parseInt(
   process.env.KOIOS_DEFAULT_PAGE_DELAY_MS || "100",
+  10
+);
+const KOIOS_ACCOUNT_UPDATE_HISTORY_PAGE_DELAY_MS = parseInt(
+  process.env.KOIOS_ACCOUNT_UPDATE_HISTORY_PAGE_DELAY_MS || "150",
   10
 );
 const KOIOS_TIMING_SLOW_MS = parseInt(
@@ -70,16 +73,21 @@ const KOIOS_TIMING_SLOW_MS = parseInt(
 function toKoiosContext(
   options?: GovernanceProviderOptions
 ): KoiosRequestContext | undefined {
-  if (!options?.source) {
+  if (!options?.source && !options?.onRetryAttempt && !options?.signal) {
     return undefined;
   }
-  return { source: options.source };
+  return {
+    source: options.source,
+    onRetryAttempt: options.onRetryAttempt,
+    signal: options.signal,
+  };
 }
 
 async function collectPaginated<T>(options: {
   pageSize: number;
   delayMs?: number;
   label?: string;
+  adaptiveHighVolume?: boolean;
   fetchPage: (params: { offset: number; limit: number }) => Promise<T[]>;
 }): Promise<T[]> {
   const startedAt = Date.now();
@@ -90,15 +98,23 @@ async function collectPaginated<T>(options: {
   let pageCount = 0;
 
   while (hasMore) {
+    const pressureState = getKoiosPressureState();
+    const adaptiveLimit =
+      options.adaptiveHighVolume && pressureState.active
+        ? Math.max(200, Math.floor(options.pageSize / 2))
+        : options.pageSize;
+    const adaptiveDelayMs =
+      (options.delayMs ?? 0) +
+      (options.adaptiveHighVolume && pressureState.active ? 150 : 0);
     // Delay between pages to avoid burst-limit pressure on Koios.
-    if (!isFirstPage && options.delayMs && options.delayMs > 0) {
-      await new Promise((resolve) => setTimeout(resolve, options.delayMs));
+    if (!isFirstPage && adaptiveDelayMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, adaptiveDelayMs));
     }
     isFirstPage = false;
 
     const page = await options.fetchPage({
       offset,
-      limit: options.pageSize,
+      limit: adaptiveLimit,
     });
     pageCount += 1;
 
@@ -109,7 +125,7 @@ async function collectPaginated<T>(options: {
 
     rows.push(...page);
     offset += page.length;
-    hasMore = page.length === options.pageSize;
+    hasMore = page.length === adaptiveLimit;
   }
 
   const durationMs = Date.now() - startedAt;
@@ -120,6 +136,79 @@ async function collectPaginated<T>(options: {
   }
 
   return rows;
+}
+
+function dedupeRowsByKey<T>(rows: T[], getKey: (row: T) => string): T[] {
+  const deduped = new Map<string, T>();
+  for (const row of rows) {
+    deduped.set(getKey(row), row);
+  }
+  return Array.from(deduped.values());
+}
+
+async function collectPaginatedWithOverlap<T>(options: {
+  pageSize: number;
+  delayMs?: number;
+  label?: string;
+  adaptiveHighVolume?: boolean;
+  overlapRows?: number;
+  fetchPage: (params: { offset: number; limit: number }) => Promise<T[]>;
+  getRowKey: (row: T) => string;
+}): Promise<T[]> {
+  const passOneRows = await collectPaginated({
+    pageSize: options.pageSize,
+    delayMs: options.delayMs,
+    label: options.label ? `${options.label}:pass1` : undefined,
+    adaptiveHighVolume: options.adaptiveHighVolume,
+    fetchPage: options.fetchPage,
+  });
+
+  const overlapRows = Math.max(0, options.overlapRows ?? 0);
+  if (passOneRows.length === 0 || overlapRows === 0) {
+    return passOneRows;
+  }
+
+  const overlapOffset = Math.max(0, passOneRows.length - overlapRows);
+  const passTwoRows: T[] = [];
+  let offset = overlapOffset;
+  let hasMore = true;
+  let isFirstPage = true;
+
+  while (hasMore) {
+    const pressureState = getKoiosPressureState();
+    const adaptiveLimit =
+      options.adaptiveHighVolume && pressureState.active
+        ? Math.max(200, Math.floor(options.pageSize / 2))
+        : options.pageSize;
+    const adaptiveDelayMs =
+      (options.delayMs ?? 0) +
+      (options.adaptiveHighVolume && pressureState.active ? 150 : 0);
+    if (!isFirstPage && adaptiveDelayMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, adaptiveDelayMs));
+    }
+    isFirstPage = false;
+
+    const page = await options.fetchPage({ offset, limit: adaptiveLimit });
+    if (!page || page.length === 0) {
+      hasMore = false;
+      continue;
+    }
+
+    passTwoRows.push(...page);
+    offset += page.length;
+    hasMore = page.length === adaptiveLimit;
+  }
+
+  const merged = dedupeRowsByKey(
+    [...passOneRows, ...passTwoRows],
+    options.getRowKey
+  );
+  if (merged.length !== passOneRows.length) {
+    console.log(
+      `[Koios Pagination] label=${options.label ?? "paginate"} pass1Rows=${passOneRows.length} pass2Rows=${passTwoRows.length} mergedRows=${merged.length} overlapRows=${overlapRows}`
+    );
+  }
+  return merged;
 }
 
 export async function listProposals(options?: {
@@ -145,6 +234,7 @@ export async function listProposals(options?: {
 export async function listVotes(options?: {
   proposalId?: string;
   minEpoch?: number;
+  minBlockTime?: number;
   offset?: number;
   limit?: number;
   order?: string;
@@ -162,6 +252,9 @@ export async function listVotes(options?: {
 
   if (typeof options?.minEpoch === "number") {
     params.epoch_no = `gte.${options.minEpoch}`;
+  }
+  if (typeof options?.minBlockTime === "number") {
+    params.block_time = `gte.${options.minBlockTime}`;
   }
 
   return koiosGet<KoiosVote[]>("/vote_list", params, toKoiosContext(options));
@@ -327,11 +420,30 @@ export async function listDrepVotingPowerHistory(options: {
   );
 }
 
+/**
+ * Fetches ALL DRep voting power records for an epoch, auto-paginating via
+ * koiosGetAll. Use this for epoch-wide syncs instead of one-call-per-DRep.
+ *
+ * Ordering by drep_id.asc gives deterministic pages so offset pagination
+ * remains stable across page boundaries.
+ */
+export async function getAllDrepVotingPowerHistoryForEpoch(options: {
+  epochNo: number;
+  source?: string;
+}): Promise<KoiosDrepVotingPower[]> {
+  return koiosGetAll<KoiosDrepVotingPower>(
+    "/drep_voting_power_history",
+    { _epoch_no: options.epochNo, order: "drep_id.asc" },
+    toKoiosContext(options)
+  );
+}
+
 export async function listDrepDelegators(options: {
   drepId: string;
   epochNo?: number;
   offset?: number;
   limit?: number;
+  order?: string;
   source?: string;
 }): Promise<KoiosDrepDelegator[]> {
   const params: Record<string, string | number> = {
@@ -346,7 +458,11 @@ export async function listDrepDelegators(options: {
 
   return koiosGet<KoiosDrepDelegator[]>(
     "/drep_delegators",
-    { ...params, select: "stake_address,amount,epoch_no" },
+    {
+      ...params,
+      order: options.order ?? "epoch_no.asc,stake_address.asc",
+      select: "stake_address,amount,epoch_no",
+    },
     toKoiosContext(options)
   );
 }
@@ -356,17 +472,24 @@ export async function listAllDrepDelegators(options: {
   epochNo?: number;
   source?: string;
 }): Promise<KoiosDrepDelegator[]> {
-  return collectPaginated({
-    pageSize: KOIOS_DREP_DELEGATORS_PAGE_SIZE,
-    delayMs: KOIOS_DREP_DELEGATORS_PAGE_DELAY_MS,
-    label: "drep_delegators",
-    fetchPage: ({ offset, limit }) =>
-      listDrepDelegators({
-        ...options,
-        offset,
-        limit,
-      }),
-  });
+  const params: Record<string, string | number> = {
+    _drep_id: options.drepId,
+    order: "epoch_no.asc,stake_address.asc",
+    select: "stake_address,amount,epoch_no",
+  };
+  if (typeof options.epochNo === "number") {
+    params.epoch_no = `eq.${options.epochNo}`;
+  }
+  return koiosGetAll<KoiosDrepDelegator>(
+    "/drep_delegators",
+    params,
+    toKoiosContext(options),
+    {
+      overlapRows: KOIOS_MUTABLE_PAGE_OVERLAP_ROWS,
+      dedupeKey: (row) =>
+        `${row.stake_address ?? ""}|${row.epoch_no ?? ""}|${row.amount ?? ""}`,
+    }
+  );
 }
 
 export async function getCommitteeInfo(
@@ -403,6 +526,7 @@ export async function listDreps(options?: {
   return koiosGet<KoiosDrepListEntry[]>(
     "/drep_list",
     {
+      order: "drep_id.asc",
       limit: options?.limit ?? KOIOS_DREP_LIST_PAGE_SIZE,
       offset: options?.offset ?? 0,
     },
@@ -417,6 +541,7 @@ export async function listAllDrepIds(
     pageSize: KOIOS_DREP_LIST_PAGE_SIZE,
     delayMs: KOIOS_DEFAULT_PAGE_DELAY_MS,
     label: "drep_list",
+    adaptiveHighVolume: true,
     fetchPage: ({ offset, limit }) =>
       listDreps({
         offset,
@@ -440,6 +565,7 @@ export async function listDrepUpdates(options: {
     "/drep_updates",
     {
       _drep_id: options.drepId,
+      order: "block_time.desc,update_tx_hash.desc",
       limit: options.limit ?? KOIOS_DREP_UPDATES_PAGE_SIZE,
       offset: options.offset ?? 0,
       select: "drep_id,action,block_time,update_tx_hash,meta_json",
@@ -456,6 +582,7 @@ export async function listAllDrepUpdates(
     pageSize: KOIOS_DREP_UPDATES_PAGE_SIZE,
     delayMs: KOIOS_DREP_UPDATES_PAGE_DELAY_MS,
     label: "drep_updates",
+    adaptiveHighVolume: true,
     fetchPage: ({ offset, limit }) =>
       listDrepUpdates({
         drepId,
@@ -495,28 +622,21 @@ export async function getAccountUpdateHistoryBatch(
     return [];
   }
 
-  const rows: KoiosAccountUpdateHistoryEntry[] = [];
-  let offset = 0;
-  let hasMore = true;
-
-  while (hasMore) {
-    const page = await koiosPost<KoiosAccountUpdateHistoryEntry[]>(
-      `/account_update_history?offset=${offset}&limit=${KOIOS_ACCOUNT_UPDATE_HISTORY_PAGE_SIZE}`,
-      { _stake_addresses: uniqueStakeAddresses },
-      toKoiosContext(options)
-    );
-
-    if (!page || page.length === 0) {
-      hasMore = false;
-      continue;
-    }
-
-    rows.push(...page);
-    offset += page.length;
-    hasMore = page.length === KOIOS_ACCOUNT_UPDATE_HISTORY_PAGE_SIZE;
-  }
-
-  return rows;
+  return collectPaginatedWithOverlap({
+    pageSize: KOIOS_ACCOUNT_UPDATE_HISTORY_PAGE_SIZE,
+    delayMs: KOIOS_ACCOUNT_UPDATE_HISTORY_PAGE_DELAY_MS,
+    label: "account_update_history",
+    adaptiveHighVolume: true,
+    overlapRows: KOIOS_MUTABLE_PAGE_OVERLAP_ROWS,
+    fetchPage: async ({ offset, limit }) =>
+      koiosPost<KoiosAccountUpdateHistoryEntry[]>(
+        `/account_update_history?offset=${offset}&limit=${limit}&order=epoch_no.asc,epoch_slot.asc,absolute_slot.asc,tx_hash.asc,stake_address.asc`,
+        { _stake_addresses: uniqueStakeAddresses },
+        toKoiosContext(options)
+      ),
+    getRowKey: (row) =>
+      `${row.stake_address ?? ""}|${row.tx_hash ?? ""}|${row.epoch_no ?? ""}|${row.epoch_slot ?? ""}|${row.absolute_slot ?? ""}|${row.action_type ?? ""}`,
+  });
 }
 
 function buildTxInfoRequestBody(
@@ -565,8 +685,15 @@ export async function getTxInfoBatch(
 
   const results: KoiosTxInfo[] = [];
   const batches = chunkArray(uniqueTxHashes, KOIOS_TX_INFO_BATCH_SIZE);
+  const txInfoBaseDelayMs = 75;
 
-  for (const batch of batches) {
+  for (let index = 0; index < batches.length; index += 1) {
+    const batch = batches[index]!;
+    const pressureState = getKoiosPressureState();
+    const delayMs = txInfoBaseDelayMs + (pressureState.active ? 150 : 0);
+    if (index > 0 && delayMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
     const page = await koiosPost<KoiosTxInfo[]>(
       "/tx_info",
       buildTxInfoRequestBody(batch, options),
@@ -589,6 +716,7 @@ export async function listPoolGroups(options?: {
   return koiosGet<KoiosPoolGroup[]>(
     "/pool_groups",
     {
+      order: "pool_id_bech32.asc",
       limit: options?.limit ?? KOIOS_POOL_GROUPS_PAGE_SIZE,
       offset: options?.offset ?? 0,
     },
@@ -602,6 +730,7 @@ export async function listAllPoolGroups(
   return collectPaginated({
     pageSize: KOIOS_POOL_GROUPS_PAGE_SIZE,
     delayMs: KOIOS_DEFAULT_PAGE_DELAY_MS,
+    adaptiveHighVolume: true,
     fetchPage: ({ offset, limit }) =>
       listPoolGroups({
         offset,

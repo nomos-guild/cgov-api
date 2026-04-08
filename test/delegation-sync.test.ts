@@ -44,6 +44,7 @@ import { syncDrepDelegationChanges } from "../src/services/ingestion/delegation-
 type PrismaMockOptions = {
   backfillStatus?: any;
   phase3Status?: any;
+  clearGuardStatus?: any;
   existingStakeAddresses?: string[];
   existingStates?: Array<{
     stakeAddress: string;
@@ -53,6 +54,7 @@ type PrismaMockOptions = {
   }>;
   existingChangeRows?: Array<{
     stakeAddress: string;
+    fromDrepId: string;
     toDrepId: string;
     delegatedEpoch: number;
   }>;
@@ -69,6 +71,7 @@ function createPrismaMock(options: PrismaMockOptions = {}) {
   const syncState = options.syncState ?? { lastProcessedEpoch: 600 };
 
   const prisma = {
+    $executeRaw: jest.fn().mockResolvedValue(1),
     drep: {
       findMany: jest.fn().mockResolvedValue(drepRows),
     },
@@ -92,16 +95,54 @@ function createPrismaMock(options: PrismaMockOptions = {}) {
     },
     stakeDelegationState: {
       findMany: jest.fn().mockImplementation(async ({ where }: any) => {
+        if (where?.drepId?.not === null) {
+          return existingStates
+            .filter((row) => row.drepId !== null)
+            .map((row) => ({ stakeAddress: row.stakeAddress }));
+        }
         const requested = new Set(where?.stakeAddress?.in ?? []);
         return existingStates.filter((row) => requested.has(row.stakeAddress));
       }),
       createMany: jest.fn().mockImplementation(async ({ data }: any) => ({
         count: data.length,
       })),
-      update: jest.fn().mockResolvedValue({}),
+      update: jest.fn().mockImplementation(async ({ where, data }: any) => {
+        const row = existingStates.find((state) => state.stakeAddress === where?.stakeAddress);
+        if (row) {
+          row.drepId = data?.drepId ?? row.drepId;
+          row.amount = data?.amount ?? row.amount;
+          row.delegatedEpoch = data?.delegatedEpoch ?? row.delegatedEpoch;
+        }
+        return {};
+      }),
+      updateMany: jest.fn().mockImplementation(async ({ where, data }: any) => {
+        const requested = new Set(where?.stakeAddress?.in ?? []);
+        let count = 0;
+        for (const row of existingStates) {
+          if (requested.has(row.stakeAddress) && row.drepId !== null) {
+            row.drepId = data?.drepId ?? null;
+            row.amount = data?.amount ?? null;
+            row.delegatedEpoch = data?.delegatedEpoch ?? null;
+            count += 1;
+          }
+        }
+        return { count };
+      }),
     },
     stakeDelegationChange: {
       findMany: jest.fn().mockImplementation(async ({ where }: any) => {
+        const orFilters = where?.OR;
+        if (Array.isArray(orFilters) && orFilters.length > 0) {
+          return existingChangeRows.filter((row) =>
+            orFilters.some(
+              (entry: any) =>
+                entry?.stakeAddress === row.stakeAddress &&
+                entry?.fromDrepId === row.fromDrepId &&
+                entry?.toDrepId === row.toDrepId &&
+                entry?.delegatedEpoch === row.delegatedEpoch
+            )
+          );
+        }
         const requested = new Set(where?.stakeAddress?.in ?? []);
         return existingChangeRows.filter((row) => requested.has(row.stakeAddress));
       }),
@@ -120,6 +161,8 @@ function createPrismaMock(options: PrismaMockOptions = {}) {
             return options.backfillStatus ?? null;
           case "drep-delegation-phase3":
             return options.phase3Status ?? null;
+          case "drep-delegation-clear-guard":
+            return options.clearGuardStatus ?? null;
           case "drep-delegation-backfill-force":
             return null;
           default:
@@ -157,6 +200,8 @@ describe("delegation-sync.service", () => {
     mockRefreshDrepDelegatorCounts.mockReset();
     mockGetKoiosCurrentEpoch.mockReset();
     mockGetKoiosCurrentEpoch.mockResolvedValue(602);
+    mockGetAccountUpdateHistoryBatch.mockResolvedValue([]);
+    mockGetTxInfoBatch.mockResolvedValue([]);
     mockRefreshDrepDelegatorCounts.mockResolvedValue({ updated: 0 });
     mockEnsureDrepsExist.mockResolvedValue({ created: 0 });
     logSpy = jest.spyOn(console, "log").mockImplementation(() => undefined);
@@ -268,6 +313,7 @@ describe("delegation-sync.service", () => {
       existingChangeRows: [
         {
           stakeAddress: "stake_test1",
+          fromDrepId: "drep_old",
           toDrepId: "drep_new",
           delegatedEpoch: 601,
         },
@@ -285,16 +331,9 @@ describe("delegation-sync.service", () => {
 
     const result = await syncDrepDelegationChanges(prisma);
 
-    expect(mockGetAccountUpdateHistoryBatch).not.toHaveBeenCalled();
-    expect(mockGetTxInfoBatch).not.toHaveBeenCalled();
-    expect(prisma.stakeDelegationState.update).toHaveBeenCalledWith({
-      where: { stakeAddress: "stake_test1" },
-      data: {
-        drepId: "drep_new",
-        amount: BigInt(100),
-        delegatedEpoch: 601,
-      },
-    });
+    expect(mockGetAccountUpdateHistoryBatch).toHaveBeenCalledTimes(1);
+    expect(mockGetTxInfoBatch).toHaveBeenCalledTimes(0);
+    expect(prisma.$executeRaw).toHaveBeenCalled();
     expect(prisma.stakeDelegationChange.createMany).not.toHaveBeenCalled();
     expect(mockEnsureDrepsExist).not.toHaveBeenCalled();
     expect(result).toEqual({
@@ -307,5 +346,277 @@ describe("delegation-sync.service", () => {
       changesInserted: 0,
       failed: [],
     });
+  });
+
+  it("selects all non-special dreps without voting power gating", async () => {
+    const prisma = createPrismaMock({
+      drepRows: [{ drepId: "drep_target" }],
+    });
+    mockListAllDrepDelegators.mockResolvedValue([]);
+
+    await syncDrepDelegationChanges(prisma);
+
+    expect(prisma.drep.findMany).toHaveBeenCalledWith({
+      select: { drepId: true },
+      where: {
+        drepId: { notIn: ["drep_always_abstain", "drep_always_no_confidence"] },
+      },
+      orderBy: { drepId: "asc" },
+    });
+  });
+
+  it("reconciles stale delegated stake states absent from Koios snapshot", async () => {
+    const prisma = createPrismaMock({
+      existingStakeAddresses: ["stake_kept", "stake_stale"],
+      existingStates: [
+        {
+          stakeAddress: "stake_kept",
+          drepId: "drep_target",
+          amount: BigInt(100),
+          delegatedEpoch: 601,
+        },
+        {
+          stakeAddress: "stake_stale",
+          drepId: "drep_old",
+          amount: BigInt(55),
+          delegatedEpoch: 600,
+        },
+      ],
+      drepRows: [{ drepId: "drep_target" }],
+    });
+    mockListAllDrepDelegators.mockResolvedValue([
+      {
+        stake_address: "stake_kept",
+        amount: "100",
+        epoch_no: 601,
+      },
+    ]);
+
+    const result = await syncDrepDelegationChanges(prisma);
+
+    expect(prisma.stakeDelegationState.updateMany).toHaveBeenCalledWith({
+      where: {
+        stakeAddress: { in: ["stake_stale"] },
+        drepId: { not: null },
+      },
+      data: {
+        drepId: null,
+        amount: null,
+        delegatedEpoch: null,
+      },
+    });
+    expect(result.statesUpdated).toBe(1);
+  });
+
+  it("resolves duplicate stake conflicts deterministically using account history", async () => {
+    const prisma = createPrismaMock({
+      backfillStatus: {
+        backfillCompletedAt: new Date(),
+      },
+      existingStakeAddresses: ["stake_dupe"],
+      existingStates: [],
+      drepRows: [{ drepId: "drep_a" }, { drepId: "drep_b" }],
+    });
+
+    mockListAllDrepDelegators.mockImplementation(async ({ drepId }: any) => {
+      if (drepId === "drep_a") {
+        return [{ stake_address: "stake_dupe", amount: "100", epoch_no: 601 }];
+      }
+      return [{ stake_address: "stake_dupe", amount: "100", epoch_no: 601 }];
+    });
+    mockGetAccountUpdateHistoryBatch.mockResolvedValue([
+      {
+        stake_address: "stake_dupe",
+        action_type: "delegation_drep",
+        epoch_no: 601,
+        epoch_slot: 200,
+        block_time: 1_700_000_000,
+        delegated_drep: "drep_b",
+      },
+    ]);
+
+    await syncDrepDelegationChanges(prisma);
+
+    expect(prisma.stakeDelegationState.createMany).toHaveBeenCalledWith({
+      data: [
+        {
+          stakeAddress: "stake_dupe",
+          drepId: "drep_b",
+          amount: BigInt(100),
+          delegatedEpoch: 601,
+        },
+      ],
+      skipDuplicates: true,
+    });
+  });
+
+  it("blocks destructive clears on low-coverage snapshots until confirmation", async () => {
+    const existingStates = Array.from({ length: 300 }, (_, index) => ({
+      stakeAddress: `stake_${index}`,
+      drepId: "drep_old",
+      amount: BigInt(10),
+      delegatedEpoch: 600,
+    }));
+    const prisma = createPrismaMock({
+      backfillStatus: { backfillCompletedAt: new Date() },
+      existingStakeAddresses: existingStates.map((row) => row.stakeAddress),
+      existingStates,
+      drepRows: [{ drepId: "drep_target" }],
+    });
+
+    mockListAllDrepDelegators.mockResolvedValue(
+      Array.from({ length: 10 }, (_, index) => ({
+        stake_address: `stake_${index}`,
+        amount: "100",
+        epoch_no: 601,
+      }))
+    );
+
+    const result = await syncDrepDelegationChanges(prisma);
+
+    expect(prisma.stakeDelegationState.updateMany).not.toHaveBeenCalled();
+    expect(prisma.syncStatus.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { jobName: "drep-delegation-clear-guard" },
+        update: expect.objectContaining({
+          lastResult: "error",
+        }),
+      })
+    );
+    expect(result.statesUpdated).toBe(10);
+  });
+
+  it("allows destructive clears after repeated suspicious snapshot confirmation", async () => {
+    const existingStates = Array.from({ length: 300 }, (_, index) => ({
+      stakeAddress: `stake_${index}`,
+      drepId: "drep_old",
+      amount: BigInt(10),
+      delegatedEpoch: 600,
+    }));
+    const prisma = createPrismaMock({
+      backfillStatus: { backfillCompletedAt: new Date() },
+      clearGuardStatus: {
+        errorMessage: JSON.stringify({
+          pendingConfirmation: true,
+          fingerprint: "300|10|290",
+        }),
+      },
+      existingStakeAddresses: existingStates.map((row) => row.stakeAddress),
+      existingStates,
+      drepRows: [{ drepId: "drep_target" }],
+    });
+
+    mockListAllDrepDelegators.mockResolvedValue(
+      Array.from({ length: 10 }, (_, index) => ({
+        stake_address: `stake_${index}`,
+        amount: "100",
+        epoch_no: 601,
+      }))
+    );
+
+    await syncDrepDelegationChanges(prisma);
+
+    expect(prisma.stakeDelegationState.updateMany).toHaveBeenCalledWith({
+      where: {
+        stakeAddress: {
+          in: Array.from({ length: 290 }, (_, index) => `stake_${index + 10}`),
+        },
+        drepId: { not: null },
+      },
+      data: {
+        drepId: null,
+        amount: null,
+        delegatedEpoch: null,
+      },
+    });
+  });
+
+  it("always refreshes delegator counts even when no state mutations occur", async () => {
+    const prisma = createPrismaMock({
+      existingStakeAddresses: ["stake_kept"],
+      existingStates: [
+        {
+          stakeAddress: "stake_kept",
+          drepId: "drep_target",
+          amount: BigInt(100),
+          delegatedEpoch: 601,
+        },
+      ],
+      drepRows: [{ drepId: "drep_target" }],
+    });
+    mockListAllDrepDelegators.mockResolvedValue([
+      {
+        stake_address: "stake_kept",
+        amount: "100",
+        epoch_no: 601,
+      },
+    ]);
+
+    const result = await syncDrepDelegationChanges(prisma);
+
+    expect(mockRefreshDrepDelegatorCounts).toHaveBeenCalledTimes(1);
+    expect(result.statesUpdated).toBe(0);
+  });
+
+  it("fails closed and skips writes when fetch failures exceed fixed threshold", async () => {
+    const prisma = createPrismaMock({
+      drepRows: [{ drepId: "drep_ok" }, { drepId: "drep_fail_1" }, { drepId: "drep_fail_2" }],
+    });
+    mockListAllDrepDelegators.mockImplementation(async ({ drepId }: any) => {
+      if (drepId.startsWith("drep_fail")) {
+        throw new Error("koios failure");
+      }
+      return [
+        {
+          stake_address: "stake_ok",
+          amount: "100",
+          epoch_no: 601,
+        },
+      ];
+    });
+
+    const result = await syncDrepDelegationChanges(prisma);
+
+    expect(prisma.stakeDelegationState.createMany).not.toHaveBeenCalled();
+    expect(prisma.stakeDelegationState.update).not.toHaveBeenCalled();
+    expect(prisma.stakeDelegationState.updateMany).not.toHaveBeenCalled();
+    expect(prisma.stakeDelegationChange.createMany).not.toHaveBeenCalled();
+    expect(mockRefreshDrepDelegatorCounts).not.toHaveBeenCalled();
+    expect(result.statesUpdated).toBe(0);
+    expect(result.failed).toHaveLength(2);
+  });
+
+  it("continues with partial fetch failures under threshold and skips stale clears", async () => {
+    const prisma = createPrismaMock({
+      drepRows: [{ drepId: "drep_ok" }, { drepId: "drep_fail" }],
+      existingStates: [
+        {
+          stakeAddress: "stake_stale",
+          drepId: "drep_old",
+          amount: BigInt(10),
+          delegatedEpoch: 600,
+        },
+      ],
+    });
+    mockListAllDrepDelegators.mockImplementation(async ({ drepId }: any) => {
+      if (drepId === "drep_fail") {
+        throw new Error("koios failure");
+      }
+      return [
+        {
+          stake_address: "stake_ok",
+          amount: "100",
+          epoch_no: 601,
+        },
+      ];
+    });
+
+    const result = await syncDrepDelegationChanges(prisma);
+
+    expect(prisma.stakeDelegationState.createMany).toHaveBeenCalled();
+    expect(prisma.stakeDelegationState.updateMany).not.toHaveBeenCalled();
+    expect(mockRefreshDrepDelegatorCounts).toHaveBeenCalledTimes(1);
+    expect(result.failed).toHaveLength(1);
+    expect(result.failed[0]?.drepId).toBe("drep_fail");
   });
 });

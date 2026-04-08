@@ -234,21 +234,56 @@ export async function discoverRepositories(): Promise<DiscoveryResult> {
         discoveredVia: via,
       };
 
-      const existing = await prisma.githubRepository.findUnique({
-        where: { id },
-        select: { id: true },
+      const existingByGithubId = await prisma.githubRepository.findUnique({
+        where: { githubId },
+        select: { id: true, isActive: true },
       });
+      const existingById = existingByGithubId
+        ? null
+        : await prisma.githubRepository.findUnique({
+            where: { id },
+            select: { id: true, isActive: true },
+          });
 
-      if (existing) {
+      if (existingByGithubId) {
         await prisma.githubRepository.update({
-          where: { id },
+          where: { githubId },
           data: {
+            id,
             ...data,
+            isActive: true,
             discoveredVia: {
               set: via,
             },
           },
         });
+        if (!existingByGithubId.isActive) {
+          console.log(
+            `[github-repo-health] action=reactivate source=discovery repo=${id} githubId=${githubId}`
+          );
+        }
+        if (existingByGithubId.id !== id) {
+          console.log(
+            `[github-repo-health] action=rename source=discovery oldRepo=${existingByGithubId.id} newRepo=${id} githubId=${githubId}`
+          );
+        }
+        result.updatedRepos++;
+      } else if (existingById) {
+        await prisma.githubRepository.update({
+          where: { id },
+          data: {
+            ...data,
+            isActive: true,
+            discoveredVia: {
+              set: via,
+            },
+          },
+        });
+        if (!existingById.isActive) {
+          console.log(
+            `[github-repo-health] action=reactivate source=discovery repo=${id} githubId=${githubId}`
+          );
+        }
         result.updatedRepos++;
       } else {
         await prisma.githubRepository.create({

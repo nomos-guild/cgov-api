@@ -35,6 +35,11 @@ export interface EnsureVoterResult {
   updated: boolean;
 }
 
+export interface VoteVoterRef {
+  voterRole: "DRep" | "SPO" | "ConstitutionalCommittee";
+  voterId: string;
+}
+
 // Cache Koios lookups across a single bulk run so repeated voters do not fan out.
 const drepInfoCache = new Map<string, KoiosDrepInfo | undefined>();
 const drepVotingPowerCache = new Map<string, bigint>();
@@ -66,6 +71,85 @@ export function clearVoterKoiosCaches(): void {
   drepVotingPowerCache.clear();
   spoInfoCache.clear();
   spoVotingPowerCache.clear();
+}
+
+function getVoterCacheKey(voterRole: VoteVoterRef["voterRole"], voterId: string): string {
+  return `${voterRole}:${voterId}`;
+}
+
+/**
+ * Preloads missing voters for a vote window so the hot per-vote loop can avoid
+ * repeating ensure/fetch work for duplicate voter identities.
+ */
+export async function preloadVotersForVotes(
+  voters: VoteVoterRef[],
+  tx: IngestionDbClient
+): Promise<Map<string, EnsureVoterResult>> {
+  const refsByKey = new Map<string, VoteVoterRef>();
+  for (const voter of voters) {
+    if (!voter?.voterId) continue;
+    const key = getVoterCacheKey(voter.voterRole, voter.voterId);
+    refsByKey.set(key, voter);
+  }
+
+  const drepIds: string[] = [];
+  const spoIds: string[] = [];
+  const ccIds: string[] = [];
+  for (const voter of refsByKey.values()) {
+    if (voter.voterRole === "DRep") drepIds.push(voter.voterId);
+    else if (voter.voterRole === "SPO") spoIds.push(voter.voterId);
+    else ccIds.push(voter.voterId);
+  }
+
+  const [existingDreps, existingSpos, existingCcs] = await Promise.all([
+    drepIds.length > 0
+      ? tx.drep.findMany({
+          where: { drepId: { in: drepIds } },
+          select: { drepId: true },
+        })
+      : Promise.resolve([]),
+    spoIds.length > 0
+      ? tx.sPO.findMany({
+          where: { poolId: { in: spoIds } },
+          select: { poolId: true },
+        })
+      : Promise.resolve([]),
+    ccIds.length > 0
+      ? tx.cC.findMany({
+          where: { ccId: { in: ccIds } },
+          select: { ccId: true },
+        })
+      : Promise.resolve([]),
+  ]);
+
+  const existingKeys = new Set<string>();
+  for (const row of existingDreps) {
+    existingKeys.add(getVoterCacheKey("DRep", row.drepId));
+  }
+  for (const row of existingSpos) {
+    existingKeys.add(getVoterCacheKey("SPO", row.poolId));
+  }
+  for (const row of existingCcs) {
+    existingKeys.add(getVoterCacheKey("ConstitutionalCommittee", row.ccId));
+  }
+
+  const preloaded = new Map<string, EnsureVoterResult>();
+  for (const [key, ref] of refsByKey.entries()) {
+    if (!existingKeys.has(key)) continue;
+    preloaded.set(key, {
+      voterId: ref.voterId,
+      created: false,
+      updated: false,
+    });
+  }
+
+  const missing = [...refsByKey.entries()].filter(([key]) => !existingKeys.has(key));
+  for (const [key, ref] of missing) {
+    const ensured = await ensureVoterExists(ref.voterRole, ref.voterId, tx);
+    preloaded.set(key, ensured);
+  }
+
+  return preloaded;
 }
 
 /**
@@ -209,14 +293,6 @@ async function ensureSpoExists(
   poolId: string,
   tx: IngestionDbClient
 ): Promise<EnsureVoterResult> {
-  const existing = await tx.sPO.findUnique({
-    where: { poolId },
-  });
-
-  if (existing) {
-    return { voterId: existing.poolId, created: false, updated: false };
-  }
-
   let koiosSpo = spoInfoCache.get(poolId);
   if (koiosSpo === undefined) {
     const koiosSpoResponse = await koiosPost<KoiosSpo[]>(
@@ -257,7 +333,7 @@ async function ensureSpoExists(
 
   const { poolName, ticker, iconUrl } = await fetchPoolMetadata(koiosSpo);
 
-  const newSpo = await tx.sPO.create({
+  const createResult = await tx.sPO.createMany({
     data: {
       poolId,
       poolName,
@@ -265,23 +341,30 @@ async function ensureSpoExists(
       votingPower,
       ...(iconUrl && { iconUrl }),
     },
+    skipDuplicates: true,
   });
 
-  return { voterId: newSpo.poolId, created: true, updated: false };
+  if (createResult.count > 0) {
+    return { voterId: poolId, created: true, updated: false };
+  }
+
+  const existing = await tx.sPO.findUnique({
+    where: { poolId },
+  });
+
+  if (!existing) {
+    throw new Error(
+      `[Voter Service] Expected existing SPO after duplicate-safe insert: ${poolId}`
+    );
+  }
+
+  return { voterId: existing.poolId, created: false, updated: false };
 }
 
 async function ensureCcExists(
   ccId: string,
   tx: IngestionDbClient
 ): Promise<EnsureVoterResult> {
-  const existing = await tx.cC.findUnique({
-    where: { ccId },
-  });
-
-  if (existing) {
-    return { voterId: existing.ccId, created: false, updated: false };
-  }
-
   const committeeInfo = await getCommitteeInfo({
     source: "ingestion.voter.ensure-cc.committee-info",
   });
@@ -296,7 +379,7 @@ async function ensureCcExists(
     status = "expired";
   }
 
-  const newCc = await tx.cC.create({
+  const createResult = await tx.cC.createMany({
     data: {
       ccId,
       hotCredential: ccMember?.cc_hot_id || ccId,
@@ -304,9 +387,24 @@ async function ensureCcExists(
       status,
       memberName: null,
     },
+    skipDuplicates: true,
   });
 
-  return { voterId: newCc.ccId, created: true, updated: false };
+  if (createResult.count > 0) {
+    return { voterId: ccId, created: true, updated: false };
+  }
+
+  const existing = await tx.cC.findUnique({
+    where: { ccId },
+  });
+
+  if (!existing) {
+    throw new Error(
+      `[Voter Service] Expected existing CC after duplicate-safe insert: ${ccId}`
+    );
+  }
+
+  return { voterId: existing.ccId, created: false, updated: false };
 }
 
 /**

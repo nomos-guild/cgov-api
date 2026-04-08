@@ -11,6 +11,7 @@ import {
   ingestVotesForProposal,
   type VoteIngestionResult,
 } from "./vote.service";
+import type { KoiosVote } from "../../types/koios.types";
 import type { InactivePowerMetrics } from "./inactiveDrepPower.service";
 import { getKoiosPressureState } from "../koios";
 import { prisma } from "../prisma";
@@ -20,6 +21,7 @@ export interface ProposalPipelineContext {
   currentEpoch: number;
   koiosProposal: KoiosProposal;
   minVotesEpoch?: number;
+  prefetchedVotes?: KoiosVote[];
   useCache?: boolean;
   voteRunCache?: VoteIngestionRunCache;
   inactivePowerRunCache?: Map<string, bigint>;
@@ -75,6 +77,7 @@ export async function runProposalDownstreamPipeline(
     context.minVotesEpoch,
     {
       useCache: context.useCache !== false,
+      prefetchedVotes: context.prefetchedVotes,
       runCache: context.voteRunCache,
       fetchSurveyMetadata:
         process.env.KOIOS_SKIP_TX_METADATA_WHEN_DEGRADED !== "false"
@@ -97,6 +100,16 @@ export async function runProposalDownstreamPipeline(
     context.inactivePowerMetrics,
     context.proposalVotingPowerRunCache
   );
+
+  if (votingPower.skipped) {
+    console.warn(
+      `[Proposal Pipeline] action=voting-power-skipped proposalId=${context.proposalId} outcome=${votingPower.outcome} reason=${votingPower.skippedReason ?? "none"}`
+    );
+  } else if (votingPower.partial) {
+    console.warn(
+      `[Proposal Pipeline] action=voting-power-partial proposalId=${context.proposalId} outcome=${votingPower.outcome} reasons=${votingPower.partialReasons?.join(",") ?? "none"}`
+    );
+  }
 
   if (
     votingPower.success

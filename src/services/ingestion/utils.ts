@@ -1,6 +1,7 @@
 /**
  * Utility functions for data ingestion services
  */
+import { isDeterministicGitHubUnresolvedError } from "./github-unresolved";
 
 /**
  * Options for retry logic
@@ -38,6 +39,7 @@ export interface RetryHooks {
   onRetry?: (context: RetryAttemptContext) => void;
   /** Called before each attempt with the zero-based attempt number. */
   onBeforeAttempt?: (attempt: number) => void;
+  signal?: AbortSignal;
 }
 
 /**
@@ -53,6 +55,55 @@ const DEFAULT_RETRY_OPTIONS: RetryOptions = {
 function getRetryJitterMs(maxJitterMs: number | undefined): number {
   if (!maxJitterMs || maxJitterMs <= 0) return 0;
   return Math.floor(Math.random() * (maxJitterMs + 1));
+}
+
+function createAbortError(reason?: unknown): Error {
+  const message =
+    typeof reason === "string"
+      ? reason
+      : reason instanceof Error
+        ? reason.message
+        : "Operation aborted";
+  const error = new Error(message);
+  (error as any).name = "AbortError";
+  (error as any).code = "ABORT_ERR";
+  return error;
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (!signal?.aborted) return;
+  throw createAbortError((signal as any).reason);
+}
+
+function waitWithAbort(delayMs: number, signal?: AbortSignal): Promise<void> {
+  if (delayMs <= 0) return Promise.resolve();
+  if (!signal) {
+    return new Promise((resolve) => setTimeout(resolve, delayMs));
+  }
+  if (signal.aborted) {
+    return Promise.reject(createAbortError((signal as any).reason));
+  }
+
+  return new Promise((resolve, reject) => {
+    let done = false;
+    const cleanup = () => {
+      signal.removeEventListener("abort", onAbort);
+    };
+    const finish = (callback: () => void) => {
+      if (done) return;
+      done = true;
+      cleanup();
+      callback();
+    };
+    const timeout = setTimeout(() => {
+      finish(resolve);
+    }, delayMs);
+    const onAbort = () => {
+      clearTimeout(timeout);
+      finish(() => reject(createAbortError((signal as any).reason)));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
 }
 
 function classifyRetryError(error: any): RetryErrorClass {
@@ -132,14 +183,27 @@ export async function withRetry<T>(
   for (let attempt = 0; attempt <= options.maxRetries; attempt++) {
     try {
       hooks?.onBeforeAttempt?.(attempt);
+      throwIfAborted(hooks?.signal);
       return await operation();
     } catch (error: any) {
+      if (hooks?.signal?.aborted) {
+        throw createAbortError((hooks.signal as any).reason);
+      }
       lastError = error;
 
       const status = error?.response?.status as number | undefined;
       const code = String(error?.code ?? "").toUpperCase() || undefined;
       const errorClass = classifyRetryError(error);
       const maxRetriesForError = getMaxRetriesForError(options, errorClass);
+
+      // Deterministic unresolved repository errors should fail fast.
+      if (isDeterministicGitHubUnresolvedError(error)) {
+        console.warn(
+          "Non-retryable GitHub unresolved repository error:",
+          error.message
+        );
+        throw error;
+      }
 
       // Don't retry on client errors (4xx) or validation errors
       // EXCEPT 429 (Too Many Requests), which we *do* want to retry with backoff.
@@ -163,10 +227,9 @@ export async function withRetry<T>(
 
       // If max retries reached, throw
       if (attempt >= maxRetriesForError) {
-        throw new Error(
-          `Operation failed after ${maxRetriesForError} retries: ${error.message}`
-        );
+        throw error;
       }
+      throwIfAborted(hooks?.signal);
       
       // Calculate delay:
       // - If 429 and Retry-After header is present, prefer that
@@ -213,6 +276,7 @@ export async function withRetry<T>(
         );
       }
 
+      throwIfAborted(hooks?.signal);
       hooks?.onRetry?.({
         attempt: attempt + 1,
         maxRetries: maxRetriesForError,
@@ -224,7 +288,7 @@ export async function withRetry<T>(
       });
 
       // Wait before retrying
-      await new Promise((resolve) => setTimeout(resolve, delayWithJitter));
+      await waitWithAbort(delayWithJitter, hooks?.signal);
     }
   }
 

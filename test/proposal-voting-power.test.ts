@@ -3,6 +3,13 @@ const mockGetProposalVotingSummary = jest.fn();
 const mockGetDrepEpochSummary = jest.fn();
 const mockListPoolVotingPowerHistory = jest.fn();
 const mockGetInactivePowerWithCache = jest.fn();
+const mockGetKoiosPressureState = jest.fn(() => ({
+  active: false,
+  remainingMs: 0,
+  eventCount: 0,
+  threshold: 0,
+  cooldownUntil: 0,
+}));
 
 jest.mock("../src/services/prisma", () => ({
   prisma: {
@@ -27,15 +34,28 @@ jest.mock("../src/services/ingestion/inactiveDrepPower.service", () => ({
     mockGetInactivePowerWithCache(...args),
 }));
 
+jest.mock("../src/services/koios", () => ({
+  getKoiosPressureState: () => mockGetKoiosPressureState(),
+}));
+
 import { updateProposalVotingPower } from "../src/services/ingestion/proposalVotingPower.service";
 
 describe("proposalVotingPower.service", () => {
   beforeEach(() => {
+    jest.useRealTimers();
     proposalUpdateMock.mockReset();
     mockGetProposalVotingSummary.mockReset();
     mockGetDrepEpochSummary.mockReset();
     mockListPoolVotingPowerHistory.mockReset();
     mockGetInactivePowerWithCache.mockReset();
+    mockGetKoiosPressureState.mockReset();
+    mockGetKoiosPressureState.mockReturnValue({
+      active: false,
+      remainingMs: 0,
+      eventCount: 0,
+      threshold: 0,
+      cooldownUntil: 0,
+    });
   });
 
   it("returns a failed result when Koios does not return a voting summary", async () => {
@@ -47,6 +67,13 @@ describe("proposalVotingPower.service", () => {
       success: false,
       error: "No voting summary available from Koios",
       summaryFound: false,
+      outcome: "missing-summary",
+      skipped: true,
+      skippedReason: "missing-summary",
+      partial: true,
+      partialReasons: ["missing-summary"],
+      retryAttempts: 0,
+      summaryDurationMs: expect.any(Number),
     });
 
     expect(proposalUpdateMock).not.toHaveBeenCalled();
@@ -80,6 +107,9 @@ describe("proposalVotingPower.service", () => {
     expect(result).toEqual({
       success: true,
       summaryFound: true,
+      outcome: "updated",
+      retryAttempts: 0,
+      summaryDurationMs: expect.any(Number),
     });
     expect(mockGetInactivePowerWithCache).not.toHaveBeenCalled();
     expect(proposalUpdateMock).toHaveBeenCalledWith({
@@ -132,6 +162,9 @@ describe("proposalVotingPower.service", () => {
     expect(result).toEqual({
       success: true,
       summaryFound: true,
+      outcome: "updated",
+      retryAttempts: 0,
+      summaryDurationMs: expect.any(Number),
     });
     expect(mockGetInactivePowerWithCache).toHaveBeenCalledWith(
       600,
@@ -158,5 +191,103 @@ describe("proposalVotingPower.service", () => {
         spoNoVotePower: BigInt(206),
       },
     });
+  });
+
+  it("skips voting power updates during Koios degraded state", async () => {
+    mockGetKoiosPressureState.mockReturnValue({
+      active: true,
+      remainingMs: 42000,
+      eventCount: 5,
+      threshold: 3,
+      cooldownUntil: Date.now() + 42000,
+    });
+
+    await expect(
+      updateProposalVotingPower("gov_action1degraded", 600, 599, 600, true)
+    ).resolves.toEqual({
+      success: true,
+      summaryFound: false,
+      outcome: "degraded-skip",
+      skipped: true,
+      skippedReason: "koios-degraded",
+    });
+    expect(mockGetProposalVotingSummary).not.toHaveBeenCalled();
+    expect(proposalUpdateMock).not.toHaveBeenCalled();
+  });
+
+  it("classifies retry-fail when summary fetch fails after retries", async () => {
+    mockGetProposalVotingSummary.mockImplementation(
+      async (
+        _proposalId: string,
+        options?: { onRetryAttempt?: () => void; signal?: AbortSignal }
+      ) => {
+        options?.onRetryAttempt?.();
+        throw new Error("socket hang up");
+      }
+    );
+
+    await expect(
+      updateProposalVotingPower("gov_action1retryfail", 600, 599, 600, true)
+    ).resolves.toEqual({
+      success: false,
+      error: "socket hang up",
+      summaryFound: false,
+      outcome: "retry-fail",
+      skipped: true,
+      skippedReason: "summary-fetch-failed",
+      partial: true,
+      partialReasons: ["summary-fetch-failed"],
+      retryAttempts: 1,
+      summaryDurationMs: expect.any(Number),
+    });
+  });
+
+  it("classifies deferred-time-budget when summary fetch exceeds soft timeout", async () => {
+    jest.useFakeTimers();
+    let observedSignal: AbortSignal | undefined;
+    mockGetProposalVotingSummary.mockImplementation(
+      (_proposalId: string, options?: { onRetryAttempt?: () => void; signal?: AbortSignal }) =>
+        new Promise((resolve) => {
+          observedSignal = options?.signal;
+          const delayedRetry = setTimeout(() => {
+            options?.onRetryAttempt?.();
+          }, 35500);
+          const delayedResolve = setTimeout(() => resolve(null), 36000);
+          options?.signal?.addEventListener(
+            "abort",
+            () => {
+              clearTimeout(delayedRetry);
+              clearTimeout(delayedResolve);
+              resolve(null);
+            },
+            { once: true }
+          );
+        })
+    );
+
+    const resultPromise = updateProposalVotingPower(
+      "gov_action1timeout",
+      600,
+      599,
+      600,
+      true
+    );
+    await jest.advanceTimersByTimeAsync(35050);
+
+    await expect(resultPromise).resolves.toEqual({
+      success: false,
+      error: "Voting summary exceeded soft time budget (35000ms)",
+      summaryFound: false,
+      outcome: "deferred-time-budget",
+      skipped: true,
+      skippedReason: "deferred-time-budget",
+      partial: true,
+      partialReasons: ["deferred-time-budget"],
+      retryAttempts: 0,
+      summaryDurationMs: expect.any(Number),
+    });
+    expect(observedSignal?.aborted).toBe(true);
+
+    await jest.advanceTimersByTimeAsync(1000);
   });
 });

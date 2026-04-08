@@ -1,11 +1,16 @@
 const mockGetKoiosProposalList = jest.fn();
 const mockKoiosGet = jest.fn();
 const mockKoiosPost = jest.fn();
+const mockGetKoiosPressureState = jest.fn();
+const mockKoiosGetAll = jest.fn();
 
 jest.mock("../src/services/koios", () => ({
   getKoiosProposalList: (...args: unknown[]) => mockGetKoiosProposalList(...args),
   koiosGet: (...args: unknown[]) => mockKoiosGet(...args),
   koiosPost: (...args: unknown[]) => mockKoiosPost(...args),
+  koiosGetAll: (...args: unknown[]) => mockKoiosGetAll(...args),
+  getKoiosPressureState: (...args: unknown[]) =>
+    mockGetKoiosPressureState(...args),
 }));
 
 import {
@@ -15,6 +20,7 @@ import {
   getTxInfoBatch,
   getProposalVotingSummary,
   getDrepInfoBatchFromKoios,
+  listAllDrepDelegators,
   listAllDrepIds,
   listAllDrepUpdates,
   listAllPoolGroups,
@@ -27,6 +33,15 @@ describe("governanceProvider", () => {
     mockGetKoiosProposalList.mockReset();
     mockKoiosGet.mockReset();
     mockKoiosPost.mockReset();
+    mockGetKoiosPressureState.mockReset();
+    mockKoiosGetAll.mockReset();
+    mockGetKoiosPressureState.mockReturnValue({
+      active: false,
+      remainingMs: 0,
+      observedErrors: 0,
+      threshold: 10,
+      windowMs: 60000,
+    });
   });
 
   function buildRows<T>(count: number, createRow: (index: number) => T): T[] {
@@ -75,14 +90,23 @@ describe("governanceProvider", () => {
   });
 
   it("returns the first proposal voting summary row", async () => {
+    const controller = new AbortController();
     mockKoiosGet.mockResolvedValue([
       { drep_active_yes_vote_power: "1" },
       { drep_active_yes_vote_power: "2" },
     ]);
 
     await expect(
-      getProposalVotingSummary("gov_action1", { source: "test.summary" })
+      getProposalVotingSummary("gov_action1", {
+        source: "test.summary",
+        signal: controller.signal,
+      })
     ).resolves.toEqual({ drep_active_yes_vote_power: "1" });
+    expect(mockKoiosGet).toHaveBeenCalledWith(
+      "/proposal_voting_summary?_proposal_id=gov_action1",
+      undefined,
+      { source: "test.summary", signal: controller.signal }
+    );
   });
 
   it("returns committee info and current epoch through the shared provider", async () => {
@@ -130,13 +154,13 @@ describe("governanceProvider", () => {
     expect(mockKoiosGet).toHaveBeenNthCalledWith(
       1,
       "/drep_list",
-      { limit: 1000, offset: 0 },
+      { order: "drep_id.asc", limit: 1000, offset: 0 },
       { source: "test.drep-list" }
     );
     expect(mockKoiosGet).toHaveBeenNthCalledWith(
       2,
       "/drep_list",
-      { limit: 1000, offset: 1000 },
+      { order: "drep_id.asc", limit: 1000, offset: 1000 },
       { source: "test.drep-list" }
     );
   });
@@ -166,13 +190,25 @@ describe("governanceProvider", () => {
     expect(mockKoiosGet).toHaveBeenNthCalledWith(
       1,
       "/drep_updates",
-      { _drep_id: "drep1", limit: 1000, offset: 0 },
+      {
+        _drep_id: "drep1",
+        order: "block_time.desc,update_tx_hash.desc",
+        limit: 1000,
+        offset: 0,
+        select: "drep_id,action,block_time,update_tx_hash,meta_json",
+      },
       { source: "test.drep-updates" }
     );
     expect(mockKoiosGet).toHaveBeenNthCalledWith(
       2,
       "/drep_updates",
-      { _drep_id: "drep1", limit: 1000, offset: 1000 },
+      {
+        _drep_id: "drep1",
+        order: "block_time.desc,update_tx_hash.desc",
+        limit: 1000,
+        offset: 1000,
+        select: "drep_id,action,block_time,update_tx_hash,meta_json",
+      },
       { source: "test.drep-updates" }
     );
   });
@@ -239,15 +275,44 @@ describe("governanceProvider", () => {
     expect(rows).toHaveLength(1001);
     expect(mockKoiosPost).toHaveBeenNthCalledWith(
       1,
-      "/account_update_history?offset=0&limit=1000",
+      "/account_update_history?offset=0&limit=1000&order=epoch_no.asc,epoch_slot.asc,absolute_slot.asc,tx_hash.asc,stake_address.asc",
       { _stake_addresses: ["stake_test1", "stake_test2"] },
       { source: "test.account-history" }
     );
     expect(mockKoiosPost).toHaveBeenNthCalledWith(
       2,
-      "/account_update_history?offset=1000&limit=1000",
+      "/account_update_history?offset=1000&limit=1000&order=epoch_no.asc,epoch_slot.asc,absolute_slot.asc,tx_hash.asc,stake_address.asc",
       { _stake_addresses: ["stake_test1", "stake_test2"] },
       { source: "test.account-history" }
+    );
+    expect(mockKoiosPost).toHaveBeenNthCalledWith(
+      3,
+      "/account_update_history?offset=801&limit=1000&order=epoch_no.asc,epoch_slot.asc,absolute_slot.asc,tx_hash.asc,stake_address.asc",
+      { _stake_addresses: ["stake_test1", "stake_test2"] },
+      { source: "test.account-history" }
+    );
+  });
+
+  it("uses overlap-safe koiosGetAll flow for drep delegators", async () => {
+    mockKoiosGetAll.mockResolvedValue([{ stake_address: "stake_test1" }]);
+
+    const rows = await listAllDrepDelegators({
+      drepId: "drep1",
+      source: "test.delegators",
+    });
+
+    expect(rows).toEqual([{ stake_address: "stake_test1" }]);
+    expect(mockKoiosGetAll).toHaveBeenCalledWith(
+      "/drep_delegators",
+      {
+        _drep_id: "drep1",
+        order: "epoch_no.asc,stake_address.asc",
+        select: "stake_address,amount,epoch_no",
+      },
+      { source: "test.delegators" },
+      expect.objectContaining({
+        overlapRows: 200,
+      })
     );
   });
 
@@ -272,13 +337,13 @@ describe("governanceProvider", () => {
     expect(mockKoiosGet).toHaveBeenNthCalledWith(
       1,
       "/pool_groups",
-      { limit: 1000, offset: 0 },
+      { order: "pool_id_bech32.asc", limit: 1000, offset: 0 },
       { source: "test.pool-groups" }
     );
     expect(mockKoiosGet).toHaveBeenNthCalledWith(
       2,
       "/pool_groups",
-      { limit: 1000, offset: 1000 },
+      { order: "pool_id_bech32.asc", limit: 1000, offset: 1000 },
       { source: "test.pool-groups" }
     );
   });

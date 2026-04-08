@@ -38,7 +38,7 @@ import {
   getBoundedIntEnv,
   releaseJobLock,
 } from "./ingestion/syncLock";
-import type { KoiosProposal } from "../types/koios.types";
+import type { KoiosProposal, KoiosVote } from "../types/koios.types";
 import {
   findKoiosProposalForIdentifier,
   getProposalIdentifierAliases,
@@ -54,6 +54,7 @@ import {
 type ProposalSnapshot = {
   proposalId: string;
   status: ProposalStatus;
+  submissionEpoch: number | null;
   drepActiveYesVotePower: bigint | null;
   drepActiveNoVotePower: bigint | null;
   drepActiveAbstainVotePower: bigint | null;
@@ -134,6 +135,8 @@ const MAX_TRACKED_PROPOSAL_IDENTIFIER_ALIASES = getBoundedIntEnv(
   100,
   200_000
 );
+const VOTE_INGEST_SYNC_ON_READ_MIN_EPOCH_SCOPING =
+  process.env.VOTE_INGEST_SYNC_ON_READ_MIN_EPOCH_SCOPING !== "false";
 
 // Last sync timestamps
 let lastOverviewSyncTime = 0;
@@ -184,6 +187,7 @@ function getProposalSyncCooldownMs(): number {
 const proposalSnapshotSelect = {
   proposalId: true,
   status: true,
+  submissionEpoch: true,
   drepActiveYesVotePower: true,
   drepActiveNoVotePower: true,
   drepActiveAbstainVotePower: true,
@@ -754,7 +758,10 @@ async function doProposalSync(target: ResolvedProposalSyncTarget): Promise<void>
         return;
       }
 
-      const koiosVotes = await fetchVotesForProposal(dbProposal.proposalId);
+      const minEpoch = VOTE_INGEST_SYNC_ON_READ_MIN_EPOCH_SCOPING
+        ? dbProposal.submissionEpoch ?? undefined
+        : undefined;
+      const koiosVotes = await fetchVotesForProposal(dbProposal.proposalId, minEpoch);
       const koiosVoteCount = koiosVotes.length;
 
       const dbVoteCount = await prisma.onchainVote.count({
@@ -841,6 +848,7 @@ async function doProposalSync(target: ResolvedProposalSyncTarget): Promise<void>
 
       const result = await ingestProposalData(koiosProposal, {
         minVotesEpoch: koiosProposal.proposed_epoch,
+        prefetchedVotes: koiosVotes,
         useCache: false,
         deferStatusFinalization: true,
       });
@@ -881,16 +889,20 @@ async function doProposalSync(target: ResolvedProposalSyncTarget): Promise<void>
  * Used for vote count comparison
  */
 async function fetchVotesForProposal(
-  proposalId: string
-): Promise<Array<{ vote_tx_hash: string }>> {
-  const votes: Array<{ vote_tx_hash: string }> = [];
+  proposalId: string,
+  minEpoch?: number
+): Promise<KoiosVote[]> {
+  const votes: KoiosVote[] = [];
   let offset = 0;
   const limit = 1000;
   let hasMore = true;
+  let requestCount = 0;
 
   while (hasMore) {
+    requestCount++;
     const batch = await listVotes({
       proposalId,
+      minEpoch,
       limit,
       offset,
       order: "block_time.asc,vote_tx_hash.asc",
@@ -907,6 +919,10 @@ async function fetchVotesForProposal(
       }
     }
   }
+
+  console.log(
+    `[Sync-on-Read] metric=koios.vote_list.requests_per_proposal proposalId=${proposalId} source=sync-on-read.details.vote-list count=${requestCount}`
+  );
 
   return votes;
 }
