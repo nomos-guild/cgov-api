@@ -106,6 +106,8 @@ interface KoiosRetryProfile {
 
 export interface KoiosRequestContext {
   source?: string;
+  onRetryAttempt?: (attempt: RetryAttemptContext) => void;
+  signal?: AbortSignal;
 }
 
 interface InteractiveProposalListCacheEntry {
@@ -400,13 +402,17 @@ function getKoiosRetryProfile(url: string): KoiosRetryProfile {
 function onKoiosRetry(
   url: string,
   profileName: KoiosRetryProfileName,
-  context?: KoiosRequestContext
+  requestContext?: KoiosRequestContext
 ) {
   const endpoint = normalizeKoiosEndpoint(url);
-  const source = context?.source ?? "unknown";
-  return (context: RetryAttemptContext) => {
+  const source = requestContext?.source ?? "unknown";
+  return (attemptContext: RetryAttemptContext) => {
+    if (requestContext?.signal?.aborted) {
+      return;
+    }
+    requestContext?.onRetryAttempt?.(attemptContext);
     console.warn(
-      `[Koios Retry] source=${source} endpoint=${endpoint} profile=${profileName} attempt=${context.attempt}/${context.maxRetries} waitMs=${context.delayMs} status=${context.status ?? "unknown"} class=${context.errorClass} code=${context.code ?? "none"}`
+      `[Koios Retry] source=${source} endpoint=${endpoint} profile=${profileName} attempt=${attemptContext.attempt}/${attemptContext.maxRetries} waitMs=${attemptContext.delayMs} status=${attemptContext.status ?? "unknown"} class=${attemptContext.errorClass} code=${attemptContext.code ?? "none"}`
     );
   };
 }
@@ -509,6 +515,20 @@ function isKoiosTimeoutLikeError(error: any): boolean {
     message.includes("aborted") ||
     code === "ETIMEDOUT" ||
     code === "ECONNABORTED"
+  );
+}
+
+function isKoiosAbortError(error: any): boolean {
+  const message = String(error?.message ?? "").toLowerCase();
+  const code = String(error?.code ?? "").toUpperCase();
+  const name = String(error?.name ?? "");
+  return (
+    name === "AbortError"
+    || code === "ERR_CANCELED"
+    || code === "ABORT_ERR"
+    || message.includes("aborted")
+    || message.includes("canceled")
+    || message.includes("cancelled")
   );
 }
 
@@ -893,6 +913,9 @@ export const getKoiosService = (): AxiosInstance => {
   koiosInstance.interceptors.response.use(
     (response) => response,
     (error) => {
+      if (isKoiosAbortError(error)) {
+        return Promise.reject(error);
+      }
       if (error.response?.status === 429) {
         // Prefer the server-supplied Retry-After value so the global backoff
         // reflects the actual penalty period rather than the hardcoded default.
@@ -954,6 +977,7 @@ async function koiosGetInternal<T>(
             params: request.params,
             timeout: attemptTimeoutMs,
             __koiosSource: source,
+            signal: context?.signal,
           };
           const response = await koios.get<T>(request.url, requestConfig);
           const contentRange =
@@ -967,12 +991,15 @@ async function koiosGetInternal<T>(
             retryProfile.timeoutByAttemptMs?.[attempt] ?? retryProfile.timeoutMs;
         },
         onRetry: onKoiosRetry(request.url, retryProfile.name, context),
+        signal: context?.signal,
       }
     );
   } catch (error: any) {
-    console.error(
-      `[Koios Request Failed] source=${source} endpoint=${endpoint} profile=${retryProfile.name} timeoutMs=${attemptTimeoutMs} message=${error?.message ?? error}`
-    );
+    if (!isKoiosAbortError(error)) {
+      console.error(
+        `[Koios Request Failed] source=${source} endpoint=${endpoint} profile=${retryProfile.name} timeoutMs=${attemptTimeoutMs} message=${error?.message ?? error}`
+      );
+    }
     throw error;
   }
 }

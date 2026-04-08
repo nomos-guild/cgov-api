@@ -90,14 +90,23 @@ describe("governanceProvider", () => {
   });
 
   it("returns the first proposal voting summary row", async () => {
+    const controller = new AbortController();
     mockKoiosGet.mockResolvedValue([
       { drep_active_yes_vote_power: "1" },
       { drep_active_yes_vote_power: "2" },
     ]);
 
     await expect(
-      getProposalVotingSummary("gov_action1", { source: "test.summary" })
+      getProposalVotingSummary("gov_action1", {
+        source: "test.summary",
+        signal: controller.signal,
+      })
     ).resolves.toEqual({ drep_active_yes_vote_power: "1" });
+    expect(mockKoiosGet).toHaveBeenCalledWith(
+      "/proposal_voting_summary?_proposal_id=gov_action1",
+      undefined,
+      { source: "test.summary", signal: controller.signal }
+    );
   });
 
   it("returns committee info and current epoch through the shared provider", async () => {

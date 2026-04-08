@@ -13,14 +13,37 @@ import {
   type InactivePowerMetrics,
 } from "./inactiveDrepPower.service";
 
+type VotingSummaryFetchOutcome =
+  | "success"
+  | "retried-success"
+  | "retry-fail"
+  | "fail"
+  | "deferred-time-budget"
+  | "missing-summary";
+
+export type VotingPowerUpdateOutcome =
+  | "updated"
+  | "unchanged"
+  | "degraded-skip"
+  | "deferred-time-budget"
+  | "retry-fail"
+  | "fail"
+  | "missing-summary"
+  | "partial-aggregate"
+  | "proposal-not-found"
+  | "error";
+
 export interface VotingPowerUpdateResult {
   success: boolean;
   error?: string;
   summaryFound: boolean;
+  outcome: VotingPowerUpdateOutcome;
   skipped?: boolean;
   skippedReason?: string;
   partial?: boolean;
   partialReasons?: string[];
+  retryAttempts?: number;
+  summaryDurationMs?: number;
 }
 
 export interface ProposalVotingPowerRunCache {
@@ -57,6 +80,8 @@ export function createProposalVotingPowerRunCache(): ProposalVotingPowerRunCache
 
 const VOTE_POWER_USE_EPOCH_TOTALS_CACHE =
   process.env.VOTE_POWER_USE_EPOCH_TOTALS_CACHE !== "false";
+const VOTING_SUMMARY_SLOW_LOG_THRESHOLD_MS = 2000;
+const VOTING_SUMMARY_SOFT_TIMEOUT_MS = 35000;
 
 function lovelaceToBigInt(lovelace: string | null | undefined): bigint | null {
   if (!lovelace) return null;
@@ -65,29 +90,106 @@ function lovelaceToBigInt(lovelace: string | null | undefined): bigint | null {
 
 async function fetchProposalVotingSummary(
   proposalId: string
-): Promise<Awaited<ReturnType<typeof getProposalVotingSummary>>> {
+): Promise<{
+  summary: Awaited<ReturnType<typeof getProposalVotingSummary>>;
+  outcome: VotingSummaryFetchOutcome;
+  retryAttempts: number;
+  durationMs: number;
+  error?: string;
+}> {
   const startedAt = Date.now();
+  let retryAttempts = 0;
+  const controller = new AbortController();
+  let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
+  const summaryPromise = getProposalVotingSummary(proposalId, {
+    source: "ingestion.proposal.voting-power.summary",
+    signal: controller.signal,
+    onRetryAttempt: () => {
+      retryAttempts += 1;
+    },
+  })
+    .then((summary) => ({ kind: "result" as const, summary }))
+    .catch((error: any) => ({
+      kind: "error" as const,
+      error: error?.message ?? String(error),
+    }));
+
   try {
-    const summary = await getProposalVotingSummary(proposalId, {
-      source: "ingestion.proposal.voting-power.summary",
-    });
+    const raced = await Promise.race([
+      summaryPromise,
+      new Promise<{ kind: "timeout" }>((resolve) =>
+        (timeoutHandle = setTimeout(
+          () => resolve({ kind: "timeout" }),
+          VOTING_SUMMARY_SOFT_TIMEOUT_MS
+        ))
+      ),
+    ]);
     const durationMs = Date.now() - startedAt;
-    if (durationMs >= 2000) {
+
+    if (raced.kind === "timeout") {
+      controller.abort("Voting summary exceeded soft time budget");
+      console.warn(
+        `[Voting Summary] action=deferred-time-budget proposalId=${proposalId} durationMs=${durationMs} softTimeoutMs=${VOTING_SUMMARY_SOFT_TIMEOUT_MS} retryAttempts=${retryAttempts}`
+      );
+      return {
+        summary: null,
+        outcome: "deferred-time-budget",
+        retryAttempts,
+        durationMs,
+        error: `Voting summary exceeded soft time budget (${VOTING_SUMMARY_SOFT_TIMEOUT_MS}ms)`,
+      };
+    }
+
+    if (raced.kind === "error") {
+      const outcome: VotingSummaryFetchOutcome =
+        retryAttempts > 0 ? "retry-fail" : "fail";
+      console.warn(
+        `[Voting Summary] action=outcome proposalId=${proposalId} outcome=${outcome} durationMs=${durationMs} retryAttempts=${retryAttempts} error=${raced.error}`
+      );
+      return {
+        summary: null,
+        outcome,
+        retryAttempts,
+        durationMs,
+        error: raced.error,
+      };
+    }
+
+    const summary = raced.summary;
+    const outcome: VotingSummaryFetchOutcome = summary
+      ? retryAttempts > 0
+        ? "retried-success"
+        : "success"
+      : "missing-summary";
+    if (durationMs >= VOTING_SUMMARY_SLOW_LOG_THRESHOLD_MS || outcome !== "success") {
       console.log(
-        `[Voting Summary] action=timing proposalId=${proposalId} durationMs=${durationMs} found=${Boolean(summary)}`
+        `[Voting Summary] action=outcome proposalId=${proposalId} outcome=${outcome} durationMs=${durationMs} retryAttempts=${retryAttempts} found=${Boolean(summary)}`
       );
     }
-    return summary;
-  } catch (error: any) {
+    return {
+      summary,
+      outcome,
+      retryAttempts,
+      durationMs,
+      error: summary ? undefined : "No voting summary available from Koios",
+    };
+  } catch (unexpectedError: any) {
     const durationMs = Date.now() - startedAt;
+    const message = unexpectedError?.message ?? String(unexpectedError);
     console.warn(
-      `[Voting Summary] Failed to fetch voting summary for ${proposalId}:`,
-      error.message
+      `[Voting Summary] action=outcome proposalId=${proposalId} outcome=fail durationMs=${durationMs} retryAttempts=${retryAttempts} error=${message}`
     );
-    console.warn(
-      `[Voting Summary] action=timing proposalId=${proposalId} durationMs=${durationMs} outcome=error`
-    );
-    return null;
+    return {
+      summary: null,
+      outcome: retryAttempts > 0 ? "retry-fail" : "fail",
+      retryAttempts,
+      durationMs,
+      error: message,
+    };
+  } finally {
+    if (timeoutHandle) {
+      clearTimeout(timeoutHandle);
+    }
   }
 }
 
@@ -368,23 +470,53 @@ export async function updateProposalVotingPower(
         return {
           success: true,
           summaryFound: false,
+          outcome: "degraded-skip",
           skipped: true,
           skippedReason: "koios-degraded",
         };
       }
     }
 
-    const votingSummary = await fetchProposalVotingSummary(proposalId);
+    const votingSummaryFetch = await fetchProposalVotingSummary(proposalId);
+    const votingSummary = votingSummaryFetch.summary;
 
     if (!votingSummary) {
-      console.log(
-        `[Voting Power] No voting summary available for ${proposalId}`
+      const outcome: VotingPowerUpdateOutcome =
+        votingSummaryFetch.outcome === "deferred-time-budget"
+          ? "deferred-time-budget"
+          : votingSummaryFetch.outcome === "retry-fail"
+          ? "retry-fail"
+          : votingSummaryFetch.outcome === "missing-summary"
+          ? "missing-summary"
+          : "fail";
+      const skippedReason =
+        outcome === "deferred-time-budget"
+          ? "deferred-time-budget"
+          : outcome === "missing-summary"
+          ? "missing-summary"
+          : "summary-fetch-failed";
+      console.warn(
+        `[Voting Power] action=${outcome} proposalId=${proposalId} summaryFound=false retryAttempts=${votingSummaryFetch.retryAttempts} durationMs=${votingSummaryFetch.durationMs}`
       );
       return {
         success: false,
-        error: "No voting summary available from Koios",
+        error:
+          votingSummaryFetch.error ?? "No voting summary available from Koios",
         summaryFound: false,
+        outcome,
+        skipped: true,
+        skippedReason,
+        partial: true,
+        partialReasons: [skippedReason],
+        retryAttempts: votingSummaryFetch.retryAttempts,
+        summaryDurationMs: votingSummaryFetch.durationMs,
       };
+    }
+
+    if (votingSummaryFetch.outcome === "retried-success") {
+      console.log(
+        `[Voting Power] action=retried-success proposalId=${proposalId} durationMs=${votingSummaryFetch.durationMs} retryAttempts=${votingSummaryFetch.retryAttempts}`
+      );
     }
 
     console.log(
@@ -425,9 +557,12 @@ export async function updateProposalVotingPower(
       return {
         success: false,
         summaryFound: true,
+        outcome: "partial-aggregate",
         partial: true,
         partialReasons,
         error: partialReasons.join("; "),
+        retryAttempts: votingSummaryFetch.retryAttempts,
+        summaryDurationMs: votingSummaryFetch.durationMs,
       };
     }
 
@@ -471,7 +606,10 @@ export async function updateProposalVotingPower(
         return {
           success: false,
           summaryFound: true,
+          outcome: "proposal-not-found",
           error: `Proposal not found: ${proposalId}`,
+          retryAttempts: votingSummaryFetch.retryAttempts,
+          summaryDurationMs: votingSummaryFetch.durationMs,
         };
       }
       changedFields = countChangedVotePowerFields(
@@ -485,6 +623,9 @@ export async function updateProposalVotingPower(
         return {
           success: true,
           summaryFound: true,
+          outcome: "unchanged",
+          retryAttempts: votingSummaryFetch.retryAttempts,
+          summaryDurationMs: votingSummaryFetch.durationMs,
         };
       }
     }
@@ -501,6 +642,9 @@ export async function updateProposalVotingPower(
     return {
       success: true,
       summaryFound: true,
+      outcome: "updated",
+      retryAttempts: votingSummaryFetch.retryAttempts,
+      summaryDurationMs: votingSummaryFetch.durationMs,
     };
   } catch (error: any) {
     const errorMessage = error?.message ?? String(error);
@@ -512,6 +656,7 @@ export async function updateProposalVotingPower(
       success: false,
       error: errorMessage,
       summaryFound: true,
+      outcome: "error",
     };
   }
 }

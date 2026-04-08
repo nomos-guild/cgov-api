@@ -101,6 +101,16 @@ export async function runProposalDownstreamPipeline(
     context.proposalVotingPowerRunCache
   );
 
+  if (votingPower.skipped) {
+    console.warn(
+      `[Proposal Pipeline] action=voting-power-skipped proposalId=${context.proposalId} outcome=${votingPower.outcome} reason=${votingPower.skippedReason ?? "none"}`
+    );
+  } else if (votingPower.partial) {
+    console.warn(
+      `[Proposal Pipeline] action=voting-power-partial proposalId=${context.proposalId} outcome=${votingPower.outcome} reasons=${votingPower.partialReasons?.join(",") ?? "none"}`
+    );
+  }
+
   if (
     votingPower.success
     && votingPower.summaryFound

@@ -124,7 +124,7 @@ describe("proposal status deferral", () => {
       success: false,
       downstream: {
         votes: { success: false, error: "vote sync failed" },
-        votingPower: { success: true, summaryFound: true },
+        votingPower: { success: true, summaryFound: true, outcome: "updated" },
       },
       proposal: {
         id: 1,
@@ -134,6 +134,7 @@ describe("proposal status deferral", () => {
       stats: {
         votesProcessed: 0,
         votesIngested: 0,
+        votesUpserted: 0,
         votesUpdated: 0,
         votersCreated: { dreps: 0, spos: 0, ccs: 0 },
         votersUpdated: { dreps: 0, spos: 0, ccs: 0 },
@@ -166,7 +167,7 @@ describe("proposal status deferral", () => {
       success: true,
       downstream: {
         votes: { success: true },
-        votingPower: { success: true, summaryFound: true },
+        votingPower: { success: true, summaryFound: true, outcome: "updated" },
       },
       proposal: {
         id: 1,
@@ -176,6 +177,7 @@ describe("proposal status deferral", () => {
       stats: {
         votesProcessed: 10,
         votesIngested: 8,
+        votesUpserted: 8,
         votesUpdated: 2,
         votersCreated: { dreps: 0, spos: 0, ccs: 0 },
         votersUpdated: { dreps: 0, spos: 0, ccs: 0 },

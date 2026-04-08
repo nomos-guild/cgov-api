@@ -4,12 +4,15 @@ import {
   githubGraphQL,
   buildBatchRepoQuery,
   getRateLimitState,
-  GitHubGraphQLError,
 } from "../github-graphql";
 import {
   recordDbFailureForFailFast,
   shouldFailFastForDb,
 } from "./dbFailFast";
+import {
+  getUnresolvedRepoNamesFromGraphQLError,
+  unresolvedRepoDisableThreshold,
+} from "./github-unresolved";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -85,10 +88,7 @@ const RECENT_WINDOW_DAYS = 7;
 const DB_BATCH_SIZE = 200;
 const batchedGithubActivityWritesEnabled =
   process.env.GITHUB_ACTIVITY_BATCHED_DB_WRITES_ENABLED !== "false";
-const unresolvedRepoDisableThreshold = 2;
 const unresolvedRepoFailureCounts = new Map<string, number>();
-const unresolvedRepoRegex =
-  /Could not resolve to a Repository with the name '([^']+)'/g;
 
 interface RepoHealthSummary {
   unresolvedSeen: number;
@@ -843,20 +843,6 @@ async function fetchBatchDataWithUnresolvedHandling<T>(
       );
     }
   }
-}
-
-function getUnresolvedRepoNamesFromGraphQLError(error: unknown): Set<string> {
-  if (!(error instanceof GitHubGraphQLError)) {
-    return new Set();
-  }
-
-  const unresolved = new Set<string>();
-  for (const gqlError of error.errors) {
-    for (const match of gqlError.message.matchAll(unresolvedRepoRegex)) {
-      if (match[1]) unresolved.add(match[1]);
-    }
-  }
-  return unresolved;
 }
 
 async function markRepoUnresolved(

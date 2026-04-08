@@ -34,6 +34,8 @@ import type {
 
 export interface GovernanceProviderOptions {
   source?: string;
+  onRetryAttempt?: KoiosRequestContext["onRetryAttempt"];
+  signal?: KoiosRequestContext["signal"];
 }
 
 export interface TxInfoBatchOptions extends GovernanceProviderOptions {
@@ -71,10 +73,14 @@ const KOIOS_TIMING_SLOW_MS = parseInt(
 function toKoiosContext(
   options?: GovernanceProviderOptions
 ): KoiosRequestContext | undefined {
-  if (!options?.source) {
+  if (!options?.source && !options?.onRetryAttempt && !options?.signal) {
     return undefined;
   }
-  return { source: options.source };
+  return {
+    source: options.source,
+    onRetryAttempt: options.onRetryAttempt,
+    signal: options.signal,
+  };
 }
 
 async function collectPaginated<T>(options: {

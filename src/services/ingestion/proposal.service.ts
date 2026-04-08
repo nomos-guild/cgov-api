@@ -39,6 +39,7 @@ import {
   shouldFailFastForDb,
 } from "./dbFailFast";
 import type { ProposalVotingPowerRunCache } from "./proposalVotingPower.service";
+import type { VotingPowerUpdateOutcome } from "./proposalVotingPower.service";
 import type {
   KoiosProposal,
   KoiosVote,
@@ -65,6 +66,11 @@ export interface ProposalIngestionResult {
       success: boolean;
       error?: string;
       summaryFound: boolean;
+      outcome: VotingPowerUpdateOutcome;
+      skipped?: boolean;
+      skippedReason?: string;
+      partial?: boolean;
+      partialReasons?: string[];
     };
   };
   proposal: {
@@ -457,7 +463,7 @@ export async function ingestProposalData(
 
     if (!result.success) {
       console.warn(
-        `[Proposal Ingest] action=partial-failure proposalId=${proposal.proposalId} votesSuccess=${voteResult.success} votingPowerSuccess=${votingPowerResult.success} voteError=${voteResult.error ?? "none"} votingPowerError=${votingPowerResult.error ?? "none"}`
+        `[Proposal Ingest] action=partial-failure proposalId=${proposal.proposalId} votesSuccess=${voteResult.success} votingPowerSuccess=${votingPowerResult.success} votingPowerOutcome=${votingPowerResult.outcome} voteError=${voteResult.error ?? "none"} votingPowerError=${votingPowerResult.error ?? "none"} skippedReason=${votingPowerResult.skippedReason ?? "none"} partialReasons=${votingPowerResult.partialReasons?.join(",") ?? "none"}`
       );
     }
 
@@ -625,12 +631,14 @@ export async function syncAllProposals(): Promise<SyncAllProposalsResult> {
     const voteRunTotals = {
       processed: 0,
       created: 0,
+      upserted: 0,
       updated: 0,
       metadataAttempts: 0,
       metadataSuccess: 0,
       metadataFailed: 0,
       metadataSkipped: 0,
     };
+    const votingPowerOutcomeTotals = new Map<VotingPowerUpdateOutcome, number>();
 
     // 6. Process each proposal sequentially
     for (const koiosProposal of sortedProposals) {
@@ -648,11 +656,17 @@ export async function syncAllProposals(): Promise<SyncAllProposalsResult> {
 
         voteRunTotals.processed += result.stats.votesProcessed;
         voteRunTotals.created += result.stats.votesIngested;
+        voteRunTotals.upserted += result.stats.votesUpserted;
         voteRunTotals.updated += result.stats.votesUpdated;
         voteRunTotals.metadataAttempts += result.stats.metadata.attempts;
         voteRunTotals.metadataSuccess += result.stats.metadata.success;
         voteRunTotals.metadataFailed += result.stats.metadata.failed;
         voteRunTotals.metadataSkipped += result.stats.metadata.skipped;
+        const votingPowerOutcome = result.downstream.votingPower.outcome;
+        votingPowerOutcomeTotals.set(
+          votingPowerOutcome,
+          (votingPowerOutcomeTotals.get(votingPowerOutcome) ?? 0) + 1
+        );
 
         if (!result.success) {
           results.partial++;
@@ -661,7 +675,7 @@ export async function syncAllProposals(): Promise<SyncAllProposalsResult> {
             error: getProposalIngestionFailureMessage(result),
           });
           console.warn(
-            `[Proposal Sync] action=partial-failure proposalId=${result.proposal.proposalId} proposalHash=${koiosProposal.proposal_tx_hash} votesSuccess=${result.downstream.votes.success} votingPowerSuccess=${result.downstream.votingPower.success}`
+            `[Proposal Sync] action=partial-failure proposalId=${result.proposal.proposalId} proposalHash=${koiosProposal.proposal_tx_hash} votesSuccess=${result.downstream.votes.success} votingPowerSuccess=${result.downstream.votingPower.success} votingPowerOutcome=${result.downstream.votingPower.outcome} skippedReason=${result.downstream.votingPower.skippedReason ?? "none"} partialReasons=${result.downstream.votingPower.partialReasons?.join(",") ?? "none"}`
           );
           continue;
         }
@@ -697,7 +711,13 @@ export async function syncAllProposals(): Promise<SyncAllProposalsResult> {
       `[Proposal Sync] Completed: ${results.success} succeeded, ${results.partial} partial, ${results.failed} failed`
     );
     console.log(
-      `[Proposal Sync] Run summary durationMs=${Date.now() - startedAtMs} votesProcessed=${voteRunTotals.processed} votesCreated=${voteRunTotals.created} votesUpdated=${voteRunTotals.updated} metadataAttempts=${voteRunTotals.metadataAttempts} metadataSuccess=${voteRunTotals.metadataSuccess} metadataFailed=${voteRunTotals.metadataFailed} metadataSkipped=${voteRunTotals.metadataSkipped}`
+      `[Proposal Sync] Run summary durationMs=${Date.now() - startedAtMs} votesProcessed=${voteRunTotals.processed} votesUpserted=${voteRunTotals.upserted} votesCreated=${voteRunTotals.created} votesUpdated=${voteRunTotals.updated} metadataAttempts=${voteRunTotals.metadataAttempts} metadataSuccess=${voteRunTotals.metadataSuccess} metadataFailed=${voteRunTotals.metadataFailed} metadataSkipped=${voteRunTotals.metadataSkipped}`
+    );
+    const votingPowerOutcomeSummary = Array.from(votingPowerOutcomeTotals.entries())
+      .map(([outcome, count]) => `${outcome}:${count}`)
+      .join(",");
+    console.log(
+      `[Proposal Sync] action=voting-power-outcomes summary=${votingPowerOutcomeSummary || "none"}`
     );
     logIntegrityEvent({
       stream: "proposal",
@@ -730,7 +750,7 @@ function getProposalIngestionFailureMessage(
 
   if (!result.downstream.votingPower.success) {
     failures.push(
-      `voting-power failed${result.downstream.votingPower.error ? `: ${result.downstream.votingPower.error}` : ""}`
+      `voting-power ${result.downstream.votingPower.outcome}${result.downstream.votingPower.error ? `: ${result.downstream.votingPower.error}` : ""}`
     );
   }
 

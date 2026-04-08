@@ -117,7 +117,19 @@ async function getVoteRationaleJson(koiosVote: KoiosVote): Promise<string | null
  * Statistics for vote ingestion
  */
 export interface VoteIngestionStats {
+  /**
+   * Legacy name kept for log/parser compatibility.
+   * Represents idempotent upsert writes, not guaranteed inserts.
+   */
   votesIngested: number;
+  /**
+   * Canonical write counter for proposal vote ingestion.
+   * Every processed vote write currently uses an upsert path.
+   */
+  votesUpserted: number;
+  /**
+   * Legacy placeholder retained for compatibility with existing call sites.
+   */
   votesUpdated: number;
   votesProcessed: number;
   votersCreated: { dreps: number; spos: number; ccs: number };
@@ -268,6 +280,7 @@ export async function ingestVotesForProposal(
       success: false,
       stats: {
         votesIngested: 0,
+        votesUpserted: 0,
         votesUpdated: 0,
         votesProcessed: 0,
         votersCreated: { dreps: 0, spos: 0, ccs: 0 },
@@ -286,6 +299,7 @@ export async function ingestVotesForProposal(
   const startedAt = Date.now();
   const stats: VoteIngestionStats = {
     votesIngested: 0,
+    votesUpserted: 0,
     votesUpdated: 0,
     votesProcessed: 0,
     votersCreated: { dreps: 0, spos: 0, ccs: 0 },
@@ -591,7 +605,7 @@ export async function ingestVotesForProposal(
   }
 
   console.log(
-    `[Vote Ingestion] Summary proposal=${proposalId} success=true durationMs=${Date.now() - startedAt} votesProcessed=${stats.votesProcessed} created=${stats.votesIngested} updated=${stats.votesUpdated} metadataAttempts=${stats.metadata.attempts} metadataSuccess=${stats.metadata.success} metadataFailed=${stats.metadata.failed} metadataSkipped=${stats.metadata.skipped}`
+    `[Vote Ingestion] Summary proposal=${proposalId} success=true durationMs=${Date.now() - startedAt} votesProcessed=${stats.votesProcessed} upserted=${stats.votesUpserted} created=${stats.votesIngested} updated=${stats.votesUpdated} metadataAttempts=${stats.metadata.attempts} metadataSuccess=${stats.metadata.success} metadataFailed=${stats.metadata.failed} metadataSkipped=${stats.metadata.skipped}`
   );
   console.log(
     `[Vote Ingestion] metric=vote_ingest.duration_ms proposal=${proposalId} value=${Date.now() - startedAt}`
@@ -915,6 +929,7 @@ async function ingestSingleVote(
     },
   });
   stats.votesIngested++;
+  stats.votesUpserted++;
 }
 
 /**

@@ -1,6 +1,10 @@
 import type { GithubRepository } from "@prisma/client";
 import { prisma } from "../prisma";
 import { githubGraphQL, getRateLimitState } from "../github-graphql";
+import {
+  isRepoUnresolvedInGraphQLError,
+  unresolvedRepoDisableThreshold,
+} from "./github-unresolved";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -113,11 +117,27 @@ const DEFAULT_OPTIONS: Required<BackfillOptions> = {
 };
 const backfillTransientFailureThreshold = 3;
 const backfillTransientFailureCounts = new Map<string, number>();
+const backfillUnresolvedFailureCounts = new Map<string, number>();
+const unresolvedBackfillErrorMessage =
+  "GitHub repo unresolved (not found or inaccessible)";
+
+interface BackfillHealthSummary {
+  unresolvedSeen: number;
+  unresolvedDeactivated: number;
+  transientSeen: number;
+  transientDeactivated: number;
+}
 
 export async function backfillRepositories(
   opts?: BackfillOptions
 ): Promise<BackfillResult> {
   const options = { ...DEFAULT_OPTIONS, ...opts };
+  const healthSummary: BackfillHealthSummary = {
+    unresolvedSeen: 0,
+    unresolvedDeactivated: 0,
+    transientSeen: 0,
+    transientDeactivated: 0,
+  };
 
   const repos = await prisma.githubRepository.findMany({
     where: {
@@ -155,20 +175,28 @@ export async function backfillRepositories(
     try {
       await backfillRepo(repo);
       backfillTransientFailureCounts.delete(repo.id);
+      backfillUnresolvedFailureCounts.delete(repo.id);
       result.success++;
       console.log(
         `[backfill] ${repo.id}: done (${result.success}/${result.total}, rl=${getRateLimitState().remaining})`
       );
     } catch (error: any) {
-      await handleBackfillRepoFailure(repo, error);
+      const normalizedError = await handleBackfillRepoFailure(
+        repo,
+        error,
+        healthSummary
+      );
       result.failed++;
-      result.errors.push({ repo: repo.id, error: error.message });
-      console.error(`[backfill] ${repo.id}: failed — ${error.message}`);
+      result.errors.push({ repo: repo.id, error: normalizedError });
+      console.error(`[backfill] ${repo.id}: failed — ${normalizedError}`);
     }
   }
 
   console.log(
     `[backfill] Complete: ${result.success} ok, ${result.failed} failed, ${result.skipped} skipped`
+  );
+  console.log(
+    `[github-repo-health] scope=ingestion.github-backfill unresolvedSeen=${healthSummary.unresolvedSeen} unresolvedDeactivated=${healthSummary.unresolvedDeactivated} transientSeen=${healthSummary.transientSeen} transientDeactivated=${healthSummary.transientDeactivated}`
   );
   return result;
 }
@@ -189,21 +217,48 @@ function isTransientBackfillFailure(error: unknown): boolean {
 
 async function handleBackfillRepoFailure(
   repo: GithubRepository,
-  error: unknown
-): Promise<void> {
+  error: unknown,
+  healthSummary: BackfillHealthSummary
+): Promise<string> {
+  if (isRepoUnresolvedInGraphQLError(error, `${repo.owner}/${repo.name}`)) {
+    backfillTransientFailureCounts.delete(repo.id);
+    const nextCount = (backfillUnresolvedFailureCounts.get(repo.id) ?? 0) + 1;
+    backfillUnresolvedFailureCounts.set(repo.id, nextCount);
+    healthSummary.unresolvedSeen += 1;
+    console.warn(
+      `[github-repo-health] action=unresolved scope=ingestion.github-backfill repo=${repo.id} count=${nextCount} threshold=${unresolvedRepoDisableThreshold}`
+    );
+
+    if (nextCount >= unresolvedRepoDisableThreshold) {
+      const deactivated = await prisma.githubRepository.updateMany({
+        where: { id: repo.id, isActive: true },
+        data: { isActive: false },
+      });
+      if (deactivated.count > 0) {
+        healthSummary.unresolvedDeactivated += 1;
+        console.warn(
+          `[github-repo-health] action=deactivate scope=ingestion.github-backfill repo=${repo.id} reason=unresolved-repo count=${nextCount}`
+        );
+      }
+    }
+
+    return unresolvedBackfillErrorMessage;
+  }
+
   if (!isTransientBackfillFailure(error)) {
     backfillTransientFailureCounts.delete(repo.id);
-    return;
+    return String((error as { message?: string })?.message ?? "Unknown error");
   }
 
   const nextCount = (backfillTransientFailureCounts.get(repo.id) ?? 0) + 1;
   backfillTransientFailureCounts.set(repo.id, nextCount);
+  healthSummary.transientSeen += 1;
   console.warn(
     `[github-repo-health] action=transient-backfill-failure repo=${repo.id} count=${nextCount} threshold=${backfillTransientFailureThreshold}`
   );
 
   if (nextCount < backfillTransientFailureThreshold) {
-    return;
+    return String((error as { message?: string })?.message ?? "Unknown error");
   }
 
   const deactivated = await prisma.githubRepository.updateMany({
@@ -211,10 +266,13 @@ async function handleBackfillRepoFailure(
     data: { isActive: false },
   });
   if (deactivated.count > 0) {
+    healthSummary.transientDeactivated += 1;
     console.warn(
       `[github-repo-health] action=deactivate scope=ingestion.github-backfill repo=${repo.id} reason=consecutive-transient-failures count=${nextCount}`
     );
   }
+
+  return String((error as { message?: string })?.message ?? "Unknown error");
 }
 
 // ─── Per-Repo Backfill ───────────────────────────────────────────────────────

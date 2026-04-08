@@ -93,7 +93,7 @@ async function loadSyncOnReadHarness(options: HarnessOptions) {
     success: true,
     downstream: {
       votes: { success: true },
-      votingPower: { success: true, summaryFound: true },
+      votingPower: { success: true, summaryFound: true, outcome: "updated" },
     },
     proposal: {
       id: 1,
@@ -103,6 +103,7 @@ async function loadSyncOnReadHarness(options: HarnessOptions) {
     stats: {
       votesProcessed: 1,
       votesIngested: 1,
+      votesUpserted: 1,
       votesUpdated: 0,
       votersCreated: { dreps: 0, spos: 0, ccs: 0 },
       votersUpdated: { dreps: 0, spos: 0, ccs: 0 },
@@ -208,7 +209,7 @@ describe("sync-on-read retryability", () => {
         success: false,
         downstream: {
           votes: { success: false, error: "vote sync failed" },
-          votingPower: { success: true, summaryFound: true },
+          votingPower: { success: true, summaryFound: true, outcome: "updated" },
         },
         proposal: {
           id: 1,
@@ -218,6 +219,7 @@ describe("sync-on-read retryability", () => {
         stats: {
           votesProcessed: 1,
           votesIngested: 0,
+          votesUpserted: 0,
           votesUpdated: 0,
           votersCreated: { dreps: 0, spos: 0, ccs: 0 },
           votersUpdated: { dreps: 0, spos: 0, ccs: 0 },
@@ -251,7 +253,7 @@ describe("sync-on-read retryability", () => {
         success: true,
         downstream: {
           votes: { success: true },
-          votingPower: { success: true, summaryFound: true },
+          votingPower: { success: true, summaryFound: true, outcome: "updated" },
         },
         proposal: {
           id: 1,
@@ -261,6 +263,7 @@ describe("sync-on-read retryability", () => {
         stats: {
           votesProcessed: 1,
           votesIngested: 1,
+          votesUpserted: 1,
           votesUpdated: 0,
           votersCreated: { dreps: 0, spos: 0, ccs: 0 },
           votersUpdated: { dreps: 0, spos: 0, ccs: 0 },
