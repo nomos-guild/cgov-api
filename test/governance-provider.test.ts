@@ -1,11 +1,16 @@
 const mockGetKoiosProposalList = jest.fn();
 const mockKoiosGet = jest.fn();
 const mockKoiosPost = jest.fn();
+const mockGetKoiosPressureState = jest.fn();
+const mockKoiosGetAll = jest.fn();
 
 jest.mock("../src/services/koios", () => ({
   getKoiosProposalList: (...args: unknown[]) => mockGetKoiosProposalList(...args),
   koiosGet: (...args: unknown[]) => mockKoiosGet(...args),
   koiosPost: (...args: unknown[]) => mockKoiosPost(...args),
+  koiosGetAll: (...args: unknown[]) => mockKoiosGetAll(...args),
+  getKoiosPressureState: (...args: unknown[]) =>
+    mockGetKoiosPressureState(...args),
 }));
 
 import {
@@ -27,6 +32,15 @@ describe("governanceProvider", () => {
     mockGetKoiosProposalList.mockReset();
     mockKoiosGet.mockReset();
     mockKoiosPost.mockReset();
+    mockGetKoiosPressureState.mockReset();
+    mockKoiosGetAll.mockReset();
+    mockGetKoiosPressureState.mockReturnValue({
+      active: false,
+      remainingMs: 0,
+      observedErrors: 0,
+      threshold: 10,
+      windowMs: 60000,
+    });
   });
 
   function buildRows<T>(count: number, createRow: (index: number) => T): T[] {
@@ -168,7 +182,7 @@ describe("governanceProvider", () => {
       "/drep_updates",
       {
         _drep_id: "drep1",
-        order: "block_time.asc,update_tx_hash.asc",
+        order: "block_time.desc,update_tx_hash.desc",
         limit: 1000,
         offset: 0,
         select: "drep_id,action,block_time,update_tx_hash,meta_json",
@@ -180,7 +194,7 @@ describe("governanceProvider", () => {
       "/drep_updates",
       {
         _drep_id: "drep1",
-        order: "block_time.asc,update_tx_hash.asc",
+        order: "block_time.desc,update_tx_hash.desc",
         limit: 1000,
         offset: 1000,
         select: "drep_id,action,block_time,update_tx_hash,meta_json",

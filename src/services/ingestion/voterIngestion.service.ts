@@ -35,6 +35,11 @@ export interface EnsureVoterResult {
   updated: boolean;
 }
 
+export interface VoteVoterRef {
+  voterRole: "DRep" | "SPO" | "ConstitutionalCommittee";
+  voterId: string;
+}
+
 // Cache Koios lookups across a single bulk run so repeated voters do not fan out.
 const drepInfoCache = new Map<string, KoiosDrepInfo | undefined>();
 const drepVotingPowerCache = new Map<string, bigint>();
@@ -66,6 +71,85 @@ export function clearVoterKoiosCaches(): void {
   drepVotingPowerCache.clear();
   spoInfoCache.clear();
   spoVotingPowerCache.clear();
+}
+
+function getVoterCacheKey(voterRole: VoteVoterRef["voterRole"], voterId: string): string {
+  return `${voterRole}:${voterId}`;
+}
+
+/**
+ * Preloads missing voters for a vote window so the hot per-vote loop can avoid
+ * repeating ensure/fetch work for duplicate voter identities.
+ */
+export async function preloadVotersForVotes(
+  voters: VoteVoterRef[],
+  tx: IngestionDbClient
+): Promise<Map<string, EnsureVoterResult>> {
+  const refsByKey = new Map<string, VoteVoterRef>();
+  for (const voter of voters) {
+    if (!voter?.voterId) continue;
+    const key = getVoterCacheKey(voter.voterRole, voter.voterId);
+    refsByKey.set(key, voter);
+  }
+
+  const drepIds: string[] = [];
+  const spoIds: string[] = [];
+  const ccIds: string[] = [];
+  for (const voter of refsByKey.values()) {
+    if (voter.voterRole === "DRep") drepIds.push(voter.voterId);
+    else if (voter.voterRole === "SPO") spoIds.push(voter.voterId);
+    else ccIds.push(voter.voterId);
+  }
+
+  const [existingDreps, existingSpos, existingCcs] = await Promise.all([
+    drepIds.length > 0
+      ? tx.drep.findMany({
+          where: { drepId: { in: drepIds } },
+          select: { drepId: true },
+        })
+      : Promise.resolve([]),
+    spoIds.length > 0
+      ? tx.sPO.findMany({
+          where: { poolId: { in: spoIds } },
+          select: { poolId: true },
+        })
+      : Promise.resolve([]),
+    ccIds.length > 0
+      ? tx.cC.findMany({
+          where: { ccId: { in: ccIds } },
+          select: { ccId: true },
+        })
+      : Promise.resolve([]),
+  ]);
+
+  const existingKeys = new Set<string>();
+  for (const row of existingDreps) {
+    existingKeys.add(getVoterCacheKey("DRep", row.drepId));
+  }
+  for (const row of existingSpos) {
+    existingKeys.add(getVoterCacheKey("SPO", row.poolId));
+  }
+  for (const row of existingCcs) {
+    existingKeys.add(getVoterCacheKey("ConstitutionalCommittee", row.ccId));
+  }
+
+  const preloaded = new Map<string, EnsureVoterResult>();
+  for (const [key, ref] of refsByKey.entries()) {
+    if (!existingKeys.has(key)) continue;
+    preloaded.set(key, {
+      voterId: ref.voterId,
+      created: false,
+      updated: false,
+    });
+  }
+
+  const missing = [...refsByKey.entries()].filter(([key]) => !existingKeys.has(key));
+  for (const [key, ref] of missing) {
+    const ensured = await ensureVoterExists(ref.voterRole, ref.voterId, tx);
+    preloaded.set(key, ensured);
+  }
+
+  return preloaded;
 }
 
 /**

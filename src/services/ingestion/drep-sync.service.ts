@@ -12,6 +12,7 @@ import {
   listAllDrepIds,
   listAllDrepUpdates,
 } from "../governanceProvider";
+import type { KoiosDrepUpdate } from "../../types/koios.types";
 import {
   KOIOS_DREP_INFO_BATCH_SIZE,
   DREP_INFO_SYNC_CONCURRENCY,
@@ -79,70 +80,88 @@ interface DrepMetadata {
   references?: string;
 }
 
+function normalizeReferences(value: unknown): string | undefined {
+  if (typeof value === "string") {
+    return value;
+  }
+  if (value != null) {
+    try {
+      return JSON.stringify(value);
+    } catch {
+      return undefined;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Select latest non-empty metadata fields from DRep updates.
+ * Updates are expected in newest-first order (block_time.desc, tx_hash.desc).
+ */
+export function selectLatestDrepMetadataFromUpdates(
+  drepUpdates: KoiosDrepUpdate[] | null | undefined
+): DrepMetadata {
+  const metadata: DrepMetadata = {};
+  if (!Array.isArray(drepUpdates) || drepUpdates.length === 0) {
+    return metadata;
+  }
+
+  for (const update of drepUpdates) {
+    const body = update?.meta_json?.body;
+    if (!body) continue;
+
+    if (!metadata.name && body.givenName !== undefined) {
+      metadata.name = extractStringField(body.givenName);
+    }
+    if (!metadata.paymentAddr && body.paymentAddress !== undefined) {
+      metadata.paymentAddr = extractStringField(body.paymentAddress);
+    }
+    if (!metadata.iconUrl && body.image?.contentUrl !== undefined) {
+      metadata.iconUrl = extractStringField(body.image.contentUrl);
+    }
+    if (metadata.doNotList === undefined && body.doNotList !== undefined) {
+      metadata.doNotList = extractBooleanField(body.doNotList);
+    }
+    if (!metadata.bio && body.bio !== undefined) {
+      metadata.bio = extractStringField(body.bio);
+    }
+    if (!metadata.motivations && body.motivations !== undefined) {
+      metadata.motivations = extractStringField(body.motivations);
+    }
+    if (!metadata.objectives && body.objectives !== undefined) {
+      metadata.objectives = extractStringField(body.objectives);
+    }
+    if (!metadata.qualifications && body.qualifications !== undefined) {
+      metadata.qualifications = extractStringField(body.qualifications);
+    }
+    if (!metadata.references && body.references !== undefined) {
+      metadata.references = normalizeReferences(body.references);
+    }
+
+    if (
+      metadata.name &&
+      metadata.paymentAddr &&
+      metadata.iconUrl &&
+      metadata.doNotList !== undefined &&
+      metadata.bio &&
+      metadata.motivations &&
+      metadata.objectives &&
+      metadata.qualifications &&
+      metadata.references
+    ) {
+      break;
+    }
+  }
+
+  return metadata;
+}
+
 async function fetchDrepMetadata(drepId: string): Promise<DrepMetadata> {
   try {
     const drepUpdates = await listAllDrepUpdates(drepId, {
       source: "ingestion.drep-sync.drep-updates",
     });
-
-    let name: string | undefined;
-    let paymentAddr: string | undefined;
-    let iconUrl: string | undefined;
-    let doNotList: boolean | undefined;
-    let bio: string | undefined;
-    let motivations: string | undefined;
-    let objectives: string | undefined;
-    let qualifications: string | undefined;
-    let references: string | undefined;
-
-    for (const update of drepUpdates || []) {
-      const body = update.meta_json?.body;
-      if (!body) continue;
-
-      if (!name && body.givenName !== undefined) {
-        name = extractStringField(body.givenName);
-      }
-      if (!paymentAddr && body.paymentAddress !== undefined) {
-        paymentAddr = extractStringField(body.paymentAddress);
-      }
-      if (!iconUrl && body.image?.contentUrl !== undefined) {
-        iconUrl = extractStringField(body.image.contentUrl);
-      }
-      if (doNotList === undefined && body.doNotList !== undefined) {
-        doNotList = extractBooleanField(body.doNotList);
-      }
-      if (!bio && body.bio !== undefined) {
-        bio = extractStringField(body.bio);
-      }
-      if (!motivations && body.motivations !== undefined) {
-        motivations = extractStringField(body.motivations);
-      }
-      if (!objectives && body.objectives !== undefined) {
-        objectives = extractStringField(body.objectives);
-      }
-      if (!qualifications && body.qualifications !== undefined) {
-        qualifications = extractStringField(body.qualifications);
-      }
-      if (!references && body.references !== undefined) {
-        // references can be an array of objects; store as JSON string
-        if (typeof body.references === "string") {
-          references = body.references;
-        } else if (body.references != null) {
-          try {
-            references = JSON.stringify(body.references);
-          } catch {
-            // skip if not serializable
-          }
-        }
-      }
-
-      if (name && paymentAddr && iconUrl && doNotList !== undefined &&
-          bio && motivations && objectives && qualifications && references) {
-        break;
-      }
-    }
-
-    return { name, paymentAddr, iconUrl, doNotList, bio, motivations, objectives, qualifications, references };
+    return selectLatestDrepMetadataFromUpdates(drepUpdates);
   } catch {
     return {};
   }
@@ -317,26 +336,40 @@ export async function syncAllDrepsInfo(
         continue;
       }
 
+      const metadataCandidates = infos.filter((info) => {
+        if (!info?.drep_id) return false;
+        const existing = existingState.get(info.drep_id);
+        return info.meta_hash !== existing?.metaHash || existing?.name == null;
+      });
+      const metadataByDrepId = new Map<string, DrepMetadata>();
+      if (metadataCandidates.length > 0) {
+        metadataFetched += metadataCandidates.length;
+        const metadataFetchResult = await processInParallel(
+          metadataCandidates,
+          (info) => info?.drep_id ?? "",
+          async (info) => {
+            if (!info?.drep_id) return null;
+            const metadata = await fetchDrepMetadata(info.drep_id);
+            metadataByDrepId.set(info.drep_id, metadata);
+            return info;
+          },
+          Math.max(1, Math.floor(DREP_INFO_SYNC_CONCURRENCY / 2))
+        );
+        if (metadataFetchResult.failed.length > 0) {
+          failedBatches++;
+          console.warn(
+            `[DRep Sync] Failed metadata fetches in batch: ${metadataFetchResult.failed.length}`
+          );
+        }
+      }
+      metadataSkipped += infos.length - metadataCandidates.length;
+
       const updateResult = await processInParallel(
         infos,
         (info) => info?.drep_id ?? "",
         async (info) => {
           if (!info?.drep_id) return null;
-
-          const existing = existingState.get(info.drep_id);
-
-          // Only fetch metadata from /drep_updates if the hash changed or we never fetched it
-          const metadataChanged =
-            info.meta_hash !== existing?.metaHash ||
-            existing?.name == null;
-
-          let metadata: DrepMetadata = {};
-          if (metadataChanged) {
-            metadata = await fetchDrepMetadata(info.drep_id);
-            metadataFetched++;
-          } else {
-            metadataSkipped++;
-          }
+          const metadata = metadataByDrepId.get(info.drep_id) ?? {};
 
           await prisma.drep.update({
             where: { drepId: info.drep_id },

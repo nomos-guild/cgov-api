@@ -1029,11 +1029,26 @@ export async function koiosGetAll<T>(
 ): Promise<T[]> {
   const results: T[] = [];
   let offset = 0;
+  const endpoint = normalizeKoiosEndpoint(url);
+  const isHighVolumeEndpoint = KOIOS_HIGH_VOLUME_ENDPOINTS.has(endpoint);
+  let isFirstPage = true;
 
   while (true) {
+    const pressureState = getKoiosPressureState();
+    const adaptiveLimit =
+      isHighVolumeEndpoint && pressureState.active
+        ? Math.max(200, Math.floor(KOIOS_MAX_PAGE_LIMIT / 2))
+        : KOIOS_MAX_PAGE_LIMIT;
+    const adaptiveDelayMs =
+      isHighVolumeEndpoint && pressureState.active ? 150 : 0;
+    if (!isFirstPage && adaptiveDelayMs > 0) {
+      await sleep(adaptiveDelayMs);
+    }
+    isFirstPage = false;
+
     const pageParams = {
       ...params,
-      limit: KOIOS_MAX_PAGE_LIMIT,
+      limit: adaptiveLimit,
       offset,
     };
     const { data, contentRange } = await koiosGetInternal<T[]>(
@@ -1052,18 +1067,18 @@ export async function koiosGetAll<T>(
       if (match) {
         const lower = parseInt(match[1], 10);
         const upper = parseInt(match[2], 10);
-        if (upper - lower + 1 < KOIOS_MAX_PAGE_LIMIT) {
+        if (upper - lower + 1 < adaptiveLimit) {
           break;
         }
       }
     }
 
     // Fall back to item count: a short page means no more records.
-    if (!Array.isArray(data) || data.length < KOIOS_MAX_PAGE_LIMIT) {
+    if (!Array.isArray(data) || data.length < adaptiveLimit) {
       break;
     }
 
-    offset += KOIOS_MAX_PAGE_LIMIT;
+    offset += adaptiveLimit;
   }
 
   return results;

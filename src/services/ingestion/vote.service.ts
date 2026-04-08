@@ -9,7 +9,11 @@ import { getKoiosPressureState } from "../koios";
 import { listVotes } from "../governanceProvider";
 import { fetchJsonWithBrowserLikeClient } from "../remoteMetadata.service";
 import { fetchTxMetadataByHash } from "../txMetadata.service";
-import { ensureVoterExists } from "./voterIngestion.service";
+import {
+  ensureVoterExists,
+  preloadVotersForVotes,
+  type VoteVoterRef,
+} from "./voterIngestion.service";
 import {
   recordDbFailureForFailFast,
   shouldFailFastForDb,
@@ -164,6 +168,47 @@ const VOTE_INGEST_DB_CONCURRENCY = getBoundedIntEnvLocal(
   1,
   20
 );
+const VOTE_INGEST_PAGE_SIZE = 1000;
+const VOTE_INGEST_CHECKPOINT_JOB_PREFIX = "vote-ingest-window";
+
+interface VoteIngestionCheckpoint {
+  proposalId: string;
+  minEpoch: number | null;
+  nextOffset: number;
+  processedVotes: number;
+  updatedAt: string;
+}
+
+function getVoteIngestionJobName(proposalId: string): string {
+  return `${VOTE_INGEST_CHECKPOINT_JOB_PREFIX}:${proposalId}`;
+}
+
+function parseCheckpoint(raw: string | null | undefined): VoteIngestionCheckpoint | null {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as Partial<VoteIngestionCheckpoint>;
+    if (
+      typeof parsed?.proposalId === "string" &&
+      typeof parsed?.nextOffset === "number" &&
+      typeof parsed?.processedVotes === "number"
+    ) {
+      return {
+        proposalId: parsed.proposalId,
+        minEpoch:
+          typeof parsed.minEpoch === "number" ? parsed.minEpoch : null,
+        nextOffset: parsed.nextOffset,
+        processedVotes: parsed.processedVotes,
+        updatedAt:
+          typeof parsed.updatedAt === "string"
+            ? parsed.updatedAt
+            : new Date().toISOString(),
+      };
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
 
 /**
  * Clears the vote cache - should be called at the start of each sync
@@ -230,76 +275,21 @@ export async function ingestVotesForProposal(
   };
 
   const useCache = options?.useCache !== false;
+  const runCache = options?.runCache;
   const candidatePrefetchedVotes = options?.prefetchedVotes;
   const prefetchedVotes =
     VOTE_INGEST_USE_PREFETCHED && Array.isArray(candidatePrefetchedVotes)
       ? candidatePrefetchedVotes
       : undefined;
+  let checkpointState: VoteIngestionCheckpoint = {
+    proposalId,
+    minEpoch: typeof minEpoch === "number" ? minEpoch : null,
+    nextOffset: 0,
+    processedVotes: 0,
+    updatedAt: new Date().toISOString(),
+  };
 
   try {
-    let koiosVotes: KoiosVote[] = [];
-
-    if (prefetchedVotes) {
-      koiosVotes = prefetchedVotes;
-      console.log(
-        `[Vote Ingestion] metric=vote_ingest.prefetched_votes_used proposal=${proposalId} enabled=true count=${koiosVotes.length}`
-      );
-    } else if (useCache) {
-      const runCache = options?.runCache;
-      if (!runCache) {
-        console.warn(
-          `[Vote Ingestion] action=proposal-cache-missing proposal=${proposalId} message=run cache not provided; fetching directly`
-        );
-        koiosVotes = await fetchVotesWithPagination(proposalId, minEpoch);
-      } else {
-        const cacheKey = getProposalVoteCacheKey(proposalId, minEpoch);
-        const cachedVotes = runCache.proposalVotes.get(cacheKey);
-        if (cachedVotes) {
-          koiosVotes = cachedVotes;
-        } else {
-          let inFlight = runCache.proposalVotesInFlight.get(cacheKey);
-          if (!inFlight) {
-            inFlight = fetchVotesWithPagination(proposalId, minEpoch).then(
-              (proposalVotes) => {
-                runCache.proposalVotes.set(cacheKey, proposalVotes);
-                console.log(
-                  `[Vote Ingestion] ✓ Fetched ${proposalVotes.length} votes for proposal ${proposalId}`
-                );
-                return proposalVotes;
-              }
-            );
-            runCache.proposalVotesInFlight.set(cacheKey, inFlight);
-          } else {
-            console.log(
-              `[Vote Ingestion] action=single-flight-join proposal=${proposalId}`
-            );
-          }
-
-          try {
-            koiosVotes = await inFlight;
-          } finally {
-            runCache.proposalVotesInFlight.delete(cacheKey);
-          }
-        }
-      }
-    } else {
-      koiosVotes = await fetchVotesWithPagination(proposalId, minEpoch);
-    }
-
-    if (koiosVotes.length === 0) {
-      console.log(
-        `[Vote Ingestion] No votes found for proposal ${proposalId}`
-      );
-      return {
-        success: true,
-        stats,
-      };
-    }
-
-    console.log(
-      `[Vote Ingestion] Found ${koiosVotes.length} votes for proposal ${proposalId}`
-    );
-
     const proposalSurveyContext = await db.proposal.findUnique({
       where: { proposalId },
       select: { linkedSurveyTxId: true },
@@ -322,29 +312,132 @@ export async function ingestVotesForProposal(
       `[Vote Ingestion] metric=vote_ingest.db_write_concurrency proposal=${proposalId} concurrency=${VOTE_INGEST_DB_CONCURRENCY}`
     );
 
-    // Process votes in bounded chunks to reduce per-proposal ingestion time
-    // while avoiding unbounded pressure on Koios and the database.
-    for (
-      let startIndex = 0;
-      startIndex < koiosVotes.length;
-      startIndex += VOTE_INGEST_DB_CONCURRENCY
-    ) {
-      const batch = koiosVotes.slice(
-        startIndex,
-        startIndex + VOTE_INGEST_DB_CONCURRENCY
+    let totalVoteRequests = 0;
+    let pagesProcessed = 0;
+    let totalVotesFetched = 0;
+
+    const processVoteWindow = async (voteWindow: KoiosVote[]) => {
+      if (voteWindow.length === 0) return;
+      const preloadedVoters = await preloadVotersForVotes(
+        extractVoterRefs(voteWindow),
+        db
       );
-      await Promise.all(
-        batch.map((koiosVote) =>
-          ingestSingleVote(
-            koiosVote,
-            proposalId,
-            db,
-            stats,
-            shouldFetchSurveyMetadata
+
+      for (
+        let startIndex = 0;
+        startIndex < voteWindow.length;
+        startIndex += VOTE_INGEST_DB_CONCURRENCY
+      ) {
+        const batch = voteWindow.slice(
+          startIndex,
+          startIndex + VOTE_INGEST_DB_CONCURRENCY
+        );
+        await Promise.all(
+          batch.map((koiosVote) =>
+            ingestSingleVote(
+              koiosVote,
+              proposalId,
+              db,
+              stats,
+              shouldFetchSurveyMetadata,
+              preloadedVoters
+            )
           )
-        )
+        );
+      }
+    };
+
+    if (prefetchedVotes) {
+      console.log(
+        `[Vote Ingestion] metric=vote_ingest.prefetched_votes_used proposal=${proposalId} enabled=true count=${prefetchedVotes.length}`
       );
+      pagesProcessed = prefetchedVotes.length > 0 ? 1 : 0;
+      totalVotesFetched = prefetchedVotes.length;
+      await processVoteWindow(prefetchedVotes);
+    } else {
+      if (useCache && !runCache) {
+        console.warn(
+          `[Vote Ingestion] action=proposal-cache-missing proposal=${proposalId} message=run cache not provided; proceeding with streaming fetch`
+        );
+      }
+      const checkpoint = await loadVoteCheckpoint(proposalId, minEpoch);
+      checkpointState = checkpoint;
+      let offset = checkpoint.nextOffset;
+      stats.votesProcessed = Math.max(stats.votesProcessed, checkpoint.processedVotes);
+
+      if (offset > 0) {
+        console.log(
+          `[Vote Ingestion] action=resume proposal=${proposalId} nextOffset=${offset} processedVotes=${checkpoint.processedVotes}`
+        );
+      }
+
+      if (runCache) {
+        const cacheKey = getProposalVoteCacheKey(proposalId, minEpoch);
+        const inFlight = runCache.proposalVotesInFlight.get(cacheKey);
+        if (inFlight) {
+          console.log(
+            `[Vote Ingestion] action=single-flight-join proposal=${proposalId}`
+          );
+          await inFlight;
+          return { success: true, stats };
+        }
+      }
+
+      let streamPromise: Promise<KoiosVote[]> | null = null;
+      while (true) {
+        totalVoteRequests++;
+        streamPromise = fetchVotePage(proposalId, offset, minEpoch);
+        if (runCache) {
+          const cacheKey = getProposalVoteCacheKey(proposalId, minEpoch);
+          runCache.proposalVotesInFlight.set(cacheKey, streamPromise);
+        }
+        const voteWindow = await streamPromise;
+        if (runCache) {
+          const cacheKey = getProposalVoteCacheKey(proposalId, minEpoch);
+          runCache.proposalVotesInFlight.delete(cacheKey);
+        }
+
+        if (!voteWindow || voteWindow.length === 0) break;
+
+        pagesProcessed++;
+        totalVotesFetched += voteWindow.length;
+        await processVoteWindow(voteWindow);
+        offset += voteWindow.length;
+
+        checkpointState = {
+          proposalId,
+          minEpoch: typeof minEpoch === "number" ? minEpoch : null,
+          nextOffset: offset,
+          processedVotes: stats.votesProcessed,
+          updatedAt: new Date().toISOString(),
+        };
+        await saveVoteCheckpoint(
+          proposalId,
+          checkpointState,
+          {
+            isRunning: true,
+            completedAt: null,
+            lastResult: "partial",
+            errorMessage: null,
+          }
+        );
+
+        console.log(
+          `[Vote Ingestion] action=window-complete proposal=${proposalId} page=${pagesProcessed} windowSize=${voteWindow.length} totalProcessed=${stats.votesProcessed} nextOffset=${offset}`
+        );
+
+        if (voteWindow.length < VOTE_INGEST_PAGE_SIZE) break;
+      }
+
+      if (totalVotesFetched === 0) {
+        console.log(`[Vote Ingestion] No votes found for proposal ${proposalId}`);
+      }
+      await markVoteCheckpointComplete(proposalId, stats.votesProcessed);
     }
+
+    console.log(
+      `[Vote Ingestion] metric=koios.vote_list.requests_per_proposal proposal=${proposalId} source=ingestion.vote.ingest.proposal.vote-list count=${totalVoteRequests} pages=${pagesProcessed}`
+    );
   } catch (error: any) {
     recordDbFailureForFailFast(error, "ingestion.vote.ingest");
     // Vote ingestion errors remain non-fatal at this layer so later sync triggers
@@ -352,6 +445,20 @@ export async function ingestVotesForProposal(
     const errorMessage = error?.message ?? String(error);
     console.error(
       `[Vote Ingestion] action=partial-failure proposal=${proposalId} message=${errorMessage}`
+    );
+    await saveVoteCheckpoint(
+      proposalId,
+      {
+        ...checkpointState,
+        processedVotes: stats.votesProcessed,
+        updatedAt: new Date().toISOString(),
+      },
+      {
+        isRunning: false,
+        completedAt: null,
+        lastResult: "error",
+        errorMessage,
+      }
     );
     return {
       success: false,
@@ -379,52 +486,126 @@ function getProposalVoteCacheKey(
   return `${proposalId}:${typeof minEpoch === "number" ? minEpoch : "all"}`;
 }
 
-async function fetchVotesWithPagination(
+async function loadVoteCheckpoint(
   proposalId: string,
+  minEpoch: number | undefined
+): Promise<VoteIngestionCheckpoint> {
+  const jobName = getVoteIngestionJobName(proposalId);
+  const existingStatus = await (prisma as any).syncStatus.findUnique({
+    where: { jobName },
+  });
+  const parsed = parseCheckpoint(existingStatus?.backfillCursor ?? null);
+  if (
+    parsed &&
+    parsed.proposalId === proposalId &&
+    parsed.minEpoch === (typeof minEpoch === "number" ? minEpoch : null)
+  ) {
+    return parsed;
+  }
+  return {
+    proposalId,
+    minEpoch: typeof minEpoch === "number" ? minEpoch : null,
+    nextOffset: 0,
+    processedVotes: 0,
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+async function saveVoteCheckpoint(
+  proposalId: string,
+  checkpoint: VoteIngestionCheckpoint,
+  extras?: {
+    isRunning?: boolean;
+    completedAt?: Date | null;
+    lastResult?: "success" | "partial" | "error";
+    errorMessage?: string | null;
+  }
+): Promise<void> {
+  const now = new Date();
+  const jobName = getVoteIngestionJobName(proposalId);
+  await (prisma as any).syncStatus.upsert({
+    where: { jobName },
+    create: {
+      jobName,
+      displayName: `Vote Ingestion Window ${proposalId}`,
+      isRunning: extras?.isRunning ?? true,
+      startedAt: now,
+      completedAt: extras?.completedAt ?? null,
+      lastResult: extras?.lastResult,
+      itemsProcessed: checkpoint.processedVotes,
+      errorMessage: extras?.errorMessage ?? null,
+      backfillCursor: JSON.stringify({
+        ...checkpoint,
+        updatedAt: now.toISOString(),
+      }),
+    },
+    update: {
+      isRunning: extras?.isRunning ?? true,
+      completedAt: extras?.completedAt ?? null,
+      lastResult: extras?.lastResult,
+      itemsProcessed: checkpoint.processedVotes,
+      errorMessage: extras?.errorMessage ?? null,
+      backfillCursor: JSON.stringify({
+        ...checkpoint,
+        updatedAt: now.toISOString(),
+      }),
+    },
+  });
+}
+
+async function markVoteCheckpointComplete(
+  proposalId: string,
+  processedVotes: number
+): Promise<void> {
+  const jobName = getVoteIngestionJobName(proposalId);
+  await (prisma as any).syncStatus.upsert({
+    where: { jobName },
+    create: {
+      jobName,
+      displayName: `Vote Ingestion Window ${proposalId}`,
+      isRunning: false,
+      completedAt: new Date(),
+      lastResult: "success",
+      itemsProcessed: processedVotes,
+      errorMessage: null,
+      backfillCursor: null,
+    },
+    update: {
+      isRunning: false,
+      completedAt: new Date(),
+      lastResult: "success",
+      itemsProcessed: processedVotes,
+      errorMessage: null,
+      backfillCursor: null,
+    },
+  });
+}
+
+async function fetchVotePage(
+  proposalId: string,
+  offset: number,
   minEpoch?: number
 ): Promise<KoiosVote[]> {
-  let allVotes: KoiosVote[] = [];
-  let offset = 0;
-  const limit = 1000;
-  let hasMore = true;
-  let requestCount = 0;
+  return listVotes({
+    proposalId,
+    minEpoch,
+    limit: VOTE_INGEST_PAGE_SIZE,
+    offset,
+    order: "block_time.asc,vote_tx_hash.asc",
+    source: "ingestion.vote.ingest.proposal.vote-list",
+  });
+}
 
-  console.log(
-    `[Vote Ingestion] Fetching votes for proposal ${proposalId}${
-      typeof minEpoch === "number" ? ` from epoch >= ${minEpoch}` : ""
-    }...`
-  );
-
-  while (hasMore) {
-    requestCount++;
-    const batch = await listVotes({
-      proposalId,
-      minEpoch,
-      limit,
-      offset,
-      order: "block_time.asc,vote_tx_hash.asc",
-      source: "ingestion.vote.ingest.proposal.vote-list",
+function extractVoterRefs(votes: KoiosVote[]): VoteVoterRef[] {
+  const refs: VoteVoterRef[] = [];
+  for (const vote of votes) {
+    if (!vote?.voter_id || !vote?.voter_role) continue;
+    refs.push({
+      voterRole: vote.voter_role,
+      voterId: vote.voter_id,
     });
-
-    if (!batch || batch.length === 0) {
-      hasMore = false;
-      continue;
-    }
-
-    allVotes = allVotes.concat(batch);
-    offset += batch.length;
-    console.log(`[Vote Ingestion]   Fetched ${allVotes.length} votes so far...`);
-
-    if (batch.length < limit) {
-      hasMore = false;
-    }
   }
-
-  console.log(
-    `[Vote Ingestion] metric=koios.vote_list.requests_per_proposal proposal=${proposalId} source=ingestion.vote.ingest.proposal.vote-list count=${requestCount}`
-  );
-
-  return allVotes;
+  return refs;
 }
 
 /**
@@ -435,22 +616,27 @@ async function ingestSingleVote(
   proposalId: string,
   db: IngestionDbClient,
   stats: VoteIngestionStats,
-  shouldFetchSurveyMetadata: boolean
+  shouldFetchSurveyMetadata: boolean,
+  preloadedVoters?: Map<string, { voterId: string; created: boolean; updated: boolean }>
 ): Promise<void> {
   stats.votesProcessed++;
   // 1. Ensure voter exists (creates if needed, updates voting power)
-  const voterResult = await ensureVoterExists(
-    koiosVote.voter_role,
-    koiosVote.voter_id,
-    db
-  );
+  const preloadedKey = `${koiosVote.voter_role}:${koiosVote.voter_id}`;
+  const preloaded = preloadedVoters?.get(preloadedKey);
+  const voterResult =
+    preloaded ??
+    (await ensureVoterExists(
+      koiosVote.voter_role,
+      koiosVote.voter_id,
+      db
+    ));
 
   // Update stats for voter creation/update
-  if (voterResult.created) {
+  if (!preloaded && voterResult.created) {
     if (koiosVote.voter_role === "DRep") stats.votersCreated.dreps++;
     else if (koiosVote.voter_role === "SPO") stats.votersCreated.spos++;
     else stats.votersCreated.ccs++;
-  } else if (voterResult.updated) {
+  } else if (!preloaded && voterResult.updated) {
     if (koiosVote.voter_role === "DRep") stats.votersUpdated.dreps++;
     else if (koiosVote.voter_role === "SPO") stats.votersUpdated.spos++;
     else stats.votersUpdated.ccs++;
