@@ -1025,9 +1025,13 @@ export async function koiosGet<T>(
 export async function koiosGetAll<T>(
   url: string,
   params?: any,
-  context?: KoiosRequestContext
+  context?: KoiosRequestContext,
+  options?: {
+    overlapRows?: number;
+    dedupeKey?: (row: T) => string;
+  }
 ): Promise<T[]> {
-  const results: T[] = [];
+  const passOneResults: T[] = [];
   let offset = 0;
   const endpoint = normalizeKoiosEndpoint(url);
   const isHighVolumeEndpoint = KOIOS_HIGH_VOLUME_ENDPOINTS.has(endpoint);
@@ -1058,7 +1062,7 @@ export async function koiosGetAll<T>(
     );
 
     if (Array.isArray(data) && data.length > 0) {
-      results.push(...data);
+      passOneResults.push(...data);
     }
 
     // Use Content-Range to detect the last page when available.
@@ -1081,7 +1085,79 @@ export async function koiosGetAll<T>(
     offset += adaptiveLimit;
   }
 
-  return results;
+  const overlapRows = Math.max(0, options?.overlapRows ?? 0);
+  if (overlapRows === 0 || passOneResults.length === 0) {
+    return passOneResults;
+  }
+
+  const overlapOffset = Math.max(0, passOneResults.length - overlapRows);
+  const passTwoResults: T[] = [];
+  offset = overlapOffset;
+  isFirstPage = true;
+
+  while (true) {
+    const pressureState = getKoiosPressureState();
+    const adaptiveLimit =
+      isHighVolumeEndpoint && pressureState.active
+        ? Math.max(200, Math.floor(KOIOS_MAX_PAGE_LIMIT / 2))
+        : KOIOS_MAX_PAGE_LIMIT;
+    const adaptiveDelayMs =
+      isHighVolumeEndpoint && pressureState.active ? 150 : 0;
+    if (!isFirstPage && adaptiveDelayMs > 0) {
+      await sleep(adaptiveDelayMs);
+    }
+    isFirstPage = false;
+
+    const pageParams = {
+      ...params,
+      limit: adaptiveLimit,
+      offset,
+    };
+    const { data, contentRange } = await koiosGetInternal<T[]>(
+      url,
+      pageParams,
+      context
+    );
+
+    if (!Array.isArray(data) || data.length === 0) {
+      break;
+    }
+
+    passTwoResults.push(...data);
+
+    if (contentRange) {
+      const match = /^(\d+)-(\d+)\//.exec(contentRange);
+      if (match) {
+        const lower = parseInt(match[1], 10);
+        const upper = parseInt(match[2], 10);
+        if (upper - lower + 1 < adaptiveLimit) {
+          break;
+        }
+      }
+    }
+    if (data.length < adaptiveLimit) {
+      break;
+    }
+    offset += adaptiveLimit;
+  }
+
+  const dedupeKey =
+    options?.dedupeKey ??
+    ((row: T) => {
+      try {
+        return JSON.stringify(row);
+      } catch {
+        return String(row);
+      }
+    });
+  const merged = new Map<string, T>();
+  for (const row of passOneResults) {
+    merged.set(dedupeKey(row), row);
+  }
+  for (const row of passTwoResults) {
+    merged.set(dedupeKey(row), row);
+  }
+  return Array.from(merged.values());
 }
 
 export async function getKoiosProposalList(options?: {

@@ -43,6 +43,7 @@ jest.mock("../src/services/prisma", () => ({
 }));
 
 import { ingestVotesForProposal } from "../src/services/ingestion/vote.service";
+import { prisma } from "../src/services/prisma";
 
 function createDbMock() {
   return {
@@ -80,6 +81,10 @@ describe("vote ingestion streaming/preload behavior", () => {
         ["DRep:drep1", { voterId: "drep1", created: false, updated: false }],
       ])
     );
+    (prisma as any).syncStatus.findUnique.mockReset();
+    (prisma as any).syncStatus.upsert.mockReset();
+    (prisma as any).syncStatus.findUnique.mockResolvedValue(null);
+    (prisma as any).syncStatus.upsert.mockResolvedValue({});
   });
 
   it("uses preloaded voters for prefetched vote windows", async () => {
@@ -111,6 +116,63 @@ describe("vote ingestion streaming/preload behavior", () => {
     expect(mockPreloadVotersForVotes).toHaveBeenCalledTimes(1);
     expect(mockEnsureVoterExists).not.toHaveBeenCalled();
     expect(db.onchainVote.upsert).toHaveBeenCalledTimes(2);
+  });
+
+  it("reconciles overlap windows without double processing duplicate votes", async () => {
+    const db = createDbMock();
+    mockListVotes
+      .mockResolvedValueOnce([
+        {
+          vote_tx_hash: "tx1",
+          voter_role: "DRep",
+          voter_id: "drep1",
+          vote: "Yes",
+          epoch_no: 600,
+          block_time: 100,
+        },
+        {
+          vote_tx_hash: "tx2",
+          voter_role: "DRep",
+          voter_id: "drep1",
+          vote: "No",
+          epoch_no: 600,
+          block_time: 101,
+        },
+      ])
+      .mockResolvedValueOnce([
+        {
+          vote_tx_hash: "tx2",
+          voter_role: "DRep",
+          voter_id: "drep1",
+          vote: "No",
+          epoch_no: 600,
+          block_time: 101,
+        },
+        {
+          vote_tx_hash: "tx3",
+          voter_role: "DRep",
+          voter_id: "drep1",
+          vote: "Yes",
+          epoch_no: 600,
+          block_time: 101,
+        },
+      ]);
+
+    const result = await ingestVotesForProposal("proposal1", db, undefined, {
+      useCache: false,
+    });
+
+    expect(result.success).toBe(true);
+    expect(db.onchainVote.upsert).toHaveBeenCalledTimes(3);
+    expect(mockListVotes).toHaveBeenCalledTimes(2);
+    expect(mockListVotes).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({ offset: 0, minBlockTime: undefined })
+    );
+    expect(mockListVotes).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ offset: 0, minBlockTime: 0 })
+    );
   });
 });
 

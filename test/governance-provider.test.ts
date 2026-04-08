@@ -20,6 +20,7 @@ import {
   getTxInfoBatch,
   getProposalVotingSummary,
   getDrepInfoBatchFromKoios,
+  listAllDrepDelegators,
   listAllDrepIds,
   listAllDrepUpdates,
   listAllPoolGroups,
@@ -265,15 +266,44 @@ describe("governanceProvider", () => {
     expect(rows).toHaveLength(1001);
     expect(mockKoiosPost).toHaveBeenNthCalledWith(
       1,
-      "/account_update_history?offset=0&limit=1000",
+      "/account_update_history?offset=0&limit=1000&order=epoch_no.asc,epoch_slot.asc,absolute_slot.asc,tx_hash.asc,stake_address.asc",
       { _stake_addresses: ["stake_test1", "stake_test2"] },
       { source: "test.account-history" }
     );
     expect(mockKoiosPost).toHaveBeenNthCalledWith(
       2,
-      "/account_update_history?offset=1000&limit=1000",
+      "/account_update_history?offset=1000&limit=1000&order=epoch_no.asc,epoch_slot.asc,absolute_slot.asc,tx_hash.asc,stake_address.asc",
       { _stake_addresses: ["stake_test1", "stake_test2"] },
       { source: "test.account-history" }
+    );
+    expect(mockKoiosPost).toHaveBeenNthCalledWith(
+      3,
+      "/account_update_history?offset=801&limit=1000&order=epoch_no.asc,epoch_slot.asc,absolute_slot.asc,tx_hash.asc,stake_address.asc",
+      { _stake_addresses: ["stake_test1", "stake_test2"] },
+      { source: "test.account-history" }
+    );
+  });
+
+  it("uses overlap-safe koiosGetAll flow for drep delegators", async () => {
+    mockKoiosGetAll.mockResolvedValue([{ stake_address: "stake_test1" }]);
+
+    const rows = await listAllDrepDelegators({
+      drepId: "drep1",
+      source: "test.delegators",
+    });
+
+    expect(rows).toEqual([{ stake_address: "stake_test1" }]);
+    expect(mockKoiosGetAll).toHaveBeenCalledWith(
+      "/drep_delegators",
+      {
+        _drep_id: "drep1",
+        order: "epoch_no.asc,stake_address.asc",
+        select: "stake_address,amount,epoch_no",
+      },
+      { source: "test.delegators" },
+      expect.objectContaining({
+        overlapRows: 200,
+      })
     );
   });
 
