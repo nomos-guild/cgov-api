@@ -12,6 +12,7 @@ import { fetchTxMetadataByHash } from "../txMetadata.service";
 import {
   ensureVoterExists,
   preloadVotersForVotes,
+  type EnsureVoterResult,
   type VoteVoterRef,
 } from "./voterIngestion.service";
 import {
@@ -23,6 +24,7 @@ import {
   extractSurveyResponse,
 } from "../../libs/surveyMetadata";
 import type { IngestionDbClient } from "./dbSession";
+import { withIngestionDbRead, withIngestionDbWrite } from "./dbSession";
 
 // Cache for vote metadata JSON keyed by anchor URL to avoid duplicate fetches
 const voteMetadataCache = new Map<string, string | null>();
@@ -30,7 +32,7 @@ const voteTxMetadataCache = new Map<string, Record<string, unknown> | Array<Reco
 
 export interface VoteIngestionRunCache {
   proposalVotes: Map<string, KoiosVote[]>;
-  proposalVotesInFlight: Map<string, Promise<KoiosVote[]>>;
+  proposalVotesInFlight: Map<string, Promise<VoteIngestionResult>>;
 }
 
 export function createVoteIngestionRunCache(): VoteIngestionRunCache {
@@ -330,12 +332,48 @@ export async function ingestVotesForProposal(
     processedVotes: 0,
     updatedAt: new Date().toISOString(),
   };
+  const runCacheKey = runCache
+    ? getProposalVoteCacheKey(proposalId, minEpoch)
+    : null;
+  if (runCache && runCacheKey) {
+    const inFlight = runCache.proposalVotesInFlight.get(runCacheKey);
+    if (inFlight) {
+      console.log(
+        `[Vote Ingestion] action=single-flight-join proposal=${proposalId}`
+      );
+      return await inFlight;
+    }
+  }
+  let resolveInFlight:
+    | ((result: VoteIngestionResult) => void)
+    | undefined;
+  const inFlightPromise =
+    runCache && runCacheKey
+      ? new Promise<VoteIngestionResult>((resolve) => {
+          resolveInFlight = resolve;
+        })
+      : null;
+  if (runCache && runCacheKey && inFlightPromise) {
+    runCache.proposalVotesInFlight.set(runCacheKey, inFlightPromise);
+  }
+  const completeResult = (result: VoteIngestionResult): VoteIngestionResult => {
+    resolveInFlight?.(result);
+    if (runCache && runCacheKey) {
+      runCache.proposalVotesInFlight.delete(runCacheKey);
+    }
+    return result;
+  };
 
   try {
-    const proposalSurveyContext = await db.proposal.findUnique({
-      where: { proposalId },
-      select: { linkedSurveyTxId: true },
-    });
+    const proposalSurveyContext = await withIngestionDbRead(
+      db,
+      `vote.ingest.proposal-context.${proposalId}`,
+      () =>
+        db.proposal.findUnique({
+          where: { proposalId },
+          select: { linkedSurveyTxId: true },
+        })
+    );
     const shouldFetchSurveyMetadata =
       options?.fetchSurveyMetadata !== false &&
       Boolean(proposalSurveyContext?.linkedSurveyTxId) &&
@@ -402,7 +440,7 @@ export async function ingestVotesForProposal(
           `[Vote Ingestion] action=proposal-cache-missing proposal=${proposalId} message=run cache not provided; proceeding with streaming fetch`
         );
       }
-      const checkpoint = await loadVoteCheckpoint(proposalId, minEpoch);
+      const checkpoint = await loadVoteCheckpoint(db, proposalId, minEpoch);
       checkpointState = checkpoint;
       let cursor = checkpoint.cursor;
       stats.votesProcessed = Math.max(stats.votesProcessed, checkpoint.processedVotes);
@@ -412,18 +450,6 @@ export async function ingestVotesForProposal(
         console.log(
           `[Vote Ingestion] action=resume proposal=${proposalId} phase=${checkpoint.phase} nextOffset=${checkpoint.nextOffset} pass2Offset=${checkpoint.pass2Offset} processedVotes=${checkpoint.processedVotes} cursorBlockTime=${cursor?.blockTime ?? "none"}`
         );
-      }
-
-      if (runCache) {
-        const cacheKey = getProposalVoteCacheKey(proposalId, minEpoch);
-        const inFlight = runCache.proposalVotesInFlight.get(cacheKey);
-        if (inFlight) {
-          console.log(
-            `[Vote Ingestion] action=single-flight-join proposal=${proposalId}`
-          );
-          await inFlight;
-          return { success: true, stats };
-        }
       }
 
       let streamPromise: Promise<KoiosVote[]> | null = null;
@@ -436,15 +462,7 @@ export async function ingestVotesForProposal(
           minEpoch,
           cursor?.blockTime
         );
-        if (runCache) {
-          const cacheKey = getProposalVoteCacheKey(proposalId, minEpoch);
-          runCache.proposalVotesInFlight.set(cacheKey, streamPromise);
-        }
         const voteWindow = await streamPromise;
-        if (runCache) {
-          const cacheKey = getProposalVoteCacheKey(proposalId, minEpoch);
-          runCache.proposalVotesInFlight.delete(cacheKey);
-        }
 
         if (!voteWindow || voteWindow.length === 0) break;
 
@@ -478,6 +496,7 @@ export async function ingestVotesForProposal(
           updatedAt: new Date().toISOString(),
         };
         await saveVoteCheckpoint(
+          db,
           proposalId,
           checkpointState,
           {
@@ -550,6 +569,7 @@ export async function ingestVotesForProposal(
           updatedAt: new Date().toISOString(),
         };
         await saveVoteCheckpoint(
+          db,
           proposalId,
           checkpointState,
           {
@@ -569,7 +589,7 @@ export async function ingestVotesForProposal(
       if (totalVotesFetched === 0) {
         console.log(`[Vote Ingestion] No votes found for proposal ${proposalId}`);
       }
-      await markVoteCheckpointComplete(proposalId, stats.votesProcessed);
+      await markVoteCheckpointComplete(db, proposalId, stats.votesProcessed);
     }
 
     console.log(
@@ -584,6 +604,7 @@ export async function ingestVotesForProposal(
       `[Vote Ingestion] action=partial-failure proposal=${proposalId} message=${errorMessage}`
     );
     await saveVoteCheckpoint(
+      db,
       proposalId,
       {
         ...checkpointState,
@@ -597,11 +618,11 @@ export async function ingestVotesForProposal(
         errorMessage,
       }
     );
-    return {
+    return completeResult({
       success: false,
       stats,
       error: errorMessage,
-    };
+    });
   }
 
   console.log(
@@ -610,10 +631,10 @@ export async function ingestVotesForProposal(
   console.log(
     `[Vote Ingestion] metric=vote_ingest.duration_ms proposal=${proposalId} value=${Date.now() - startedAt}`
   );
-  return {
+  return completeResult({
     success: true,
     stats,
-  };
+  });
 }
 
 function getProposalVoteCacheKey(
@@ -651,13 +672,19 @@ function getKoiosVoteIdentity(proposalId: string, vote: KoiosVote): string {
 }
 
 async function loadVoteCheckpoint(
+  db: IngestionDbClient,
   proposalId: string,
   minEpoch: number | undefined
 ): Promise<VoteIngestionCheckpoint> {
   const jobName = getVoteIngestionJobName(proposalId);
-  const existingStatus = await (prisma as any).syncStatus.findUnique({
-    where: { jobName },
-  });
+  const existingStatus = await withIngestionDbRead(
+    db,
+    `vote-checkpoint.load.${proposalId}`,
+    () =>
+      db.syncStatus.findUnique({
+        where: { jobName },
+      })
+  );
   const parsed = parseCheckpoint(existingStatus?.backfillCursor ?? null);
   if (
     parsed &&
@@ -680,6 +707,7 @@ async function loadVoteCheckpoint(
 }
 
 async function saveVoteCheckpoint(
+  db: IngestionDbClient,
   proposalId: string,
   checkpoint: VoteIngestionCheckpoint,
   extras?: {
@@ -691,62 +719,70 @@ async function saveVoteCheckpoint(
 ): Promise<void> {
   const now = new Date();
   const jobName = getVoteIngestionJobName(proposalId);
-  await (prisma as any).syncStatus.upsert({
-    where: { jobName },
-    create: {
-      jobName,
-      displayName: `Vote Ingestion Window ${proposalId}`,
-      isRunning: extras?.isRunning ?? true,
-      startedAt: now,
-      completedAt: extras?.completedAt ?? null,
-      lastResult: extras?.lastResult,
-      itemsProcessed: checkpoint.processedVotes,
-      errorMessage: extras?.errorMessage ?? null,
-      backfillCursor: JSON.stringify({
-        ...checkpoint,
-        updatedAt: now.toISOString(),
-      }),
-    },
-    update: {
-      isRunning: extras?.isRunning ?? true,
-      completedAt: extras?.completedAt ?? null,
-      lastResult: extras?.lastResult,
-      itemsProcessed: checkpoint.processedVotes,
-      errorMessage: extras?.errorMessage ?? null,
-      backfillCursor: JSON.stringify({
-        ...checkpoint,
-        updatedAt: now.toISOString(),
-      }),
-    },
-  });
+  await withIngestionDbWrite(db, `vote-checkpoint.save.${proposalId}`, () =>
+    db.syncStatus.upsert({
+      where: { jobName },
+      create: {
+        jobName,
+        displayName: `Vote Ingestion Window ${proposalId}`,
+        isRunning: extras?.isRunning ?? true,
+        startedAt: now,
+        completedAt: extras?.completedAt ?? null,
+        lastResult: extras?.lastResult,
+        itemsProcessed: checkpoint.processedVotes,
+        errorMessage: extras?.errorMessage ?? null,
+        backfillCursor: JSON.stringify({
+          ...checkpoint,
+          updatedAt: now.toISOString(),
+        }),
+      },
+      update: {
+        isRunning: extras?.isRunning ?? true,
+        completedAt: extras?.completedAt ?? null,
+        lastResult: extras?.lastResult,
+        itemsProcessed: checkpoint.processedVotes,
+        errorMessage: extras?.errorMessage ?? null,
+        backfillCursor: JSON.stringify({
+          ...checkpoint,
+          updatedAt: now.toISOString(),
+        }),
+      },
+    })
+  );
 }
 
 async function markVoteCheckpointComplete(
+  db: IngestionDbClient,
   proposalId: string,
   processedVotes: number
 ): Promise<void> {
   const jobName = getVoteIngestionJobName(proposalId);
-  await (prisma as any).syncStatus.upsert({
-    where: { jobName },
-    create: {
-      jobName,
-      displayName: `Vote Ingestion Window ${proposalId}`,
-      isRunning: false,
-      completedAt: new Date(),
-      lastResult: "success",
-      itemsProcessed: processedVotes,
-      errorMessage: null,
-      backfillCursor: null,
-    },
-    update: {
-      isRunning: false,
-      completedAt: new Date(),
-      lastResult: "success",
-      itemsProcessed: processedVotes,
-      errorMessage: null,
-      backfillCursor: null,
-    },
-  });
+  await withIngestionDbWrite(
+    db,
+    `vote-checkpoint.complete.${proposalId}`,
+    () =>
+      db.syncStatus.upsert({
+        where: { jobName },
+        create: {
+          jobName,
+          displayName: `Vote Ingestion Window ${proposalId}`,
+          isRunning: false,
+          completedAt: new Date(),
+          lastResult: "success",
+          itemsProcessed: processedVotes,
+          errorMessage: null,
+          backfillCursor: null,
+        },
+        update: {
+          isRunning: false,
+          completedAt: new Date(),
+          lastResult: "success",
+          itemsProcessed: processedVotes,
+          errorMessage: null,
+          backfillCursor: null,
+        },
+      })
+  );
 }
 
 async function fetchVotePage(
@@ -787,7 +823,7 @@ async function ingestSingleVote(
   db: IngestionDbClient,
   stats: VoteIngestionStats,
   shouldFetchSurveyMetadata: boolean,
-  preloadedVoters?: Map<string, { voterId: string; created: boolean; updated: boolean }>
+  preloadedVoters?: Map<string, EnsureVoterResult>
 ): Promise<void> {
   stats.votesProcessed++;
   // 1. Ensure voter exists (creates if needed, updates voting power)
@@ -816,10 +852,15 @@ async function ingestSingleVote(
   if (koiosVote.voter_role === "ConstitutionalCommittee" && koiosVote.meta_json?.authors) {
     const memberName = koiosVote.meta_json.authors[0]?.name;
     if (memberName) {
-      await db.cC.update({
-        where: { ccId: voterResult.voterId },
-        data: { memberName: memberName },
-      });
+      await withIngestionDbWrite(
+        db,
+        `vote.ingest.cc-member-update.${voterResult.voterId}`,
+        () =>
+          db.cC.update({
+            where: { ccId: voterResult.voterId },
+            data: { memberName: memberName },
+          })
+      );
     }
   }
 
@@ -845,8 +886,11 @@ async function ingestSingleVote(
   const ccId = voterType === VoterType.CC ? voterResult.voterId : null;
 
   // 5. Get voter's voting power for this vote (stored in lovelace as BigInt)
-  const voter = await getVoterWithPower(voterType, voterResult.voterId, db);
-  const votingPower = voter?.votingPower ?? null;
+  let votingPower = voterResult.votingPower;
+  if (votingPower === undefined) {
+    const voter = await getVoterWithPower(voterType, voterResult.voterId, db);
+    votingPower = voter?.votingPower ?? null;
+  }
 
   // 6. Fetch vote rationale/metadata JSON (stored as string in DB)
   const rationaleJson = await getVoteRationaleJson(koiosVote);
@@ -916,18 +960,20 @@ async function ingestSingleVote(
     ccId: ccId,
   };
 
-  await db.onchainVote.upsert({
-    where: { id: onchainVoteId },
-    create: {
-      id: onchainVoteId,
-      ...voteData,
-    },
-    update: {
-      ...voteData,
-      // Preserve frontloaded rationale if cron fetch returned null
-      ...(voteData.rationale == null ? { rationale: undefined } : {}),
-    },
-  });
+  await withIngestionDbWrite(db, `vote.ingest.upsert.${onchainVoteId}`, () =>
+    db.onchainVote.upsert({
+      where: { id: onchainVoteId },
+      create: {
+        id: onchainVoteId,
+        ...voteData,
+      },
+      update: {
+        ...voteData,
+        // Preserve frontloaded rationale if cron fetch returned null
+        ...(voteData.rationale == null ? { rationale: undefined } : {}),
+      },
+    })
+  );
   stats.votesIngested++;
   stats.votesUpserted++;
 }
@@ -941,16 +987,26 @@ async function getVoterWithPower(
   db: IngestionDbClient
 ): Promise<{ votingPower: bigint } | null> {
   if (voterType === VoterType.DREP) {
-    const result = await db.drep.findUnique({
-      where: { drepId: voterId },
-      select: { votingPower: true },
-    });
+    const result = await withIngestionDbRead(
+      db,
+      `vote.ingest.voter-power.drep.${voterId}`,
+      () =>
+        db.drep.findUnique({
+          where: { drepId: voterId },
+          select: { votingPower: true },
+        })
+    );
     return result ? { votingPower: result.votingPower } : null;
   } else if (voterType === VoterType.SPO) {
-    const result = await db.sPO.findUnique({
-      where: { poolId: voterId },
-      select: { votingPower: true },
-    });
+    const result = await withIngestionDbRead(
+      db,
+      `vote.ingest.voter-power.spo.${voterId}`,
+      () =>
+        db.sPO.findUnique({
+          where: { poolId: voterId },
+          select: { votingPower: true },
+        })
+    );
     return result ? { votingPower: result.votingPower } : null;
   }
   // CC members don't have voting power tracked

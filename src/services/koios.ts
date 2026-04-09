@@ -17,6 +17,10 @@ import {
   BurstLimiter,
   ConcurrencyLimiter,
 } from "./koios/limiters";
+import {
+  getKoiosSharedCooldownSnapshot,
+  mergeKoiosSharedCooldown,
+} from "./koios/sharedCoordination";
 
 // Single tunable timeout for all Koios requests, read from env.
 const KOIOS_REQUEST_TIMEOUT_MS = getBoundedIntEnv(
@@ -87,6 +91,8 @@ const DEFAULT_KOIOS_PRESSURE_COOLDOWN_MS = 20_000;
 const DEFAULT_KOIOS_TIMEOUT_COOLOFF_THRESHOLD = 5;
 const DEFAULT_KOIOS_TIMEOUT_COOLOFF_WINDOW_MS = 20_000;
 const DEFAULT_KOIOS_TIMEOUT_COOLOFF_MS = 10_000;
+const KOIOS_SHARED_PULL_INTERVAL_MS = 3_000;
+const KOIOS_SHARED_PUBLISH_MIN_INTERVAL_MS = 1_000;
 const KOIOS_MAX_PAGE_LIMIT = 1000;
 const KOIOS_PUBLIC_MAX_BODY_BYTES = 1024;
 const KOIOS_REGISTERED_MAX_BODY_BYTES = 5 * 1024;
@@ -486,6 +492,10 @@ let koiosPressureCooldownUntil = 0;
 let koiosTimeoutCooldownUntil = 0;
 const koiosPressureEvents: number[] = [];
 const koiosTimeoutEvents: number[] = [];
+let lastKoiosSharedPullAt = 0;
+let koiosSharedPullInFlight: Promise<void> | null = null;
+let lastKoiosSharedPublishAt = 0;
+let lastKoiosSharedPublishSnapshot = "";
 
 function nextKoiosRequestId(): number {
   koiosRequestCounter += 1;
@@ -550,6 +560,84 @@ function trimKoiosTimeoutEvents(now: number): void {
   }
 }
 
+function getKoiosSharedSnapshotKey(): string {
+  return `${koiosBackoffUntil}:${koiosPressureCooldownUntil}:${koiosTimeoutCooldownUntil}`;
+}
+
+function publishKoiosSharedCooldown(reason: string): void {
+  const now = Date.now();
+  const snapshotKey = getKoiosSharedSnapshotKey();
+  if (
+    snapshotKey === lastKoiosSharedPublishSnapshot
+    && now - lastKoiosSharedPublishAt < KOIOS_SHARED_PUBLISH_MIN_INTERVAL_MS
+  ) {
+    return;
+  }
+
+  lastKoiosSharedPublishSnapshot = snapshotKey;
+  lastKoiosSharedPublishAt = now;
+
+  void mergeKoiosSharedCooldown({
+    backoffUntil: koiosBackoffUntil,
+    pressureCooldownUntil: koiosPressureCooldownUntil,
+    timeoutCooldownUntil: koiosTimeoutCooldownUntil,
+    source: reason,
+  }).catch((error: any) => {
+    console.warn(
+      `[Koios Shared Cooldown] action=publish-failed reason=${reason} message=${error?.message ?? String(error)}`
+    );
+  });
+}
+
+async function pullKoiosSharedCooldown(force = false): Promise<void> {
+  const now = Date.now();
+  if (!force && now - lastKoiosSharedPullAt < KOIOS_SHARED_PULL_INTERVAL_MS) {
+    return;
+  }
+  if (koiosSharedPullInFlight) {
+    return koiosSharedPullInFlight;
+  }
+
+  koiosSharedPullInFlight = (async () => {
+    const snapshot = await getKoiosSharedCooldownSnapshot();
+    const prevBackoff = koiosBackoffUntil;
+    const prevPressure = koiosPressureCooldownUntil;
+    const prevTimeout = koiosTimeoutCooldownUntil;
+
+    koiosBackoffUntil = Math.max(koiosBackoffUntil, snapshot.backoffUntil);
+    koiosPressureCooldownUntil = Math.max(
+      koiosPressureCooldownUntil,
+      snapshot.pressureCooldownUntil
+    );
+    koiosTimeoutCooldownUntil = Math.max(
+      koiosTimeoutCooldownUntil,
+      snapshot.timeoutCooldownUntil
+    );
+    lastKoiosSharedPullAt = Date.now();
+
+    if (
+      prevBackoff !== koiosBackoffUntil ||
+      prevPressure !== koiosPressureCooldownUntil ||
+      prevTimeout !== koiosTimeoutCooldownUntil
+    ) {
+      console.log(
+        `[Koios Shared Cooldown] action=applied sharedBackoffUntil=${snapshot.backoffUntil} sharedPressureUntil=${snapshot.pressureCooldownUntil} sharedTimeoutUntil=${snapshot.timeoutCooldownUntil}`
+      );
+    }
+  })()
+    .catch((error: any) => {
+      lastKoiosSharedPullAt = Date.now();
+      console.warn(
+        `[Koios Shared Cooldown] action=pull-failed message=${error?.message ?? String(error)}`
+      );
+    })
+    .finally(() => {
+      koiosSharedPullInFlight = null;
+    });
+
+  return koiosSharedPullInFlight;
+}
+
 function recordKoiosPressureSignal(error: any): void {
   if (!koiosPressureSheddingEnabled || !isKoiosPressureError(error)) {
     return;
@@ -570,6 +658,7 @@ function recordKoiosPressureSignal(error: any): void {
   console.warn(
     `[Koios Pressure] action=degraded reason=error-burst windowMs=${koiosPressureWindowMs} threshold=${koiosPressureThreshold} cooldownMs=${koiosPressureCooldownMs} observed=${koiosPressureEvents.length}`
   );
+  publishKoiosSharedCooldown("koios-pressure-signal");
 }
 
 function recordKoiosTimeoutCooloffSignal(error: any): void {
@@ -589,6 +678,7 @@ function recordKoiosTimeoutCooloffSignal(error: any): void {
   console.warn(
     `[Koios Timeout Cooloff] action=degraded reason=timeout-burst windowMs=${koiosTimeoutCooloffWindowMs} threshold=${koiosTimeoutCooloffThreshold} cooldownMs=${koiosTimeoutCooloffMs} observed=${koiosTimeoutEvents.length}`
   );
+  publishKoiosSharedCooldown("koios-timeout-signal");
 }
 
 export function getKoiosPressureState(): {
@@ -720,6 +810,7 @@ async function withKoiosConcurrencyLimit<T>(
   operation: () => Promise<T>
 ): Promise<T> {
   const endpoint = normalizeKoiosEndpoint(url);
+  await pullKoiosSharedCooldown();
   let waitBackoffMs = 0;
   let waitPressureMs = 0;
   let waitTimeoutCooloffMs = 0;
@@ -747,6 +838,7 @@ async function withKoiosConcurrencyLimit<T>(
   }
 
   const burstWaitMs = await globalKoiosBurstLimiter.acquire();
+  await pullKoiosSharedCooldown();
 
   // Task 4: re-check after burst queue — callers that queued during a backoff
   // or pressure cooldown must not all fire at once when the burst slot opens.
@@ -933,6 +1025,7 @@ export const getKoiosService = (): AxiosInstance => {
           koiosBackoffUntil,
           Date.now() + cooldownMs
         );
+        publishKoiosSharedCooldown("koios-429");
       }
       recordKoiosPressureSignal(error);
       recordKoiosTimeoutCooloffSignal(error);

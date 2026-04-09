@@ -1,5 +1,10 @@
 import { Prisma } from "@prisma/client";
 import { prisma } from "../prisma";
+import {
+  type IngestionDbClient,
+  withIngestionDbRead,
+  withIngestionDbWrite,
+} from "./dbSession";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -46,21 +51,28 @@ export function getCachedGraph(rangeDays: number): NetworkGraphData | null {
 
 // ─── Daily Aggregation ───────────────────────────────────────────────────────
 
-export async function aggregateRecentToHistorical(): Promise<AggregationResult> {
+export async function aggregateRecentToHistorical(
+  db: IngestionDbClient = prisma
+): Promise<AggregationResult> {
   const cutoff = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
 
   // Fetch old events to roll up
-  const oldEvents = await prisma.activityRecent.findMany({
-    where: { eventDate: { lt: cutoff } },
-    select: {
-      repoId: true,
-      eventType: true,
-      eventDate: true,
-      authorLogin: true,
-      additions: true,
-      deletions: true,
-    },
-  });
+  const oldEvents = await withIngestionDbRead(
+    db,
+    "github-aggregation.find-old-events",
+    () =>
+      db.activityRecent.findMany({
+        where: { eventDate: { lt: cutoff } },
+        select: {
+          repoId: true,
+          eventType: true,
+          eventDate: true,
+          authorLogin: true,
+          additions: true,
+          deletions: true,
+        },
+      })
+  );
 
   if (oldEvents.length === 0) {
     return { daysRolledUp: 0, rowsDeleted: 0, developersUpdated: 0 };
@@ -136,34 +148,36 @@ export async function aggregateRecentToHistorical(): Promise<AggregationResult> 
   const bucketRows = Array.from(buckets.values());
   if (!batchedGithubAggregationWritesEnabled) {
     for (const b of bucketRows) {
-      await prisma.activityHistorical.upsert({
-        where: {
-          repoId_date: { repoId: b.repoId, date: b.date },
-        },
-        create: {
-          repoId: b.repoId,
-          date: b.date,
-          commitCount: b.commitCount,
-          prOpened: b.prOpened,
-          prMerged: b.prMerged,
-          prClosed: b.prClosed,
-          issuesOpened: b.issuesOpened,
-          issuesClosed: b.issuesClosed,
-          additions: b.additions,
-          deletions: b.deletions,
-          uniqueContributors: b.contributors.size,
-        },
-        update: {
-          commitCount: { increment: b.commitCount },
-          prOpened: { increment: b.prOpened },
-          prMerged: { increment: b.prMerged },
-          prClosed: { increment: b.prClosed },
-          issuesOpened: { increment: b.issuesOpened },
-          issuesClosed: { increment: b.issuesClosed },
-          additions: { increment: b.additions },
-          deletions: { increment: b.deletions },
-        },
-      });
+      await withIngestionDbWrite(db, "github-aggregation.upsert-activity-historical", () =>
+        db.activityHistorical.upsert({
+          where: {
+            repoId_date: { repoId: b.repoId, date: b.date },
+          },
+          create: {
+            repoId: b.repoId,
+            date: b.date,
+            commitCount: b.commitCount,
+            prOpened: b.prOpened,
+            prMerged: b.prMerged,
+            prClosed: b.prClosed,
+            issuesOpened: b.issuesOpened,
+            issuesClosed: b.issuesClosed,
+            additions: b.additions,
+            deletions: b.deletions,
+            uniqueContributors: b.contributors.size,
+          },
+          update: {
+            commitCount: { increment: b.commitCount },
+            prOpened: { increment: b.prOpened },
+            prMerged: { increment: b.prMerged },
+            prClosed: { increment: b.prClosed },
+            issuesOpened: { increment: b.issuesOpened },
+            issuesClosed: { increment: b.issuesClosed },
+            additions: { increment: b.additions },
+            deletions: { increment: b.deletions },
+          },
+        })
+      );
     }
   } else {
     for (let i = 0; i < bucketRows.length; i += DB_BATCH_SIZE) {
@@ -173,7 +187,8 @@ export async function aggregateRecentToHistorical(): Promise<AggregationResult> 
         Prisma.sql`(${b.repoId}, ${b.date}, ${b.commitCount}, ${b.prOpened}, ${b.prMerged}, ${b.prClosed}, ${b.issuesOpened}, ${b.issuesClosed}, ${b.additions}, ${b.deletions}, ${b.contributors.size})`
       )
     );
-    await prisma.$executeRaw`
+    await withIngestionDbWrite(db, "github-aggregation.bulk-upsert-activity-historical", () =>
+      db.$executeRaw`
       INSERT INTO "activity_historical" (
         "repo_id",
         "date",
@@ -198,17 +213,23 @@ export async function aggregateRecentToHistorical(): Promise<AggregationResult> 
         "issues_closed" = "activity_historical"."issues_closed" + EXCLUDED."issues_closed",
         "additions" = "activity_historical"."additions" + EXCLUDED."additions",
         "deletions" = "activity_historical"."deletions" + EXCLUDED."deletions"
-    `;
+    `
+    );
   }
   }
 
   // Update developer_repo_activity from events being rolled up
-  await updateDeveloperRepoActivity(oldEvents);
+  await updateDeveloperRepoActivity(db, oldEvents);
 
   // Delete rolled-up rows
-  const deleted = await prisma.activityRecent.deleteMany({
-    where: { eventDate: { lt: cutoff } },
-  });
+  const deleted = await withIngestionDbWrite(
+    db,
+    "github-aggregation.delete-rolled-up-recent-events",
+    () =>
+      db.activityRecent.deleteMany({
+        where: { eventDate: { lt: cutoff } },
+      })
+  );
 
   console.log(
     `[aggregation] Rolled up ${buckets.size} day-buckets from ${oldEvents.length} events, ` +
@@ -216,7 +237,7 @@ export async function aggregateRecentToHistorical(): Promise<AggregationResult> 
   );
 
   // Recompute developer stats from developer_repo_activity + activity_recent
-  const devsUpdated = await recomputeDeveloperStats();
+  const devsUpdated = await recomputeDeveloperStats(db);
 
   return {
     daysRolledUp: buckets.size,
@@ -228,6 +249,7 @@ export async function aggregateRecentToHistorical(): Promise<AggregationResult> 
 // ─── Developer Repo Activity Update ──────────────────────────────────────────
 
 async function updateDeveloperRepoActivity(
+  db: IngestionDbClient,
   events: Array<{
     repoId: string;
     eventType: string;
@@ -266,7 +288,11 @@ async function updateDeveloperRepoActivity(
 
   if (!batchedGithubAggregationWritesEnabled) {
     for (const row of rows) {
-      await prisma.developerRepoActivity.upsert({
+      await withIngestionDbWrite(
+        db,
+        "github-aggregation.upsert-developer-repo-activity",
+        () =>
+          db.developerRepoActivity.upsert({
         where: {
           developerLogin_repoId: {
             developerLogin: row.login,
@@ -285,7 +311,8 @@ async function updateDeveloperRepoActivity(
           totalPRs: { increment: row.prs },
           lastActiveAt: row.lastActiveAt,
         },
-      });
+      })
+      );
     }
     return;
   }
@@ -299,7 +326,10 @@ async function updateDeveloperRepoActivity(
       )
     );
 
-    await prisma.$executeRaw`
+    await withIngestionDbWrite(
+      db,
+      "github-aggregation.bulk-upsert-developer-repo-activity",
+      () => db.$executeRaw`
       WITH incoming("developer_login", "repo_id", "total_commits", "total_prs", "last_active_at", "updated_at") AS (
         VALUES ${values}
       )
@@ -329,13 +359,16 @@ async function updateDeveloperRepoActivity(
         "total_prs" = "developer_repo_activity"."total_prs" + EXCLUDED."total_prs",
         "last_active_at" = GREATEST("developer_repo_activity"."last_active_at", EXCLUDED."last_active_at"),
         "updated_at" = EXCLUDED."updated_at"
-    `;
+    `
+    );
   }
 }
 
 // ─── Developer Stats Recompute ───────────────────────────────────────────────
 
-async function recomputeDeveloperStats(): Promise<number> {
+async function recomputeDeveloperStats(
+  db: IngestionDbClient
+): Promise<number> {
   const ninetyDaysAgo = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
 
   // All-time stats from developer_repo_activity (historical + previously rolled up)
@@ -346,7 +379,10 @@ async function recomputeDeveloperStats(): Promise<number> {
     total_prs: bigint;
     repo_count: bigint;
     org_count: bigint;
-  }> = await prisma.$queryRaw`
+  }> = await withIngestionDbRead(
+    db,
+    "github-aggregation.recompute-developer-stats-query",
+    () => db.$queryRaw`
     SELECT
       developer_login,
       SUM(total_commits) AS total_commits,
@@ -367,21 +403,24 @@ async function recomputeDeveloperStats(): Promise<number> {
       GROUP BY author_login, repo_id
     ) combined
     GROUP BY developer_login
-  `;
+  `
+  );
 
   let updated = 0;
   if (!batchedGithubAggregationWritesEnabled) {
     for (const row of stats) {
-      await prisma.githubDeveloper.updateMany({
-        where: { id: row.developer_login },
-        data: {
-          totalCommits: Number(row.total_commits),
-          totalPRs: Number(row.total_prs),
-          repoCount: Number(row.repo_count),
-          orgCount: Number(row.org_count),
-          isActive: true,
-        },
-      });
+      await withIngestionDbWrite(db, "github-aggregation.update-developer-stats", () =>
+        db.githubDeveloper.updateMany({
+          where: { id: row.developer_login },
+          data: {
+            totalCommits: Number(row.total_commits),
+            totalPRs: Number(row.total_prs),
+            repoCount: Number(row.repo_count),
+            orgCount: Number(row.org_count),
+            isActive: true,
+          },
+        })
+      );
       updated += 1;
     }
   } else {
@@ -392,7 +431,8 @@ async function recomputeDeveloperStats(): Promise<number> {
         Prisma.sql`(${row.developer_login}, ${Number(row.total_commits)}, ${Number(row.total_prs)}, ${Number(row.repo_count)}, ${Number(row.org_count)})`
       )
     );
-    await prisma.$executeRaw`
+    await withIngestionDbWrite(db, "github-aggregation.bulk-update-developer-stats", () =>
+      db.$executeRaw`
       WITH incoming("id", "total_commits", "total_prs", "repo_count", "org_count") AS (
         VALUES ${values}
       )
@@ -405,19 +445,22 @@ async function recomputeDeveloperStats(): Promise<number> {
         "is_active" = true
       FROM incoming
       WHERE gd."id" = incoming."id"
-    `;
+    `
+    );
     updated += chunk.length;
   }
   }
 
   // Mark inactive developers (not seen in 90 days)
-  await prisma.githubDeveloper.updateMany({
-    where: {
-      lastSeenAt: { lt: ninetyDaysAgo },
-      isActive: true,
-    },
-    data: { isActive: false },
-  });
+  await withIngestionDbWrite(db, "github-aggregation.mark-inactive-developers", () =>
+    db.githubDeveloper.updateMany({
+      where: {
+        lastSeenAt: { lt: ninetyDaysAgo },
+        isActive: true,
+      },
+      data: { isActive: false },
+    })
+  );
 
   console.log(`[aggregation] Recomputed stats for ${updated} developers`);
   return updated;
@@ -425,9 +468,11 @@ async function recomputeDeveloperStats(): Promise<number> {
 
 // ─── Network Graph Precomputation ────────────────────────────────────────────
 
-export async function precomputeNetworkGraphs(): Promise<void> {
+export async function precomputeNetworkGraphs(
+  db: IngestionDbClient = prisma
+): Promise<void> {
   for (const days of [30, 90, 365]) {
-    const graph = await buildNetworkGraph(days);
+    const graph = await buildNetworkGraph(db, days);
     graphCache.set(days, {
       data: graph,
       expiresAt: Date.now() + GRAPH_TTL_MS,
@@ -436,7 +481,10 @@ export async function precomputeNetworkGraphs(): Promise<void> {
   console.log(`[aggregation] Network graphs precomputed (30d, 90d, 365d)`);
 }
 
-async function buildNetworkGraph(rangeDays: number): Promise<NetworkGraphData> {
+async function buildNetworkGraph(
+  db: IngestionDbClient,
+  rangeDays: number
+): Promise<NetworkGraphData> {
   const since = new Date(Date.now() - rangeDays * 24 * 60 * 60 * 1000);
 
   // Get developer-repo connections from recent activity
@@ -444,7 +492,8 @@ async function buildNetworkGraph(rangeDays: number): Promise<NetworkGraphData> {
     author_login: string;
     repo_id: string;
     activity_count: bigint;
-  }> = await prisma.$queryRaw`
+  }> = await withIngestionDbRead(db, "github-aggregation.graph-recent-connections", () =>
+    db.$queryRaw`
     SELECT
       author_login,
       repo_id,
@@ -455,7 +504,8 @@ async function buildNetworkGraph(rangeDays: number): Promise<NetworkGraphData> {
     GROUP BY author_login, repo_id
     ORDER BY activity_count DESC
     LIMIT 5000
-  `;
+  `
+  );
 
   // Also include historical data for longer ranges
   if (rangeDays > 7) {
@@ -463,7 +513,10 @@ async function buildNetworkGraph(rangeDays: number): Promise<NetworkGraphData> {
       repo_id: string;
       owner: string;
       total_activity: bigint;
-    }> = await prisma.$queryRaw`
+    }> = await withIngestionDbRead(
+      db,
+      "github-aggregation.graph-historical-connections",
+      () => db.$queryRaw`
       SELECT
         repo_id,
         split_part(repo_id, '/', 1) AS owner,
@@ -473,7 +526,8 @@ async function buildNetworkGraph(rangeDays: number): Promise<NetworkGraphData> {
       GROUP BY repo_id
       ORDER BY total_activity DESC
       LIMIT 1000
-    `;
+    `
+    );
 
     // Add repo nodes from historical data (even if no recent connections)
     for (const h of histConnections) {
@@ -550,19 +604,24 @@ async function buildNetworkGraph(rangeDays: number): Promise<NetworkGraphData> {
   const devLogins = nodes.filter((n) => n.type === "developer").map((n) => n.id.replace("dev:", ""));
 
   const repoMeta = repoIds.length
-    ? await prisma.githubRepository.findMany({
+    ? await withIngestionDbRead(db, "github-aggregation.graph-repo-meta", () =>
+      db.githubRepository.findMany({
         where: { id: { in: repoIds } },
         select: { id: true, language: true, stars: true, forks: true, description: true, lastActivityAt: true, syncTier: true, isArchived: true },
       })
+    )
     : [];
   const devProfileMeta = devLogins.length
-    ? await prisma.githubDeveloper.findMany({
+    ? await withIngestionDbRead(db, "github-aggregation.graph-dev-meta", () =>
+      db.githubDeveloper.findMany({
         where: { id: { in: devLogins } },
         select: { id: true, avatarUrl: true, lastSeenAt: true, isActive: true },
       })
+    )
     : [];
   const commitCounts: Array<{ repo_id: string; commit_count: bigint }> = repoIds.length
-    ? await prisma.$queryRaw`
+    ? await withIngestionDbRead(db, "github-aggregation.graph-commit-counts", () =>
+      db.$queryRaw`
         SELECT repo_id, COUNT(*) AS commit_count
         FROM activity_recent
         WHERE repo_id = ANY(${repoIds})
@@ -570,9 +629,11 @@ async function buildNetworkGraph(rangeDays: number): Promise<NetworkGraphData> {
           AND event_date >= ${since}
         GROUP BY repo_id
       `
+    )
     : [];
   const devActivityStats: Array<{ author_login: string; commits: bigint; prs: bigint }> = devLogins.length
-    ? await prisma.$queryRaw`
+    ? await withIngestionDbRead(db, "github-aggregation.graph-dev-activity-stats", () =>
+      db.$queryRaw`
         SELECT
           author_login,
           SUM(CASE WHEN event_type = 'commit' THEN 1 ELSE 0 END) AS commits,
@@ -582,6 +643,7 @@ async function buildNetworkGraph(rangeDays: number): Promise<NetworkGraphData> {
           AND event_date >= ${since}
         GROUP BY author_login
       `
+    )
     : [];
 
   const repoMetaMap = new Map(repoMeta.map((r) => [r.id, r]));

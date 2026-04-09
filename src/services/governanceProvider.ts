@@ -260,6 +260,39 @@ export async function listVotes(options?: {
   return koiosGet<KoiosVote[]>("/vote_list", params, toKoiosContext(options));
 }
 
+export async function listAllVotes(options?: {
+  proposalId?: string;
+  minEpoch?: number;
+  minBlockTime?: number;
+  source?: string;
+}): Promise<KoiosVote[]> {
+  const params: Record<string, string | number> = {
+    order: "block_time.asc,vote_tx_hash.asc",
+  };
+
+  if (options?.proposalId) {
+    params.proposal_id = `eq.${options.proposalId}`;
+  }
+
+  if (typeof options?.minEpoch === "number") {
+    params.epoch_no = `gte.${options.minEpoch}`;
+  }
+  if (typeof options?.minBlockTime === "number") {
+    params.block_time = `gte.${options.minBlockTime}`;
+  }
+
+  return koiosGetAll<KoiosVote>(
+    "/vote_list",
+    params,
+    toKoiosContext(options),
+    {
+      overlapRows: KOIOS_MUTABLE_PAGE_OVERLAP_ROWS,
+      dedupeKey: (vote) =>
+        `${vote.vote_tx_hash ?? ""}|${vote.proposal_id ?? ""}|${vote.voter_role ?? ""}|${vote.voter_id ?? ""}|${vote.block_time ?? ""}`,
+    }
+  );
+}
+
 export async function getProposalVotingSummary(
   proposalId: string,
   options?: GovernanceProviderOptions

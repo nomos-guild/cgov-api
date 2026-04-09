@@ -5,13 +5,14 @@ import { backfillRepositories } from "../../services/ingestion/github-backfill";
 import { aggregateRecentToHistorical, precomputeNetworkGraphs } from "../../services/ingestion/github-aggregation";
 import { cacheInvalidatePrefix } from "../../services/cache";
 import { acquireJobLock, releaseJobLock } from "../../services/ingestion/syncLock";
+import { GITHUB_LOCK_KEYS } from "../../services/ingestion/githubLockKeys";
 
 const LOCK_EXPIRY_MS = 35 * 60 * 1000; // 35 minutes (generous for large syncs, handles snapshot's 30min timeout)
 
 // ─── GitHub Discovery ────────────────────────────────────────────────────────
 
 export const postTriggerGithubDiscovery = async (_req: Request, res: Response) => {
-  const jobName = "github-discover";
+  const jobName = GITHUB_LOCK_KEYS.discovery;
   const displayName = "GitHub Repository Discovery";
 
   const acquired = await acquireJobLock(jobName, displayName, {
@@ -61,10 +62,10 @@ export const postTriggerGithubSync = async (req: Request, res: Response) => {
 
   // Map tier to job name
   const tierJobMap: Record<string, { jobName: string; displayName: string }> = {
-    active: { jobName: "github-sync-active", displayName: "GitHub Sync - Active Repos" },
-    moderate: { jobName: "github-sync-moderate", displayName: "GitHub Sync - Moderate Repos" },
-    dormant: { jobName: "github-sync-dormant", displayName: "GitHub Sync - Dormant Repos" },
-    all: { jobName: "github-sync-all", displayName: "GitHub Sync - All Repos" },
+    active: { jobName: GITHUB_LOCK_KEYS.activity, displayName: "GitHub Sync - Active Repos" },
+    moderate: { jobName: GITHUB_LOCK_KEYS.activity, displayName: "GitHub Sync - Moderate Repos" },
+    dormant: { jobName: GITHUB_LOCK_KEYS.activity, displayName: "GitHub Sync - Dormant Repos" },
+    all: { jobName: GITHUB_LOCK_KEYS.activity, displayName: "GitHub Sync - All Repos" },
   };
 
   const { jobName, displayName } = tierJobMap[tier] || tierJobMap.all;
@@ -133,7 +134,7 @@ export const postTriggerGithubSync = async (req: Request, res: Response) => {
 // ─── GitHub Backfill ─────────────────────────────────────────────────────────
 
 export const postTriggerGithubBackfill = async (req: Request, res: Response) => {
-  const jobName = "github-backfill";
+  const jobName = GITHUB_LOCK_KEYS.backfill;
   const displayName = "GitHub Historical Backfill";
 
   const acquired = await acquireJobLock(jobName, displayName, {
@@ -182,7 +183,7 @@ export const postTriggerGithubBackfill = async (req: Request, res: Response) => 
 // ─── GitHub Snapshot ─────────────────────────────────────────────────────────
 
 export const postTriggerGithubSnapshot = async (_req: Request, res: Response) => {
-  const jobName = "github-snapshot";
+  const jobName = GITHUB_LOCK_KEYS.snapshot;
   const displayName = "GitHub Daily Snapshot";
 
   const acquired = await acquireJobLock(jobName, displayName, {
@@ -228,7 +229,7 @@ export const postTriggerGithubSnapshot = async (_req: Request, res: Response) =>
 // ─── GitHub Aggregation ──────────────────────────────────────────────────────
 
 export const postTriggerGithubAggregate = async (_req: Request, res: Response) => {
-  const jobName = "github-aggregate";
+  const jobName = GITHUB_LOCK_KEYS.aggregation;
   const displayName = "GitHub Data Aggregation";
 
   const acquired = await acquireJobLock(jobName, displayName, {

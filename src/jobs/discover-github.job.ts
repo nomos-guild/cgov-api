@@ -1,8 +1,9 @@
 import { discoverRepositories } from "../services/ingestion/github-discovery";
 import { getBoundedIntEnv } from "../services/ingestion/syncLock";
+import { GITHUB_LOCK_KEYS } from "../services/ingestion/githubLockKeys";
 import { startIngestionCronJob } from "./runIngestionCronJob";
 
-const JOB_NAME = "github-discovery-sync";
+const JOB_NAME = GITHUB_LOCK_KEYS.discovery;
 const LOCK_TTL_MS = getBoundedIntEnv(
   "GITHUB_DISCOVERY_LOCK_TTL_MS",
   30 * 60 * 1000,

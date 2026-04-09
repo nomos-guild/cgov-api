@@ -5,9 +5,10 @@ import {
   reTierRepos,
 } from "../services/ingestion/github-activity";
 import { getBoundedIntEnv } from "../services/ingestion/syncLock";
+import { GITHUB_LOCK_KEYS } from "../services/ingestion/githubLockKeys";
 import { startIngestionCronJob } from "./runIngestionCronJob";
 
-const JOB_NAME = "github-activity-sync";
+const JOB_NAME = GITHUB_LOCK_KEYS.activity;
 const LOCK_TTL_MS = getBoundedIntEnv(
   "GITHUB_SYNC_LOCK_TTL_MS",
   25 * 60 * 1000,

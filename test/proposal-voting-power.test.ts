@@ -17,6 +17,12 @@ jest.mock("../src/services/prisma", () => ({
       update: proposalUpdateMock,
     },
   },
+  withDbRead: jest.fn(async (_scope: string, operation: () => Promise<unknown>) =>
+    operation()
+  ),
+  withDbWrite: jest.fn(async (_scope: string, operation: () => Promise<unknown>) =>
+    operation()
+  ),
 }));
 
 jest.mock("../src/services/governanceProvider", () => ({
@@ -39,6 +45,7 @@ jest.mock("../src/services/koios", () => ({
 }));
 
 import { updateProposalVotingPower } from "../src/services/ingestion/proposalVotingPower.service";
+import { prisma } from "../src/services/prisma";
 
 describe("proposalVotingPower.service", () => {
   beforeEach(() => {
@@ -62,7 +69,7 @@ describe("proposalVotingPower.service", () => {
     mockGetProposalVotingSummary.mockResolvedValue(null);
 
     await expect(
-      updateProposalVotingPower("gov_action1missing", 600, 599, 600, true)
+      updateProposalVotingPower(prisma as any, "gov_action1missing", 600, 599, 600, true)
     ).resolves.toEqual({
       success: false,
       error: "No voting summary available from Koios",
@@ -97,6 +104,7 @@ describe("proposalVotingPower.service", () => {
     mockListPoolVotingPowerHistory.mockResolvedValue([]);
 
     const result = await updateProposalVotingPower(
+      prisma as any,
       "gov_action1before527",
       600,
       599,
@@ -150,6 +158,7 @@ describe("proposalVotingPower.service", () => {
     mockGetInactivePowerWithCache.mockResolvedValue(BigInt(77));
 
     const result = await updateProposalVotingPower(
+      prisma as any,
       "gov_action1payload",
       600,
       599,
@@ -203,7 +212,7 @@ describe("proposalVotingPower.service", () => {
     });
 
     await expect(
-      updateProposalVotingPower("gov_action1degraded", 600, 599, 600, true)
+      updateProposalVotingPower(prisma as any, "gov_action1degraded", 600, 599, 600, true)
     ).resolves.toEqual({
       success: true,
       summaryFound: false,
@@ -227,7 +236,7 @@ describe("proposalVotingPower.service", () => {
     );
 
     await expect(
-      updateProposalVotingPower("gov_action1retryfail", 600, 599, 600, true)
+      updateProposalVotingPower(prisma as any, "gov_action1retryfail", 600, 599, 600, true)
     ).resolves.toEqual({
       success: false,
       error: "socket hang up",
@@ -266,6 +275,7 @@ describe("proposalVotingPower.service", () => {
     );
 
     const resultPromise = updateProposalVotingPower(
+      prisma as any,
       "gov_action1timeout",
       600,
       599,

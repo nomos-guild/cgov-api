@@ -40,13 +40,23 @@ jest.mock("../src/services/prisma", () => ({
       upsert: jest.fn(),
     },
   },
+  withDbRead: jest.fn(async (_scope: string, operation: () => Promise<unknown>) =>
+    operation()
+  ),
+  withDbWrite: jest.fn(async (_scope: string, operation: () => Promise<unknown>) =>
+    operation()
+  ),
 }));
 
-import { ingestVotesForProposal } from "../src/services/ingestion/vote.service";
-import { prisma } from "../src/services/prisma";
+import {
+  createVoteIngestionRunCache,
+  ingestVotesForProposal,
+} from "../src/services/ingestion/vote.service";
+import { prisma, withDbRead, withDbWrite } from "../src/services/prisma";
 
 function createDbMock() {
   return {
+    $transaction: jest.fn(),
     proposal: {
       findUnique: jest.fn().mockResolvedValue({ linkedSurveyTxId: null }),
     },
@@ -60,6 +70,10 @@ function createDbMock() {
       update: jest.fn().mockResolvedValue({}),
     },
     onchainVote: {
+      upsert: jest.fn().mockResolvedValue({}),
+    },
+    syncStatus: {
+      findUnique: jest.fn().mockResolvedValue(null),
       upsert: jest.fn().mockResolvedValue({}),
     },
   } as any;
@@ -85,10 +99,25 @@ describe("vote ingestion streaming/preload behavior", () => {
     (prisma as any).syncStatus.upsert.mockReset();
     (prisma as any).syncStatus.findUnique.mockResolvedValue(null);
     (prisma as any).syncStatus.upsert.mockResolvedValue({});
+    (withDbRead as jest.Mock).mockClear();
+    (withDbWrite as jest.Mock).mockClear();
   });
 
   it("uses preloaded voters for prefetched vote windows", async () => {
     const db = createDbMock();
+    mockPreloadVotersForVotes.mockResolvedValue(
+      new Map([
+        [
+          "DRep:drep1",
+          {
+            voterId: "drep1",
+            created: false,
+            updated: false,
+            votingPower: BigInt(333),
+          },
+        ],
+      ])
+    );
 
     const result = await ingestVotesForProposal("proposal1", db, undefined, {
       prefetchedVotes: [
@@ -116,6 +145,15 @@ describe("vote ingestion streaming/preload behavior", () => {
     expect(mockPreloadVotersForVotes).toHaveBeenCalledTimes(1);
     expect(mockEnsureVoterExists).not.toHaveBeenCalled();
     expect(db.onchainVote.upsert).toHaveBeenCalledTimes(2);
+    expect(db.drep.findUnique).not.toHaveBeenCalled();
+    expect(withDbRead).toHaveBeenCalledWith(
+      "vote.ingest.proposal-context.proposal1",
+      expect.any(Function)
+    );
+    expect(withDbWrite).toHaveBeenCalledWith(
+      expect.stringMatching(/^vote\.ingest\.upsert\./),
+      expect.any(Function)
+    );
   });
 
   it("reconciles overlap windows without double processing duplicate votes", async () => {
@@ -173,6 +211,51 @@ describe("vote ingestion streaming/preload behavior", () => {
       2,
       expect.objectContaining({ offset: 0, minBlockTime: 0 })
     );
+  });
+
+  it("returns the originating in-flight result to joiners", async () => {
+    const db = createDbMock();
+    const runCache = createVoteIngestionRunCache();
+    const prefetchedVotes = [
+      {
+        vote_tx_hash: "tx-join",
+        voter_role: "DRep",
+        voter_id: "drep1",
+        vote: "Yes",
+        epoch_no: 600,
+        block_time: 1_700_000_000,
+      },
+    ] as any;
+    let releaseUpsert: () => void = () => undefined;
+    let upsertBlocked = false;
+    db.onchainVote.upsert.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          upsertBlocked = true;
+          releaseUpsert = () => resolve({});
+        })
+    );
+
+    const first = ingestVotesForProposal("proposal1", db, undefined, {
+      useCache: false,
+      prefetchedVotes,
+      runCache,
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    const joined = ingestVotesForProposal("proposal1", db, undefined, {
+      useCache: false,
+      prefetchedVotes,
+      runCache,
+    });
+
+    expect(upsertBlocked).toBe(true);
+    releaseUpsert();
+    const [firstResult, joinedResult] = await Promise.all([first, joined]);
+
+    expect(firstResult.success).toBe(true);
+    expect(joinedResult.success).toBe(true);
+    expect(joinedResult.stats.votesProcessed).toBe(1);
+    expect(joinedResult.stats.votesUpserted).toBe(1);
   });
 });
 

@@ -1,4 +1,8 @@
 import { withRetry, type RetryOptions } from "./ingestion/utils";
+import {
+  getGithubSharedRateLimitSnapshot,
+  mergeGithubSharedRateLimitCooldown,
+} from "./ingestion/githubSharedCoordination";
 
 const GITHUB_GRAPHQL_URL = "https://api.github.com/graphql";
 
@@ -7,6 +11,9 @@ const GITHUB_RETRY_OPTIONS: RetryOptions = {
   baseDelay: 5000, // 5 seconds (GitHub secondary limits need breathing room)
   maxDelay: 60000, // 60 seconds
 };
+const RATE_LIMIT_LOW_WATERMARK = 50;
+const GITHUB_SHARED_PULL_INTERVAL_MS = 3000;
+const GITHUB_SHARED_PUBLISH_MIN_INTERVAL_MS = 1000;
 
 // ─── Rate Limit State ────────────────────────────────────────────────────────
 
@@ -21,6 +28,11 @@ let rateLimitState: RateLimitState = {
   resetAt: new Date(0),
   lastCost: 0,
 };
+let sharedRateLimitCooldownUntilMs = 0;
+let sharedRateLimitLastPullMs = 0;
+let sharedRateLimitInFlightPull: Promise<void> | null = null;
+let sharedRateLimitLastPublishedCooldownUntilMs = 0;
+let sharedRateLimitLastPublishMs = 0;
 
 export function getRateLimitState(): Readonly<RateLimitState> {
   return { ...rateLimitState };
@@ -112,15 +124,77 @@ function updateRateLimit(rateLimit: GraphQLRateLimit | undefined): void {
     resetAt: new Date(rateLimit.resetAt),
     lastCost: rateLimit.cost,
   };
+  const localCooldownUntilMs = getLocalRateLimitCooldownUntilMs();
+  if (localCooldownUntilMs > Date.now()) {
+    void publishSharedRateLimitCooldown(localCooldownUntilMs);
+  }
+}
+
+function getLocalRateLimitCooldownUntilMs(): number {
+  if (rateLimitState.remaining > RATE_LIMIT_LOW_WATERMARK) {
+    return 0;
+  }
+  return rateLimitState.resetAt.getTime();
+}
+
+async function pullSharedRateLimitCooldown(): Promise<void> {
+  const now = Date.now();
+  if (now - sharedRateLimitLastPullMs < GITHUB_SHARED_PULL_INTERVAL_MS) {
+    return;
+  }
+  if (sharedRateLimitInFlightPull) {
+    return sharedRateLimitInFlightPull;
+  }
+  sharedRateLimitInFlightPull = (async () => {
+    try {
+      const snapshot = await getGithubSharedRateLimitSnapshot();
+      sharedRateLimitCooldownUntilMs = Math.max(
+        sharedRateLimitCooldownUntilMs,
+        snapshot.cooldownUntilMs
+      );
+    } catch (error) {
+      console.warn(
+        `[github-graphql] Shared rate-limit pull failed: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      );
+    } finally {
+      sharedRateLimitLastPullMs = Date.now();
+      sharedRateLimitInFlightPull = null;
+    }
+  })();
+  return sharedRateLimitInFlightPull;
+}
+
+async function publishSharedRateLimitCooldown(cooldownUntilMs: number): Promise<void> {
+  if (cooldownUntilMs <= Date.now()) return;
+  if (
+    cooldownUntilMs <= sharedRateLimitLastPublishedCooldownUntilMs
+    && Date.now() - sharedRateLimitLastPublishMs < GITHUB_SHARED_PUBLISH_MIN_INTERVAL_MS
+  ) {
+    return;
+  }
+  sharedRateLimitLastPublishedCooldownUntilMs = cooldownUntilMs;
+  sharedRateLimitLastPublishMs = Date.now();
+  try {
+    await mergeGithubSharedRateLimitCooldown(cooldownUntilMs);
+  } catch (error) {
+    console.warn(
+      `[github-graphql] Shared rate-limit publish failed: ${
+        error instanceof Error ? error.message : String(error)
+      }`
+    );
+  }
 }
 
 async function waitForRateLimit(): Promise<void> {
-  if (rateLimitState.remaining > 50) return;
+  await pullSharedRateLimitCooldown();
 
+  const localCooldownUntilMs = getLocalRateLimitCooldownUntilMs();
+  const cooldownUntilMs = Math.max(localCooldownUntilMs, sharedRateLimitCooldownUntilMs);
   const now = Date.now();
-  const resetMs = rateLimitState.resetAt.getTime();
-  if (resetMs > now) {
-    const waitMs = resetMs - now + 1000; // +1s buffer
+  if (cooldownUntilMs > now) {
+    const waitMs = cooldownUntilMs - now + 1000; // +1s buffer
     console.warn(
       `[github-graphql] Rate limit low (${rateLimitState.remaining} remaining). ` +
         `Waiting ${Math.round(waitMs / 1000)}s until reset...`

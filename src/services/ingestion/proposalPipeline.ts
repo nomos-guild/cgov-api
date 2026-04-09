@@ -14,9 +14,10 @@ import {
 import type { KoiosVote } from "../../types/koios.types";
 import type { InactivePowerMetrics } from "./inactiveDrepPower.service";
 import { getKoiosPressureState } from "../koios";
-import { prisma } from "../prisma";
+import type { IngestionDbClient } from "./dbSession";
 
 export interface ProposalPipelineContext {
+  db: IngestionDbClient;
   proposalId: string;
   currentEpoch: number;
   koiosProposal: KoiosProposal;
@@ -73,7 +74,7 @@ export async function runProposalDownstreamPipeline(
 }> {
   const votes = await ingestVotesForProposal(
     context.proposalId,
-    prisma,
+    context.db,
     context.minVotesEpoch,
     {
       useCache: context.useCache !== false,
@@ -91,6 +92,7 @@ export async function runProposalDownstreamPipeline(
     context.currentEpoch
   );
   const votingPower = await updateProposalVotingPower(
+    context.db,
     context.proposalId,
     votingEpochs.drepTotalPowerEpoch,
     votingEpochs.spoTotalPowerEpoch,

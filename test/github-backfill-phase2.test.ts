@@ -46,9 +46,41 @@ describe("phase 2 backfill hardening", () => {
         "Could not resolve to a Repository with the name 'owner/missing'.",
       ])
     );
+    const counterState = {
+      backfillTransient: new Map<string, number>(),
+      backfillUnresolved: new Map<string, number>(),
+    };
 
     jest.doMock("../src/services/prisma", () => ({
       prisma: mockPrisma,
+      withDbRead: async (
+        _operation: string,
+        fn: () => Promise<unknown>
+      ) => fn(),
+      withDbWrite: async (
+        _operation: string,
+        fn: () => Promise<unknown>
+      ) => fn(),
+    }));
+    jest.doMock("../src/services/ingestion/githubSharedCoordination", () => ({
+      incrementGithubRepoHealthCounter: jest.fn(
+        async (kind: "backfillTransient" | "backfillUnresolved", repoId: string) => {
+          const current = counterState[kind].get(repoId) ?? 0;
+          const next = current + 1;
+          counterState[kind].set(repoId, next);
+          return next;
+        }
+      ),
+      clearGithubRepoHealthCounters: jest.fn(
+        async (
+          repoId: string,
+          kinds: Array<"backfillTransient" | "backfillUnresolved">
+        ) => {
+          for (const kind of kinds) {
+            counterState[kind].delete(repoId);
+          }
+        }
+      ),
     }));
     jest.doMock("../src/services/github-graphql", () => ({
       githubGraphQL: (...args: unknown[]) => mockGithubGraphQL(...args),
@@ -89,9 +121,41 @@ describe("phase 2 backfill hardening", () => {
     const transientError = new Error("GitHub GraphQL 503: Service Unavailable");
     const mockPrisma = makeMockPrisma();
     const mockGithubGraphQL = jest.fn().mockRejectedValue(transientError);
+    const counterState = {
+      backfillTransient: new Map<string, number>(),
+      backfillUnresolved: new Map<string, number>(),
+    };
 
     jest.doMock("../src/services/prisma", () => ({
       prisma: mockPrisma,
+      withDbRead: async (
+        _operation: string,
+        fn: () => Promise<unknown>
+      ) => fn(),
+      withDbWrite: async (
+        _operation: string,
+        fn: () => Promise<unknown>
+      ) => fn(),
+    }));
+    jest.doMock("../src/services/ingestion/githubSharedCoordination", () => ({
+      incrementGithubRepoHealthCounter: jest.fn(
+        async (kind: "backfillTransient" | "backfillUnresolved", repoId: string) => {
+          const current = counterState[kind].get(repoId) ?? 0;
+          const next = current + 1;
+          counterState[kind].set(repoId, next);
+          return next;
+        }
+      ),
+      clearGithubRepoHealthCounters: jest.fn(
+        async (
+          repoId: string,
+          kinds: Array<"backfillTransient" | "backfillUnresolved">
+        ) => {
+          for (const kind of kinds) {
+            counterState[kind].delete(repoId);
+          }
+        }
+      ),
     }));
     jest.doMock("../src/services/github-graphql", () => ({
       githubGraphQL: (...args: unknown[]) => mockGithubGraphQL(...args),

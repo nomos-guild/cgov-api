@@ -21,6 +21,7 @@ import {
   getProposalVotingSummary,
   getDrepInfoBatchFromKoios,
   listAllDrepDelegators,
+  listAllVotes,
   listAllDrepIds,
   listAllDrepUpdates,
   listAllPoolGroups,
@@ -86,6 +87,30 @@ describe("governanceProvider", () => {
         epoch_no: "gte.123",
       },
       { source: "test.votes" }
+    );
+  });
+
+  it("uses overlap-safe koiosGetAll flow for full vote-list scans", async () => {
+    mockKoiosGetAll.mockResolvedValue([{ vote_tx_hash: "vote-1" }]);
+
+    const votes = await listAllVotes({
+      proposalId: "gov_action1",
+      minEpoch: 123,
+      source: "test.votes.all",
+    });
+
+    expect(votes).toEqual([{ vote_tx_hash: "vote-1" }]);
+    expect(mockKoiosGetAll).toHaveBeenCalledWith(
+      "/vote_list",
+      {
+        order: "block_time.asc,vote_tx_hash.asc",
+        proposal_id: "eq.gov_action1",
+        epoch_no: "gte.123",
+      },
+      { source: "test.votes.all" },
+      expect.objectContaining({
+        overlapRows: 200,
+      })
     );
   });
 

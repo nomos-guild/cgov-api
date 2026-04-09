@@ -1,6 +1,11 @@
 import { prisma } from "../prisma";
 import { githubGraphQL, buildBatchRepoQuery, getRateLimitState } from "../github-graphql";
 import { SEED_ORGS, SEED_REPOS } from "./ecosystem-seed";
+import {
+  type IngestionDbClient,
+  withIngestionDbRead,
+  withIngestionDbWrite,
+} from "./dbSession";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -165,7 +170,9 @@ async function searchStrategy(
   return allNodes;
 }
 
-export async function discoverRepositories(): Promise<DiscoveryResult> {
+export async function discoverRepositories(
+  db: IngestionDbClient = prisma
+): Promise<DiscoveryResult> {
   const result: DiscoveryResult = {
     total: 0,
     newRepos: 0,
@@ -234,29 +241,44 @@ export async function discoverRepositories(): Promise<DiscoveryResult> {
         discoveredVia: via,
       };
 
-      const existingByGithubId = await prisma.githubRepository.findUnique({
-        where: { githubId },
-        select: { id: true, isActive: true },
-      });
+      const existingByGithubId = await withIngestionDbRead(
+        db,
+        "github-discovery.find-existing-by-github-id",
+        () =>
+          db.githubRepository.findUnique({
+            where: { githubId },
+            select: { id: true, isActive: true },
+          })
+      );
       const existingById = existingByGithubId
         ? null
-        : await prisma.githubRepository.findUnique({
-            where: { id },
-            select: { id: true, isActive: true },
-          });
+        : await withIngestionDbRead(
+          db,
+          "github-discovery.find-existing-by-id",
+          () =>
+            db.githubRepository.findUnique({
+              where: { id },
+              select: { id: true, isActive: true },
+            })
+        );
 
       if (existingByGithubId) {
-        await prisma.githubRepository.update({
-          where: { githubId },
-          data: {
-            id,
-            ...data,
-            isActive: true,
-            discoveredVia: {
-              set: via,
-            },
-          },
-        });
+        await withIngestionDbWrite(
+          db,
+          "github-discovery.update-by-github-id",
+          () =>
+            db.githubRepository.update({
+              where: { githubId },
+              data: {
+                id,
+                ...data,
+                isActive: true,
+                discoveredVia: {
+                  set: via,
+                },
+              },
+            })
+        );
         if (!existingByGithubId.isActive) {
           console.log(
             `[github-repo-health] action=reactivate source=discovery repo=${id} githubId=${githubId}`
@@ -269,16 +291,21 @@ export async function discoverRepositories(): Promise<DiscoveryResult> {
         }
         result.updatedRepos++;
       } else if (existingById) {
-        await prisma.githubRepository.update({
-          where: { id },
-          data: {
-            ...data,
-            isActive: true,
-            discoveredVia: {
-              set: via,
-            },
-          },
-        });
+        await withIngestionDbWrite(
+          db,
+          "github-discovery.update-by-id",
+          () =>
+            db.githubRepository.update({
+              where: { id },
+              data: {
+                ...data,
+                isActive: true,
+                discoveredVia: {
+                  set: via,
+                },
+              },
+            })
+        );
         if (!existingById.isActive) {
           console.log(
             `[github-repo-health] action=reactivate source=discovery repo=${id} githubId=${githubId}`
@@ -286,9 +313,11 @@ export async function discoverRepositories(): Promise<DiscoveryResult> {
         }
         result.updatedRepos++;
       } else {
-        await prisma.githubRepository.create({
-          data: { id, ...data },
-        });
+        await withIngestionDbWrite(db, "github-discovery.create-repo", () =>
+          db.githubRepository.create({
+            data: { id, ...data },
+          })
+        );
         result.newRepos++;
       }
     } catch (error: any) {
