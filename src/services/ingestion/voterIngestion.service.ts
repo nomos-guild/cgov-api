@@ -33,6 +33,7 @@ export interface EnsureVoterResult {
   voterId: string;
   created: boolean;
   updated: boolean;
+  votingPower?: bigint | null;
 }
 
 export interface VoteVoterRef {
@@ -105,13 +106,13 @@ export async function preloadVotersForVotes(
     drepIds.length > 0
       ? tx.drep.findMany({
           where: { drepId: { in: drepIds } },
-          select: { drepId: true },
+          select: { drepId: true, votingPower: true },
         })
       : Promise.resolve([]),
     spoIds.length > 0
       ? tx.sPO.findMany({
           where: { poolId: { in: spoIds } },
-          select: { poolId: true },
+          select: { poolId: true, votingPower: true },
         })
       : Promise.resolve([]),
     ccIds.length > 0
@@ -123,11 +124,16 @@ export async function preloadVotersForVotes(
   ]);
 
   const existingKeys = new Set<string>();
+  const existingPowers = new Map<string, bigint | null>();
   for (const row of existingDreps) {
-    existingKeys.add(getVoterCacheKey("DRep", row.drepId));
+    const key = getVoterCacheKey("DRep", row.drepId);
+    existingKeys.add(key);
+    existingPowers.set(key, row.votingPower ?? null);
   }
   for (const row of existingSpos) {
-    existingKeys.add(getVoterCacheKey("SPO", row.poolId));
+    const key = getVoterCacheKey("SPO", row.poolId);
+    existingKeys.add(key);
+    existingPowers.set(key, row.votingPower ?? null);
   }
   for (const row of existingCcs) {
     existingKeys.add(getVoterCacheKey("ConstitutionalCommittee", row.ccId));
@@ -140,6 +146,7 @@ export async function preloadVotersForVotes(
       voterId: ref.voterId,
       created: false,
       updated: false,
+      votingPower: existingPowers.get(key),
     });
   }
 
@@ -175,10 +182,16 @@ async function ensureDrepExists(
 ): Promise<EnsureVoterResult> {
   const existing = await tx.drep.findUnique({
     where: { drepId },
+    select: { drepId: true, votingPower: true },
   });
 
   if (existing) {
-    return { voterId: existing.drepId, created: false, updated: false };
+    return {
+      voterId: existing.drepId,
+      created: false,
+      updated: false,
+      votingPower: existing.votingPower ?? null,
+    };
   }
 
   let koiosDrep = drepInfoCache.get(drepId);
@@ -286,7 +299,12 @@ async function ensureDrepExists(
     update: {},
   });
 
-  return { voterId: newDrep.drepId, created: true, updated: false };
+  return {
+    voterId: newDrep.drepId,
+    created: true,
+    updated: false,
+    votingPower: newDrep.votingPower ?? null,
+  };
 }
 
 async function ensureSpoExists(
@@ -345,11 +363,17 @@ async function ensureSpoExists(
   });
 
   if (createResult.count > 0) {
-    return { voterId: poolId, created: true, updated: false };
+    return {
+      voterId: poolId,
+      created: true,
+      updated: false,
+      votingPower,
+    };
   }
 
   const existing = await tx.sPO.findUnique({
     where: { poolId },
+    select: { poolId: true, votingPower: true },
   });
 
   if (!existing) {
@@ -358,7 +382,12 @@ async function ensureSpoExists(
     );
   }
 
-  return { voterId: existing.poolId, created: false, updated: false };
+  return {
+    voterId: existing.poolId,
+    created: false,
+    updated: false,
+    votingPower: existing.votingPower ?? null,
+  };
 }
 
 async function ensureCcExists(

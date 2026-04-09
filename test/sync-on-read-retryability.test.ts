@@ -87,6 +87,15 @@ async function loadSyncOnReadHarness(options: HarnessOptions) {
 
     throw new Error(`Unexpected koiosGet path: ${path}`);
   });
+  const mockKoiosGetAll = jest.fn(async (path: string) => {
+    if (path === "/vote_list") {
+      return Array.from({ length: koiosVoteCount }, (_, index) => ({
+        vote_tx_hash: `vote-${index}`,
+      }));
+    }
+
+    throw new Error(`Unexpected koiosGetAll path: ${path}`);
+  });
 
   const mockGetKoiosProposalList = jest.fn().mockResolvedValue([koiosProposal]);
   const ingestResult: ProposalIngestionResult = options.ingestResult ?? {
@@ -137,6 +146,7 @@ async function loadSyncOnReadHarness(options: HarnessOptions) {
     })),
     getKoiosProposalList: mockGetKoiosProposalList,
     koiosGet: mockKoiosGet,
+    koiosGetAll: mockKoiosGetAll,
   }));
   jest.doMock("../src/services/ingestion/proposal.service", () => {
     const actual = jest.requireActual("../src/services/ingestion/proposal.service");

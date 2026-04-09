@@ -51,6 +51,8 @@ import {
 } from "./proposalPipeline";
 import type { VoteIngestionRunCache } from "./vote.service";
 import { logIntegrityEvent } from "./integrityMetrics";
+import type { IngestionDbClient } from "./dbSession";
+import { withIngestionDbRead, withIngestionDbWrite } from "./dbSession";
 
 /**
  * Result of proposal ingestion
@@ -99,7 +101,8 @@ export interface ProposalIngestionResult {
  */
 export async function finalizeProposalStatusAfterVoteSync(
   result: ProposalIngestionResult,
-  logPrefix = "[Proposal Sync]"
+  logPrefix = "[Proposal Sync]",
+  db: IngestionDbClient = prisma
 ): Promise<ProposalIngestionResult> {
   if (!result.success) {
     console.warn(
@@ -112,10 +115,15 @@ export async function finalizeProposalStatusAfterVoteSync(
     return result;
   }
 
-  await prisma.proposal.update({
-    where: { proposalId: result.proposal.proposalId },
-    data: { status: result.intendedStatus },
-  });
+  await withIngestionDbWrite(
+    db,
+    `proposal.finalize-status.${result.proposal.proposalId}`,
+    () =>
+      db.proposal.update({
+        where: { proposalId: result.proposal.proposalId },
+        data: { status: result.intendedStatus },
+      })
+  );
 
   console.log(
     `${logPrefix} Updated status for ${result.proposal.proposalId} to ${result.intendedStatus} after successful vote sync`
@@ -150,6 +158,8 @@ export interface ExistingProposalSyncState {
  * Options for ingestProposalData
  */
 export interface IngestProposalOptions {
+  /** Optional DB client; defaults to shared Prisma client. */
+  db?: IngestionDbClient;
   /** Optional current epoch to reuse across calls */
   currentEpoch?: number;
   /** Optional minimum epoch to fetch votes from */
@@ -286,6 +296,7 @@ export async function ingestProposalData(
       throw new Error("DB fail-fast active; skipping proposal ingestion");
     }
     const {
+      db = prisma,
       currentEpoch: currentEpochOverride,
       minVotesEpoch: minVotesEpochOverride,
       voteRunCache,
@@ -322,15 +333,20 @@ export async function ingestProposalData(
     const derivedStatus = deriveProposalStatus(koiosProposal, currentEpoch);
 
   // 4. Check if proposal exists to determine if creating or updating
-    const existingProposal = await prisma.proposal.findUnique({
-      where: { proposalId: koiosProposal.proposal_id },
-      select: {
-        title: true,
-        description: true,
-        rationale: true,
-        status: true,
-      },
-    });
+    const existingProposal = await withIngestionDbRead(
+      db,
+      `proposal.ingest.find-existing.${koiosProposal.proposal_id}`,
+      () =>
+        db.proposal.findUnique({
+          where: { proposalId: koiosProposal.proposal_id },
+          select: {
+            title: true,
+            description: true,
+            rationale: true,
+            status: true,
+          },
+        })
+    );
 
     const isUpdate = !!existingProposal;
     const { status, intendedStatus } = resolveDeferredProposalStatus(
@@ -376,51 +392,56 @@ export async function ingestProposalData(
     }
 
   // 6. Upsert proposal (single atomic DB operation, no long transaction)
-    const proposal = await prisma.proposal.upsert({
-      where: { proposalId: koiosProposal.proposal_id },
-      create: {
-        proposalId: koiosProposal.proposal_id,
-        txHash: koiosProposal.proposal_tx_hash,
-        certIndex: String(koiosProposal.proposal_index),
-        title,
-        description,
-        rationale,
-        governanceActionType: governanceActionType ?? undefined,
-        withdrawalAmount,
-        status,
-        submissionEpoch: koiosProposal.proposed_epoch,
-        ratifiedEpoch: koiosProposal.ratified_epoch,
-        enactedEpoch: koiosProposal.enacted_epoch,
-        droppedEpoch: koiosProposal.dropped_epoch,
-        expiredEpoch: koiosProposal.expired_epoch,
-        expirationEpoch: koiosProposal.expiration,
-        metadata,
-        linkedSurveyTxId: surveyLink.surveyTxId,
-        surveyDetails: serializedLinkedSurveyDetails,
-      },
-      update: {
-        // Only update mutable fields
-        status,
-        withdrawalAmount,
-        // Backfill governanceActionType when we have a valid mapping
-        ...(governanceActionType !== null && {
-          governanceActionType: governanceActionType,
-        }),
-        ratifiedEpoch: koiosProposal.ratified_epoch,
-        enactedEpoch: koiosProposal.enacted_epoch,
-        droppedEpoch: koiosProposal.dropped_epoch,
-        expiredEpoch: koiosProposal.expired_epoch,
-        expirationEpoch: koiosProposal.expiration,
-        metadata,
-        linkedSurveyTxId: surveyLink.surveyTxId,
-        ...(serializedLinkedSurveyDetails !== null
-          ? { surveyDetails: serializedLinkedSurveyDetails }
-          : shouldClearSurveyDetails
-          ? { surveyDetails: null }
-          : {}),
-        ...updateInfoFields,
-      },
-    });
+    const proposal = await withIngestionDbWrite(
+      db,
+      `proposal.ingest.upsert.${koiosProposal.proposal_id}`,
+      () =>
+        db.proposal.upsert({
+          where: { proposalId: koiosProposal.proposal_id },
+          create: {
+            proposalId: koiosProposal.proposal_id,
+            txHash: koiosProposal.proposal_tx_hash,
+            certIndex: String(koiosProposal.proposal_index),
+            title,
+            description,
+            rationale,
+            governanceActionType: governanceActionType ?? undefined,
+            withdrawalAmount,
+            status,
+            submissionEpoch: koiosProposal.proposed_epoch,
+            ratifiedEpoch: koiosProposal.ratified_epoch,
+            enactedEpoch: koiosProposal.enacted_epoch,
+            droppedEpoch: koiosProposal.dropped_epoch,
+            expiredEpoch: koiosProposal.expired_epoch,
+            expirationEpoch: koiosProposal.expiration,
+            metadata,
+            linkedSurveyTxId: surveyLink.surveyTxId,
+            surveyDetails: serializedLinkedSurveyDetails,
+          },
+          update: {
+            // Only update mutable fields
+            status,
+            withdrawalAmount,
+            // Backfill governanceActionType when we have a valid mapping
+            ...(governanceActionType !== null && {
+              governanceActionType: governanceActionType,
+            }),
+            ratifiedEpoch: koiosProposal.ratified_epoch,
+            enactedEpoch: koiosProposal.enacted_epoch,
+            droppedEpoch: koiosProposal.dropped_epoch,
+            expiredEpoch: koiosProposal.expired_epoch,
+            expirationEpoch: koiosProposal.expiration,
+            metadata,
+            linkedSurveyTxId: surveyLink.surveyTxId,
+            ...(serializedLinkedSurveyDetails !== null
+              ? { surveyDetails: serializedLinkedSurveyDetails }
+              : shouldClearSurveyDetails
+              ? { surveyDetails: null }
+              : {}),
+            ...updateInfoFields,
+          },
+        })
+    );
 
     console.log(
       `[Proposal Ingest] ${isUpdate ? "Updated" : "Created"} proposal - ` +
@@ -430,6 +451,7 @@ export async function ingestProposalData(
 
     const { votes: voteResult, votingPower: votingPowerResult } =
       await runProposalDownstreamPipeline({
+        db,
         proposalId: proposal.proposalId,
         currentEpoch,
         koiosProposal,
@@ -511,6 +533,7 @@ export async function ingestProposal(
   // 3. Ingest the proposal data (let it fetch current epoch itself) and
   //    only fetch votes from this proposal's submission epoch onward.
   const result = await ingestProposalData(koiosProposal, {
+    db: prisma,
     minVotesEpoch: koiosProposal.proposed_epoch,
     // For single-proposal ingestion we prefer the per-proposal fetch path so
     // it matches sync-on-read semantics and avoids cross-proposal paging drift.
@@ -518,7 +541,7 @@ export async function ingestProposal(
     deferStatusFinalization: true,
   });
 
-  return finalizeProposalStatusAfterVoteSync(result, "[Ingest Proposal]");
+  return finalizeProposalStatusAfterVoteSync(result, "[Ingest Proposal]", prisma);
 }
 
 /**
@@ -547,9 +570,15 @@ export async function syncAllProposals(): Promise<SyncAllProposalsResult> {
 
   try {
     // 1. Snapshot existing proposals from DB (IDs + status)
-    const existingProposals = await prisma.proposal.findMany({
-      select: { proposalId: true, status: true },
-    });
+    const db = prisma;
+    const existingProposals = await withIngestionDbRead(
+      db,
+      "proposal.sync-all.find-existing",
+      () =>
+        db.proposal.findMany({
+          select: { proposalId: true, status: true },
+        })
+    );
 
     // 2. Fetch all proposals from Koios (API does not support server-side filtering)
     const allProposals = await koiosGet<KoiosProposal[]>("/proposal_list", undefined, {
@@ -644,6 +673,7 @@ export async function syncAllProposals(): Promise<SyncAllProposalsResult> {
     for (const koiosProposal of sortedProposals) {
       try {
         const result = await ingestProposalData(koiosProposal, {
+          db,
           currentEpoch,
           minVotesEpoch,
           voteRunCache,
@@ -680,7 +710,7 @@ export async function syncAllProposals(): Promise<SyncAllProposalsResult> {
           continue;
         }
 
-        await finalizeProposalStatusAfterVoteSync(result, "[Proposal Sync]");
+        await finalizeProposalStatusAfterVoteSync(result, "[Proposal Sync]", db);
         results.success++;
         console.log(
           `[Proposal Sync] ✓ Synced ${koiosProposal.proposal_tx_hash} (${results.success}/${results.total})`

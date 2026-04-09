@@ -5,6 +5,15 @@ import {
   isRepoUnresolvedInGraphQLError,
   unresolvedRepoDisableThreshold,
 } from "./github-unresolved";
+import {
+  clearGithubRepoHealthCounters,
+  incrementGithubRepoHealthCounter,
+} from "./githubSharedCoordination";
+import {
+  type IngestionDbClient,
+  withIngestionDbRead,
+  withIngestionDbWrite,
+} from "./dbSession";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -116,8 +125,6 @@ const DEFAULT_OPTIONS: Required<BackfillOptions> = {
   minRateLimit: 200,
 };
 const backfillTransientFailureThreshold = 3;
-const backfillTransientFailureCounts = new Map<string, number>();
-const backfillUnresolvedFailureCounts = new Map<string, number>();
 const unresolvedBackfillErrorMessage =
   "GitHub repo unresolved (not found or inaccessible)";
 
@@ -129,7 +136,8 @@ interface BackfillHealthSummary {
 }
 
 export async function backfillRepositories(
-  opts?: BackfillOptions
+  opts?: BackfillOptions,
+  db: IngestionDbClient = prisma
 ): Promise<BackfillResult> {
   const options = { ...DEFAULT_OPTIONS, ...opts };
   const healthSummary: BackfillHealthSummary = {
@@ -139,15 +147,20 @@ export async function backfillRepositories(
     transientDeactivated: 0,
   };
 
-  const repos = await prisma.githubRepository.findMany({
-    where: {
-      backfilledAt: null,
-      isActive: true,
-      stars: { gte: options.minStars },
-    },
-    orderBy: { stars: "desc" },
-    take: options.limit,
-  });
+  const repos = await withIngestionDbRead(
+    db,
+    "github-backfill.find-target-repos",
+    () =>
+      db.githubRepository.findMany({
+        where: {
+          backfilledAt: null,
+          isActive: true,
+          stars: { gte: options.minStars },
+        },
+        orderBy: { stars: "desc" },
+        take: options.limit,
+      })
+  );
 
   const result: BackfillResult = {
     total: repos.length,
@@ -173,9 +186,11 @@ export async function backfillRepositories(
     }
 
     try {
-      await backfillRepo(repo);
-      backfillTransientFailureCounts.delete(repo.id);
-      backfillUnresolvedFailureCounts.delete(repo.id);
+      await backfillRepo(repo, db);
+      await clearGithubRepoHealthCounters(repo.id, [
+        "backfillTransient",
+        "backfillUnresolved",
+      ]);
       result.success++;
       console.log(
         `[backfill] ${repo.id}: done (${result.success}/${result.total}, rl=${getRateLimitState().remaining})`
@@ -184,7 +199,8 @@ export async function backfillRepositories(
       const normalizedError = await handleBackfillRepoFailure(
         repo,
         error,
-        healthSummary
+        healthSummary,
+        db
       );
       result.failed++;
       result.errors.push({ repo: repo.id, error: normalizedError });
@@ -218,22 +234,30 @@ function isTransientBackfillFailure(error: unknown): boolean {
 async function handleBackfillRepoFailure(
   repo: GithubRepository,
   error: unknown,
-  healthSummary: BackfillHealthSummary
+  healthSummary: BackfillHealthSummary,
+  db: IngestionDbClient = prisma
 ): Promise<string> {
   if (isRepoUnresolvedInGraphQLError(error, `${repo.owner}/${repo.name}`)) {
-    backfillTransientFailureCounts.delete(repo.id);
-    const nextCount = (backfillUnresolvedFailureCounts.get(repo.id) ?? 0) + 1;
-    backfillUnresolvedFailureCounts.set(repo.id, nextCount);
+    await clearGithubRepoHealthCounters(repo.id, ["backfillTransient"]);
+    const nextCount = await incrementGithubRepoHealthCounter(
+      "backfillUnresolved",
+      repo.id
+    );
     healthSummary.unresolvedSeen += 1;
     console.warn(
       `[github-repo-health] action=unresolved scope=ingestion.github-backfill repo=${repo.id} count=${nextCount} threshold=${unresolvedRepoDisableThreshold}`
     );
 
     if (nextCount >= unresolvedRepoDisableThreshold) {
-      const deactivated = await prisma.githubRepository.updateMany({
-        where: { id: repo.id, isActive: true },
-        data: { isActive: false },
-      });
+      const deactivated = await withIngestionDbWrite(
+        db,
+        "github-backfill.deactivate-unresolved",
+        () =>
+          db.githubRepository.updateMany({
+            where: { id: repo.id, isActive: true },
+            data: { isActive: false },
+          })
+      );
       if (deactivated.count > 0) {
         healthSummary.unresolvedDeactivated += 1;
         console.warn(
@@ -246,12 +270,14 @@ async function handleBackfillRepoFailure(
   }
 
   if (!isTransientBackfillFailure(error)) {
-    backfillTransientFailureCounts.delete(repo.id);
+    await clearGithubRepoHealthCounters(repo.id, ["backfillTransient"]);
     return String((error as { message?: string })?.message ?? "Unknown error");
   }
 
-  const nextCount = (backfillTransientFailureCounts.get(repo.id) ?? 0) + 1;
-  backfillTransientFailureCounts.set(repo.id, nextCount);
+  const nextCount = await incrementGithubRepoHealthCounter(
+    "backfillTransient",
+    repo.id
+  );
   healthSummary.transientSeen += 1;
   console.warn(
     `[github-repo-health] action=transient-backfill-failure repo=${repo.id} count=${nextCount} threshold=${backfillTransientFailureThreshold}`
@@ -261,10 +287,15 @@ async function handleBackfillRepoFailure(
     return String((error as { message?: string })?.message ?? "Unknown error");
   }
 
-  const deactivated = await prisma.githubRepository.updateMany({
-    where: { id: repo.id, isActive: true },
-    data: { isActive: false },
-  });
+  const deactivated = await withIngestionDbWrite(
+    db,
+    "github-backfill.deactivate-transient-threshold",
+    () =>
+      db.githubRepository.updateMany({
+        where: { id: repo.id, isActive: true },
+        data: { isActive: false },
+      })
+  );
   if (deactivated.count > 0) {
     healthSummary.transientDeactivated += 1;
     console.warn(
@@ -277,7 +308,10 @@ async function handleBackfillRepoFailure(
 
 // ─── Per-Repo Backfill ───────────────────────────────────────────────────────
 
-async function backfillRepo(repo: GithubRepository): Promise<void> {
+async function backfillRepo(
+  repo: GithubRepository,
+  db: IngestionDbClient = prisma
+): Promise<void> {
   const since = new Date();
   since.setFullYear(since.getFullYear() - 5);
   const sinceISO = since.toISOString();
@@ -323,43 +357,55 @@ async function backfillRepo(repo: GithubRepository): Promise<void> {
   }));
 
   if (entries.length > 0) {
-    await prisma.activityHistorical.createMany({
-      data: entries,
-      skipDuplicates: true,
-    });
+    await withIngestionDbWrite(db, "github-backfill.insert-activity-historical", () =>
+      db.activityHistorical.createMany({
+        data: entries,
+        skipDuplicates: true,
+      })
+    );
   }
 
   // Upsert developer_repo_activity for all-time tracking
   for (const [login, stats] of devStats) {
     // Ensure developer exists first
-    await prisma.githubDeveloper.upsert({
-      where: { id: login },
-      create: { id: login, firstSeenAt: stats.lastActiveAt, lastSeenAt: stats.lastActiveAt },
-      update: { lastSeenAt: stats.lastActiveAt },
-    });
+    await withIngestionDbWrite(db, "github-backfill.upsert-developer", () =>
+      db.githubDeveloper.upsert({
+        where: { id: login },
+        create: {
+          id: login,
+          firstSeenAt: stats.lastActiveAt,
+          lastSeenAt: stats.lastActiveAt,
+        },
+        update: { lastSeenAt: stats.lastActiveAt },
+      })
+    );
 
-    await prisma.developerRepoActivity.upsert({
-      where: { developerLogin_repoId: { developerLogin: login, repoId: repo.id } },
-      create: {
-        developerLogin: login,
-        repoId: repo.id,
-        totalCommits: stats.commits,
-        totalPRs: stats.prs,
-        lastActiveAt: stats.lastActiveAt,
-      },
-      update: {
-        totalCommits: stats.commits,
-        totalPRs: stats.prs,
-        lastActiveAt: stats.lastActiveAt,
-      },
-    });
+    await withIngestionDbWrite(db, "github-backfill.upsert-developer-repo-activity", () =>
+      db.developerRepoActivity.upsert({
+        where: { developerLogin_repoId: { developerLogin: login, repoId: repo.id } },
+        create: {
+          developerLogin: login,
+          repoId: repo.id,
+          totalCommits: stats.commits,
+          totalPRs: stats.prs,
+          lastActiveAt: stats.lastActiveAt,
+        },
+        update: {
+          totalCommits: stats.commits,
+          totalPRs: stats.prs,
+          lastActiveAt: stats.lastActiveAt,
+        },
+      })
+    );
   }
 
   // Mark as backfilled
-  await prisma.githubRepository.update({
-    where: { id: repo.id },
-    data: { backfilledAt: new Date() },
-  });
+  await withIngestionDbWrite(db, "github-backfill.mark-backfilled", () =>
+    db.githubRepository.update({
+      where: { id: repo.id },
+      data: { backfilledAt: new Date() },
+    })
+  );
 }
 
 // ─── Pagination Helpers ──────────────────────────────────────────────────────

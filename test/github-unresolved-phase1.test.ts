@@ -101,10 +101,21 @@ describe("phase 1 unresolved repo hardening", () => {
 
     jest.doMock("../src/services/prisma", () => ({
       prisma: mockPrisma,
+      withDbRead: async (
+        _operation: string,
+        fn: () => Promise<unknown>
+      ) => fn(),
+      withDbWrite: async (
+        _operation: string,
+        fn: () => Promise<unknown>
+      ) => fn(),
     }));
     jest.doMock("../src/services/ingestion/dbFailFast", () => ({
       shouldFailFastForDb: jest.fn(() => false),
       recordDbFailureForFailFast: jest.fn(),
+    }));
+    jest.doMock("../src/services/ingestion/githubSharedCoordination", () => ({
+      incrementGithubRepoHealthCounter: jest.fn(async () => 1),
     }));
     jest.doMock("../src/services/github-graphql", () => ({
       githubGraphQL: (...args: unknown[]) => mockGithubGraphQL(...args),

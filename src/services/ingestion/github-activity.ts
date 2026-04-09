@@ -1,4 +1,5 @@
 import { Prisma, type GithubRepository } from "@prisma/client";
+import { createHash } from "crypto";
 import { prisma } from "../prisma";
 import {
   githubGraphQL,
@@ -13,6 +14,12 @@ import {
   getUnresolvedRepoNamesFromGraphQLError,
   unresolvedRepoDisableThreshold,
 } from "./github-unresolved";
+import { incrementGithubRepoHealthCounter } from "./githubSharedCoordination";
+import {
+  type IngestionDbClient,
+  withIngestionDbRead,
+  withIngestionDbWrite,
+} from "./dbSession";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -88,7 +95,6 @@ const RECENT_WINDOW_DAYS = 7;
 const DB_BATCH_SIZE = 200;
 const batchedGithubActivityWritesEnabled =
   process.env.GITHUB_ACTIVITY_BATCHED_DB_WRITES_ENABLED !== "false";
-const unresolvedRepoFailureCounts = new Map<string, number>();
 
 interface RepoHealthSummary {
   unresolvedSeen: number;
@@ -102,38 +108,78 @@ interface RepoRef {
   name: string;
 }
 
+interface ActivityEvent {
+  repoId: string;
+  eventType: string;
+  eventId: string;
+  title: string | null;
+  authorLogin: string | null;
+  additions: number | null;
+  deletions: number | null;
+  eventDate: Date;
+}
+
+interface InsertedActivityEvent {
+  repoId: string;
+  eventType: string;
+  authorLogin: string | null;
+  eventDate: Date;
+}
+
+interface PreparedActivityEvent extends ActivityEvent {
+  id: string;
+}
+
 // ─── Sync Entry Points ──────────────────────────────────────────────────────
 
-export async function syncActiveRepos(): Promise<SyncResult> {
-  const repos = await prisma.githubRepository.findMany({
-    where: { syncTier: "active", isActive: true },
-    orderBy: { lastSyncedAt: "asc" },
-  });
+export async function syncActiveRepos(
+  db: IngestionDbClient = prisma
+): Promise<SyncResult> {
+  const repos = await withIngestionDbRead(db, "github-activity.find-active-repos", () =>
+    db.githubRepository.findMany({
+      where: { syncTier: "active", isActive: true },
+      orderBy: { lastSyncedAt: "asc" },
+    })
+  );
   console.log(`[sync] Syncing ${repos.length} active repos`);
-  return syncRepos(repos);
+  return syncRepos(db, repos);
 }
 
-export async function syncModerateRepos(): Promise<SyncResult> {
-  const repos = await prisma.githubRepository.findMany({
-    where: { syncTier: "moderate", isActive: true },
-    orderBy: { lastSyncedAt: "asc" },
-  });
+export async function syncModerateRepos(
+  db: IngestionDbClient = prisma
+): Promise<SyncResult> {
+  const repos = await withIngestionDbRead(
+    db,
+    "github-activity.find-moderate-repos",
+    () =>
+      db.githubRepository.findMany({
+        where: { syncTier: "moderate", isActive: true },
+        orderBy: { lastSyncedAt: "asc" },
+      })
+  );
   console.log(`[sync] Syncing ${repos.length} moderate repos`);
-  return syncRepos(repos);
+  return syncRepos(db, repos);
 }
 
-export async function syncDormantRepos(): Promise<SyncResult> {
-  const repos = await prisma.githubRepository.findMany({
-    where: { syncTier: "dormant", isActive: true },
-    orderBy: { lastSyncedAt: "asc" },
-  });
+export async function syncDormantRepos(
+  db: IngestionDbClient = prisma
+): Promise<SyncResult> {
+  const repos = await withIngestionDbRead(db, "github-activity.find-dormant-repos", () =>
+    db.githubRepository.findMany({
+      where: { syncTier: "dormant", isActive: true },
+      orderBy: { lastSyncedAt: "asc" },
+    })
+  );
   console.log(`[sync] Syncing ${repos.length} dormant repos`);
-  return syncRepos(repos);
+  return syncRepos(db, repos);
 }
 
 // ─── Core Sync ───────────────────────────────────────────────────────────────
 
-async function syncRepos(repos: GithubRepository[]): Promise<SyncResult> {
+async function syncRepos(
+  db: IngestionDbClient,
+  repos: GithubRepository[]
+): Promise<SyncResult> {
   const result: SyncResult = {
     total: repos.length,
     success: 0,
@@ -168,7 +214,7 @@ async function syncRepos(repos: GithubRepository[]): Promise<SyncResult> {
   for (let i = 0; i < repos.length; i += BATCH_SIZE) {
     const batch = repos.slice(i, i + BATCH_SIZE);
     try {
-      await syncBatch(batch, since, today, result, healthSummary);
+      await syncBatch(db, batch, since, today, result, healthSummary);
     } catch (error: any) {
       recordDbFailureForFailFast(error, "ingestion.github-activity.sync-batch");
       healthSummary.transientBatchFailures += 1;
@@ -192,6 +238,7 @@ async function syncRepos(repos: GithubRepository[]): Promise<SyncResult> {
 }
 
 async function syncBatch(
+  db: IngestionDbClient,
   batch: GithubRepository[],
   since: string,
   today: Date,
@@ -204,12 +251,13 @@ async function syncBatch(
       buildActivityFragment(since),
       result,
       healthSummary,
-      "ingestion.github-activity.sync-batch-item"
+      "ingestion.github-activity.sync-batch-item",
+      db
     );
   if (filteredBatch.length === 0) return;
 
   const allAuthors = new Map<string, string | null>(); // login -> avatarUrl
-  const allEvents: Array<{ repoId: string; eventType: string; authorLogin: string | null; eventDate: Date }> = [];
+  const insertedEventsForStats: InsertedActivityEvent[] = [];
 
   for (let j = 0; j < filteredBatch.length; j++) {
     const repo = filteredBatch[j];
@@ -226,17 +274,12 @@ async function syncBatch(
         throw new Error("DB fail-fast active; skipping github repository batch");
       }
       const events = extractEvents(repo.id, repoData, since);
-      allEvents.push(...events);
       const authors = collectAuthors(repoData);
 
-      // Upsert events (skipDuplicates handles idempotency)
-      if (events.length > 0) {
-        const created = await prisma.activityRecent.createMany({
-          data: events,
-          skipDuplicates: true,
-        });
-        result.eventsCreated += created.count;
-      }
+      // Insert events and only use newly inserted rows for stats increments.
+      const insertedEvents = await insertRecentEventsReturningInserted(db, events);
+      result.eventsCreated += insertedEvents.length;
+      insertedEventsForStats.push(...insertedEvents);
 
       // Track authors for batch developer upsert
       for (const [login, avatar] of authors) {
@@ -244,25 +287,27 @@ async function syncBatch(
       }
 
       // Daily snapshot (one per repo per day)
-      await prisma.repoDailySnapshot.upsert({
-        where: {
-          repoId_date: { repoId: repo.id, date: today },
-        },
-        create: {
-          repoId: repo.id,
-          date: today,
-          stars: repoData.stargazerCount,
-          forks: repoData.forkCount,
-          openIssues: repoData.openIssueCount.totalCount,
-          watchers: repoData.watchers.totalCount,
-        },
-        update: {
-          stars: repoData.stargazerCount,
-          forks: repoData.forkCount,
-          openIssues: repoData.openIssueCount.totalCount,
-          watchers: repoData.watchers.totalCount,
-        },
-      });
+      await withIngestionDbWrite(db, "github-activity.upsert-daily-snapshot", () =>
+        db.repoDailySnapshot.upsert({
+          where: {
+            repoId_date: { repoId: repo.id, date: today },
+          },
+          create: {
+            repoId: repo.id,
+            date: today,
+            stars: repoData.stargazerCount,
+            forks: repoData.forkCount,
+            openIssues: repoData.openIssueCount.totalCount,
+            watchers: repoData.watchers.totalCount,
+          },
+          update: {
+            stars: repoData.stargazerCount,
+            forks: repoData.forkCount,
+            openIssues: repoData.openIssueCount.totalCount,
+            watchers: repoData.watchers.totalCount,
+          },
+        })
+      );
       result.snapshotsTaken++;
 
       // Update repo metadata
@@ -270,15 +315,17 @@ async function syncBatch(
         ? new Date(Math.max(...events.map((e) => e.eventDate.getTime())))
         : null;
 
-      await prisma.githubRepository.update({
-        where: { id: repo.id },
-        data: {
-          lastSyncedAt: new Date(),
-          stars: repoData.stargazerCount,
-          forks: repoData.forkCount,
-          ...(latestEventDate && { lastActivityAt: latestEventDate }),
-        },
-      });
+      await withIngestionDbWrite(db, "github-activity.update-repo-metadata", () =>
+        db.githubRepository.update({
+          where: { id: repo.id },
+          data: {
+            lastSyncedAt: new Date(),
+            stars: repoData.stargazerCount,
+            forks: repoData.forkCount,
+            ...(latestEventDate && { lastActivityAt: latestEventDate }),
+          },
+        })
+      );
 
       result.success++;
     } catch (error: any) {
@@ -289,13 +336,175 @@ async function syncBatch(
   }
 
   // Batch upsert developers, then update per-repo activity stats
-  await upsertDevelopers(allAuthors);
+  await upsertDevelopers(db, allAuthors);
   result.developersUpserted += allAuthors.size;
-  await updateDeveloperRepoStats(allEvents);
+  await updateDeveloperRepoStats(db, insertedEventsForStats);
+}
+
+async function insertRecentEventsReturningInserted(
+  db: IngestionDbClient,
+  events: ActivityEvent[]
+): Promise<InsertedActivityEvent[]> {
+  if (events.length === 0) return [];
+  const inserted: InsertedActivityEvent[] = [];
+
+  for (let i = 0; i < events.length; i += DB_BATCH_SIZE) {
+    const chunk = events.slice(i, i + DB_BATCH_SIZE);
+    const preparedChunk = chunk.map((event) => ({
+      ...event,
+      id: buildActivityRecentId(event),
+    }));
+    let rows: Array<{
+      repo_id: string;
+      event_type: string;
+      author_login: string | null;
+      event_date: Date;
+    }> = [];
+    try {
+      const values = Prisma.join(
+        preparedChunk.map((event) =>
+          Prisma.sql`(${event.id}, ${event.repoId}, ${event.eventType}, ${event.eventId}, ${event.title}, ${event.authorLogin}, ${sqlNullableInt32(
+            event.additions
+          )}, ${sqlNullableInt32(event.deletions)}, ${event.eventDate})`
+        )
+      );
+      rows = await withIngestionDbWrite(
+        db,
+        "github-activity.insert-recent-events-returning",
+        () =>
+          db.$queryRaw<
+            Array<{
+              repo_id: string;
+              event_type: string;
+              author_login: string | null;
+              event_date: Date;
+            }>
+          >`
+            WITH incoming(
+              "id",
+              "repo_id",
+              "event_type",
+              "event_id",
+              "title",
+              "author_login",
+              "additions",
+              "deletions",
+              "event_date"
+            ) AS (
+              VALUES ${values}
+            ),
+            inserted AS (
+              INSERT INTO "activity_recent" (
+                "id",
+                "repo_id",
+                "event_type",
+                "event_id",
+                "title",
+                "author_login",
+                "additions",
+                "deletions",
+                "event_date"
+              )
+              SELECT
+                i."id",
+                i."repo_id",
+                i."event_type",
+                i."event_id",
+                i."title",
+                i."author_login",
+                i."additions",
+                i."deletions",
+                i."event_date"
+              FROM incoming i
+              ON CONFLICT DO NOTHING
+              RETURNING "repo_id", "event_type", "author_login", "event_date"
+            )
+            SELECT "repo_id", "event_type", "author_login", "event_date"
+            FROM inserted
+          `
+      );
+    } catch (error) {
+      console.warn(
+        `[sync] Falling back to row-wise activity_recent inserts after raw chunk failure: ${(error as Error).message}`
+      );
+      rows = await insertRecentEventsChunkFallback(db, preparedChunk);
+    }
+    inserted.push(
+      ...rows.map((row) => ({
+        repoId: row.repo_id,
+        eventType: row.event_type,
+        authorLogin: row.author_login,
+        eventDate: new Date(row.event_date),
+      }))
+    );
+  }
+
+  return inserted;
+}
+
+async function insertRecentEventsChunkFallback(
+  db: IngestionDbClient,
+  chunk: PreparedActivityEvent[]
+): Promise<
+  Array<{
+    repo_id: string;
+    event_type: string;
+    author_login: string | null;
+    event_date: Date;
+  }>
+> {
+  const insertedRows: Array<{
+    repo_id: string;
+    event_type: string;
+    author_login: string | null;
+    event_date: Date;
+  }> = [];
+
+  for (const event of chunk) {
+    try {
+      const created = await withIngestionDbWrite(
+        db,
+        "github-activity.insert-recent-events-fallback-row",
+        () =>
+          db.activityRecent.create({
+            data: {
+              id: event.id,
+              repoId: event.repoId,
+              eventType: event.eventType,
+              eventId: event.eventId,
+              title: event.title,
+              authorLogin: event.authorLogin,
+              additions: event.additions,
+              deletions: event.deletions,
+              eventDate: event.eventDate,
+            },
+          })
+      );
+      insertedRows.push({
+        repo_id: created.repoId,
+        event_type: created.eventType,
+        author_login: created.authorLogin,
+        event_date: created.eventDate,
+      });
+    } catch (error) {
+      if (isUniqueConstraintError(error)) {
+        continue;
+      }
+      throw error;
+    }
+  }
+
+  return insertedRows;
 }
 
 async function updateDeveloperRepoStats(
-  events: Array<{ repoId: string; eventType: string; authorLogin: string | null; eventDate: Date }>
+  db: IngestionDbClient,
+  events: Array<{
+    repoId: string;
+    eventType: string;
+    authorLogin: string | null;
+    eventDate: Date;
+  }>
 ): Promise<void> {
   const map = new Map<string, { commits: number; prs: number; lastActiveAt: Date }>();
 
@@ -327,26 +536,28 @@ async function updateDeveloperRepoStats(
 
   if (!batchedGithubActivityWritesEnabled) {
     for (const row of rows) {
-      await prisma.developerRepoActivity.upsert({
-        where: {
-          developerLogin_repoId: {
+      await withIngestionDbWrite(db, "github-activity.upsert-developer-repo-activity", () =>
+        db.developerRepoActivity.upsert({
+          where: {
+            developerLogin_repoId: {
+              developerLogin: row.login,
+              repoId: row.repoId,
+            },
+          },
+          create: {
             developerLogin: row.login,
             repoId: row.repoId,
+            totalCommits: row.commits,
+            totalPRs: row.prs,
+            lastActiveAt: row.lastActiveAt,
           },
-        },
-        create: {
-          developerLogin: row.login,
-          repoId: row.repoId,
-          totalCommits: row.commits,
-          totalPRs: row.prs,
-          lastActiveAt: row.lastActiveAt,
-        },
-        update: {
-          totalCommits: { increment: row.commits },
-          totalPRs: { increment: row.prs },
-          lastActiveAt: row.lastActiveAt,
-        },
-      });
+          update: {
+            totalCommits: { increment: row.commits },
+            totalPRs: { increment: row.prs },
+            lastActiveAt: row.lastActiveAt,
+          },
+        })
+      );
     }
     return;
   }
@@ -360,7 +571,10 @@ async function updateDeveloperRepoStats(
       )
     );
 
-    await prisma.$executeRaw`
+    await withIngestionDbWrite(
+      db,
+      "github-activity.bulk-upsert-developer-repo-activity",
+      () => db.$executeRaw`
       WITH incoming("developer_login", "repo_id", "total_commits", "total_prs", "last_active_at", "updated_at") AS (
         VALUES ${values}
       )
@@ -390,7 +604,8 @@ async function updateDeveloperRepoStats(
         "total_prs" = "developer_repo_activity"."total_prs" + EXCLUDED."total_prs",
         "last_active_at" = GREATEST("developer_repo_activity"."last_active_at", EXCLUDED."last_active_at"),
         "updated_at" = EXCLUDED."updated_at"
-    `;
+    `
+    );
   }
 }
 
@@ -559,6 +774,7 @@ function collectAuthors(
 }
 
 async function upsertDevelopers(
+  db: IngestionDbClient,
   authors: Map<string, string | null>
 ): Promise<void> {
   if (authors.size === 0) return;
@@ -570,20 +786,24 @@ async function upsertDevelopers(
     lastSeenAt: now,
   }));
 
-  await prisma.githubDeveloper.createMany({
-    data: rows,
-    skipDuplicates: true,
-  });
+  await withIngestionDbWrite(db, "github-activity.create-many-developers", () =>
+    db.githubDeveloper.createMany({
+      data: rows,
+      skipDuplicates: true,
+    })
+  );
 
   if (!batchedGithubActivityWritesEnabled) {
     for (const row of rows) {
-      await prisma.githubDeveloper.update({
-        where: { id: row.id },
-        data: {
-          avatarUrl: row.avatarUrl,
-          lastSeenAt: row.lastSeenAt,
-        },
-      });
+      await withIngestionDbWrite(db, "github-activity.update-developer", () =>
+        db.githubDeveloper.update({
+          where: { id: row.id },
+          data: {
+            avatarUrl: row.avatarUrl,
+            lastSeenAt: row.lastSeenAt,
+          },
+        })
+      );
     }
     return;
   }
@@ -594,7 +814,8 @@ async function upsertDevelopers(
       chunk.map((row) => Prisma.sql`(${row.id}, ${row.avatarUrl}, ${row.lastSeenAt})`)
     );
 
-    await prisma.$executeRaw`
+    await withIngestionDbWrite(db, "github-activity.bulk-update-developers", () =>
+      db.$executeRaw`
       WITH incoming("id", "avatar_url", "last_seen_at") AS (
         VALUES ${values}
       )
@@ -604,13 +825,16 @@ async function upsertDevelopers(
         "last_seen_at" = incoming."last_seen_at"
       FROM incoming
       WHERE gd."id" = incoming."id"
-    `;
+    `
+    );
   }
 }
 
 // ─── Re-Tiering ──────────────────────────────────────────────────────────────
 
-export async function reTierRepos(): Promise<{
+export async function reTierRepos(
+  db: IngestionDbClient = prisma
+): Promise<{
   promoted: number;
   demoted: number;
 }> {
@@ -619,40 +843,52 @@ export async function reTierRepos(): Promise<{
   const ninetyDaysAgo = new Date(now.getTime() - 90 * 24 * 60 * 60 * 1000);
 
   // Promote to active: activity in last 7 days
-  const promoted = await prisma.githubRepository.updateMany({
-    where: {
-      isActive: true,
-      syncTier: { not: "active" },
-      lastActivityAt: { gte: sevenDaysAgo },
-    },
-    data: { syncTier: "active" },
-  });
+  const promoted = await withIngestionDbWrite(db, "github-activity.retier-promote", () =>
+    db.githubRepository.updateMany({
+      where: {
+        isActive: true,
+        syncTier: { not: "active" },
+        lastActivityAt: { gte: sevenDaysAgo },
+      },
+      data: { syncTier: "active" },
+    })
+  );
 
   // Demote active → moderate: no activity in 7 days but within 90
-  const toModerate = await prisma.githubRepository.updateMany({
-    where: {
-      isActive: true,
-      syncTier: "active",
-      OR: [
-        { lastActivityAt: { lt: sevenDaysAgo, gte: ninetyDaysAgo } },
-        { lastActivityAt: null },
-      ],
-    },
-    data: { syncTier: "moderate" },
-  });
+  const toModerate = await withIngestionDbWrite(
+    db,
+    "github-activity.retier-to-moderate",
+    () =>
+      db.githubRepository.updateMany({
+        where: {
+          isActive: true,
+          syncTier: "active",
+          OR: [
+            { lastActivityAt: { lt: sevenDaysAgo, gte: ninetyDaysAgo } },
+            { lastActivityAt: null },
+          ],
+        },
+        data: { syncTier: "moderate" },
+      })
+  );
 
   // Demote moderate → dormant: no activity in 90+ days
-  const toDormant = await prisma.githubRepository.updateMany({
-    where: {
-      isActive: true,
-      syncTier: "moderate",
-      OR: [
-        { lastActivityAt: { lt: ninetyDaysAgo } },
-        { lastActivityAt: null },
-      ],
-    },
-    data: { syncTier: "dormant" },
-  });
+  const toDormant = await withIngestionDbWrite(
+    db,
+    "github-activity.retier-to-dormant",
+    () =>
+      db.githubRepository.updateMany({
+        where: {
+          isActive: true,
+          syncTier: "moderate",
+          OR: [
+            { lastActivityAt: { lt: ninetyDaysAgo } },
+            { lastActivityAt: null },
+          ],
+        },
+        data: { syncTier: "dormant" },
+      })
+  );
 
   const stats = {
     promoted: promoted.count,
@@ -677,12 +913,16 @@ export interface SnapshotResult {
   errors: Array<{ repo: string; error: string }>;
 }
 
-export async function snapshotAllRepos(): Promise<SnapshotResult> {
-  const repos = await prisma.githubRepository.findMany({
-    where: { isActive: true },
-    select: { id: true, owner: true, name: true },
-    orderBy: { lastSyncedAt: "asc" },
-  });
+export async function snapshotAllRepos(
+  db: IngestionDbClient = prisma
+): Promise<SnapshotResult> {
+  const repos = await withIngestionDbRead(db, "github-activity.snapshot-find-repos", () =>
+    db.githubRepository.findMany({
+      where: { isActive: true },
+      select: { id: true, owner: true, name: true },
+      orderBy: { lastSyncedAt: "asc" },
+    })
+  );
 
   const result: SnapshotResult = { total: repos.length, success: 0, failed: 0, errors: [] };
   const healthSummary: RepoHealthSummary = {
@@ -720,7 +960,8 @@ export async function snapshotAllRepos(): Promise<SnapshotResult> {
           fragment,
           result,
           healthSummary,
-          "ingestion.github-activity.snapshot-item"
+          "ingestion.github-activity.snapshot-item",
+          db
         );
       if (filteredBatch.length === 0) {
         continue;
@@ -740,31 +981,41 @@ export async function snapshotAllRepos(): Promise<SnapshotResult> {
           if (shouldFailFastForDb("ingestion.github-activity.snapshot-item")) {
             throw new Error("DB fail-fast active; skipping github snapshot item");
           }
-          await prisma.repoDailySnapshot.upsert({
-            where: { repoId_date: { repoId: repo.id, date: today } },
-            create: {
-              repoId: repo.id,
-              date: today,
-              stars: repoData.stargazerCount,
-              forks: repoData.forkCount,
-              openIssues: repoData.openIssueCount.totalCount,
-              watchers: repoData.watchers.totalCount,
-            },
-            update: {
-              stars: repoData.stargazerCount,
-              forks: repoData.forkCount,
-              openIssues: repoData.openIssueCount.totalCount,
-              watchers: repoData.watchers.totalCount,
-            },
-          });
+          await withIngestionDbWrite(
+            db,
+            "github-activity.snapshot-upsert-daily-snapshot",
+            () =>
+              db.repoDailySnapshot.upsert({
+                where: { repoId_date: { repoId: repo.id, date: today } },
+                create: {
+                  repoId: repo.id,
+                  date: today,
+                  stars: repoData.stargazerCount,
+                  forks: repoData.forkCount,
+                  openIssues: repoData.openIssueCount.totalCount,
+                  watchers: repoData.watchers.totalCount,
+                },
+                update: {
+                  stars: repoData.stargazerCount,
+                  forks: repoData.forkCount,
+                  openIssues: repoData.openIssueCount.totalCount,
+                  watchers: repoData.watchers.totalCount,
+                },
+              })
+          );
 
-          await prisma.githubRepository.update({
-            where: { id: repo.id },
-            data: {
-              stars: repoData.stargazerCount,
-              forks: repoData.forkCount,
-            },
-          });
+          await withIngestionDbWrite(
+            db,
+            "github-activity.snapshot-update-repo",
+            () =>
+              db.githubRepository.update({
+                where: { id: repo.id },
+                data: {
+                  stars: repoData.stargazerCount,
+                  forks: repoData.forkCount,
+                },
+              })
+          );
 
           result.success++;
         } catch (error: any) {
@@ -801,7 +1052,8 @@ async function fetchBatchDataWithUnresolvedHandling<T>(
   fragment: string,
   result: { failed: number; errors: Array<{ repo: string; error: string }> },
   healthSummary: RepoHealthSummary,
-  scope: string
+  scope: string,
+  db: IngestionDbClient = prisma
 ): Promise<{ batch: RepoRef[]; data: Record<string, T> }> {
   let batch = initialBatch;
 
@@ -828,7 +1080,7 @@ async function fetchBatchDataWithUnresolvedHandling<T>(
       }
 
       for (const repo of unresolvedRepos) {
-        await markRepoUnresolved(repo, result, healthSummary, scope);
+        await markRepoUnresolved(repo, result, healthSummary, scope, db);
       }
 
       batch = batch.filter(
@@ -849,10 +1101,13 @@ async function markRepoUnresolved(
   repo: RepoRef,
   result: { failed: number; errors: Array<{ repo: string; error: string }> },
   healthSummary: RepoHealthSummary,
-  scope: string
+  scope: string,
+  db: IngestionDbClient = prisma
 ): Promise<void> {
-  const nextCount = (unresolvedRepoFailureCounts.get(repo.id) ?? 0) + 1;
-  unresolvedRepoFailureCounts.set(repo.id, nextCount);
+  const nextCount = await incrementGithubRepoHealthCounter(
+    "activityUnresolved",
+    repo.id
+  );
   healthSummary.unresolvedSeen += 1;
   result.failed += 1;
   result.errors.push({
@@ -868,10 +1123,15 @@ async function markRepoUnresolved(
     return;
   }
 
-  const deactivated = await prisma.githubRepository.updateMany({
-    where: { id: repo.id, isActive: true },
-    data: { isActive: false },
-  });
+  const deactivated = await withIngestionDbWrite(
+    db,
+    "github-activity.deactivate-unresolved-repo",
+    () =>
+      db.githubRepository.updateMany({
+        where: { id: repo.id, isActive: true },
+        data: { isActive: false },
+      })
+  );
   if (deactivated.count > 0) {
     healthSummary.reposDeactivated += 1;
     console.warn(
@@ -882,18 +1142,50 @@ async function markRepoUnresolved(
 
 // ─── Cleanup ─────────────────────────────────────────────────────────────────
 
-export async function purgeOldRecentActivity(): Promise<number> {
+export async function purgeOldRecentActivity(
+  db: IngestionDbClient = prisma
+): Promise<number> {
   const cutoff = new Date(
     Date.now() - RECENT_WINDOW_DAYS * 24 * 60 * 60 * 1000
   );
-  const deleted = await prisma.activityRecent.deleteMany({
-    where: { eventDate: { lt: cutoff } },
-  });
+  const deleted = await withIngestionDbWrite(
+    db,
+    "github-activity.purge-old-recent-activity",
+    () =>
+      db.activityRecent.deleteMany({
+        where: { eventDate: { lt: cutoff } },
+      })
+  );
   console.log(`[cleanup] Purged ${deleted.count} old activity_recent rows`);
   return deleted.count;
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
+
+function buildActivityRecentId(event: Pick<ActivityEvent, "repoId" | "eventType" | "eventId">): string {
+  const key = `${event.repoId}:${event.eventType}:${event.eventId}`;
+  const digest = createHash("sha256").update(key).digest("hex");
+  return `gha_${digest.slice(0, 48)}`;
+}
+
+/** Postgres infers untyped VALUES columns as text when nullable params mix; cast INTEGER explicitly. */
+function sqlNullableInt32(value: number | null): Prisma.Sql {
+  if (value === null) {
+    return Prisma.sql`NULL::integer`;
+  }
+  return Prisma.sql`${value}::integer`;
+}
+
+function isUniqueConstraintError(error: unknown): boolean {
+  const e = error as { code?: string; cause?: unknown } | null;
+  if (e && typeof e === "object" && e.code === "P2002") {
+    return true;
+  }
+  if (e && typeof e === "object" && e.cause) {
+    return isUniqueConstraintError(e.cause);
+  }
+  return false;
+}
 
 function buildActivityFragment(since: string): string {
   return `defaultBranchRef {

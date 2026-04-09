@@ -1,8 +1,9 @@
 import { backfillRepositories } from "../services/ingestion/github-backfill";
 import { getBoundedIntEnv } from "../services/ingestion/syncLock";
+import { GITHUB_LOCK_KEYS } from "../services/ingestion/githubLockKeys";
 import { startIngestionCronJob } from "./runIngestionCronJob";
 
-const JOB_NAME = "github-backfill-sync";
+const JOB_NAME = GITHUB_LOCK_KEYS.backfill;
 const LOCK_TTL_MS = getBoundedIntEnv(
   "GITHUB_BACKFILL_LOCK_TTL_MS",
   45 * 60 * 1000,

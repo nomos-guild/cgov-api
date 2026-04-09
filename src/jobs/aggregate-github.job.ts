@@ -3,9 +3,10 @@ import {
   precomputeNetworkGraphs,
 } from "../services/ingestion/github-aggregation";
 import { getBoundedIntEnv } from "../services/ingestion/syncLock";
+import { GITHUB_LOCK_KEYS } from "../services/ingestion/githubLockKeys";
 import { startIngestionCronJob } from "./runIngestionCronJob";
 
-const JOB_NAME = "github-aggregation-sync";
+const JOB_NAME = GITHUB_LOCK_KEYS.aggregation;
 const LOCK_TTL_MS = getBoundedIntEnv(
   "GITHUB_AGGREGATION_LOCK_TTL_MS",
   30 * 60 * 1000,

@@ -19,8 +19,8 @@ import { prisma } from "./prisma";
 import { getKoiosPressureState } from "./koios";
 import {
   getProposalVotingSummary,
+  listAllVotes,
   listProposals,
-  listVotes,
 } from "./governanceProvider";
 import {
   ingestProposalData,
@@ -892,39 +892,11 @@ async function fetchVotesForProposal(
   proposalId: string,
   minEpoch?: number
 ): Promise<KoiosVote[]> {
-  const votes: KoiosVote[] = [];
-  let offset = 0;
-  const limit = 1000;
-  let hasMore = true;
-  let requestCount = 0;
-
-  while (hasMore) {
-    requestCount++;
-    const batch = await listVotes({
-      proposalId,
-      minEpoch,
-      limit,
-      offset,
-      order: "block_time.asc,vote_tx_hash.asc",
-      source: "sync-on-read.details.vote-list",
-    });
-
-    if (!batch || batch.length === 0) {
-      hasMore = false;
-    } else {
-      votes.push(...batch);
-      offset += batch.length;
-      if (batch.length < limit) {
-        hasMore = false;
-      }
-    }
-  }
-
-  console.log(
-    `[Sync-on-Read] metric=koios.vote_list.requests_per_proposal proposalId=${proposalId} source=sync-on-read.details.vote-list count=${requestCount}`
-  );
-
-  return votes;
+  return listAllVotes({
+    proposalId,
+    minEpoch,
+    source: "sync-on-read.details.vote-list",
+  });
 }
 
 /**

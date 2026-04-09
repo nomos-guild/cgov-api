@@ -1,4 +1,3 @@
-import { prisma } from "../prisma";
 import { getKoiosPressureState } from "../koios";
 import {
   getAllPoolVotingPowerHistoryForEpoch,
@@ -12,6 +11,8 @@ import {
   getInactivePowerWithCache,
   type InactivePowerMetrics,
 } from "./inactiveDrepPower.service";
+import type { IngestionDbClient } from "./dbSession";
+import { withIngestionDbRead, withIngestionDbWrite } from "./dbSession";
 
 type VotingSummaryFetchOutcome =
   | "success"
@@ -200,10 +201,11 @@ interface AggregatePowerFetchResult {
 }
 
 async function getEpochTotalsPowerFromDb(
+  db: IngestionDbClient,
   epochNo: number,
   runCache?: ProposalVotingPowerRunCache
 ): Promise<{ delegatedDrepPower: bigint | null; totalPoolVotePower: bigint | null }> {
-  const epochTotalsClient = (prisma as typeof prisma & {
+  const epochTotalsClient = (db as IngestionDbClient & {
     epochTotals?: { findUnique?: (...args: any[]) => Promise<any> };
   }).epochTotals;
   if (typeof epochTotalsClient?.findUnique !== "function") {
@@ -217,10 +219,15 @@ async function getEpochTotalsPowerFromDb(
   if (inFlight) return await inFlight;
 
   const loadPromise = (async () => {
-    const row = await epochTotalsClient.findUnique({
-      where: { epoch: epochNo },
-      select: { delegatedDrepPower: true, totalPoolVotePower: true },
-    });
+    const row = await withIngestionDbRead(
+      db,
+      `proposal-voting-power.epoch-totals.${epochNo}`,
+      () =>
+        epochTotalsClient.findUnique({
+          where: { epoch: epochNo },
+          select: { delegatedDrepPower: true, totalPoolVotePower: true },
+        })
+    );
     return {
       delegatedDrepPower: row?.delegatedDrepPower ?? null,
       totalPoolVotePower: row?.totalPoolVotePower ?? null,
@@ -238,6 +245,7 @@ async function getEpochTotalsPowerFromDb(
 }
 
 async function fetchDrepTotalVotingPower(
+  db: IngestionDbClient,
   epochNo: number,
   runCache?: ProposalVotingPowerRunCache
 ): Promise<AggregatePowerFetchResult> {
@@ -251,7 +259,7 @@ async function fetchDrepTotalVotingPower(
   const loadPromise = (async () => {
     if (VOTE_POWER_USE_EPOCH_TOTALS_CACHE) {
       try {
-        const row = await getEpochTotalsPowerFromDb(epochNo, runCache);
+        const row = await getEpochTotalsPowerFromDb(db, epochNo, runCache);
         if (row.delegatedDrepPower != null) {
           runCache?.drepTotalByEpoch.set(epochNo, row.delegatedDrepPower);
           return { value: row.delegatedDrepPower, complete: true };
@@ -294,6 +302,7 @@ async function fetchDrepTotalVotingPower(
 }
 
 async function fetchSpoTotalVotingPower(
+  db: IngestionDbClient,
   epochNo: number,
   runCache?: ProposalVotingPowerRunCache
 ): Promise<AggregatePowerFetchResult> {
@@ -309,7 +318,7 @@ async function fetchSpoTotalVotingPower(
   const loadPromise = (async () => {
   if (VOTE_POWER_USE_EPOCH_TOTALS_CACHE) {
     try {
-      const row = await getEpochTotalsPowerFromDb(epochNo, runCache);
+      const row = await getEpochTotalsPowerFromDb(db, epochNo, runCache);
       if (row.totalPoolVotePower != null) {
         runCache?.spoTotalByEpoch.set(epochNo, row.totalPoolVotePower);
         return { value: row.totalPoolVotePower, complete: true };
@@ -449,6 +458,7 @@ function countChangedVotePowerFields(
 }
 
 export async function updateProposalVotingPower(
+  db: IngestionDbClient,
   proposalId: string,
   drepTotalPowerEpoch: number,
   spoTotalPowerEpoch: number,
@@ -528,8 +538,8 @@ export async function updateProposalVotingPower(
 
     const [drepTotalVotePowerResult, spoTotalVotePowerResult, drepInactiveVotePower] =
       await Promise.all([
-        fetchDrepTotalVotingPower(drepTotalPowerEpoch, votingPowerRunCache),
-        fetchSpoTotalVotingPower(spoTotalPowerEpoch, votingPowerRunCache),
+        fetchDrepTotalVotingPower(db, drepTotalPowerEpoch, votingPowerRunCache),
+        fetchSpoTotalVotingPower(db, spoTotalPowerEpoch, votingPowerRunCache),
         shouldCalculateInactive
           ? getInactivePowerWithCache(
               inactivePowerEpoch,
@@ -578,30 +588,35 @@ export async function updateProposalVotingPower(
       spoTotalVotePower: spoTotalVotePowerResult.value,
       drepInactiveVotePower,
     });
-    const proposalClient = prisma.proposal as typeof prisma.proposal & {
+    const proposalClient = db.proposal as typeof db.proposal & {
       findUnique?: (...args: any[]) => Promise<ProposalVotePowerData | null>;
     };
     let changedFields = Object.keys(nextVotePowerData).length;
     if (typeof proposalClient.findUnique === "function") {
-      const currentProposal = await proposalClient.findUnique({
-        where: { proposalId },
-        select: {
-          drepTotalVotePower: true,
-          drepActiveYesVotePower: true,
-          drepActiveNoVotePower: true,
-          drepActiveAbstainVotePower: true,
-          drepAlwaysAbstainVotePower: true,
-          drepAlwaysNoConfidencePower: true,
-          drepInactiveVotePower: true,
-          spoTotalVotePower: true,
-          spoActiveYesVotePower: true,
-          spoActiveNoVotePower: true,
-          spoActiveAbstainVotePower: true,
-          spoAlwaysAbstainVotePower: true,
-          spoAlwaysNoConfidencePower: true,
-          spoNoVotePower: true,
-        },
-      });
+      const currentProposal = await withIngestionDbRead(
+        db,
+        `proposal-voting-power.current.${proposalId}`,
+        () =>
+          proposalClient.findUnique({
+            where: { proposalId },
+            select: {
+              drepTotalVotePower: true,
+              drepActiveYesVotePower: true,
+              drepActiveNoVotePower: true,
+              drepActiveAbstainVotePower: true,
+              drepAlwaysAbstainVotePower: true,
+              drepAlwaysNoConfidencePower: true,
+              drepInactiveVotePower: true,
+              spoTotalVotePower: true,
+              spoActiveYesVotePower: true,
+              spoActiveNoVotePower: true,
+              spoActiveAbstainVotePower: true,
+              spoAlwaysAbstainVotePower: true,
+              spoAlwaysNoConfidencePower: true,
+              spoNoVotePower: true,
+            },
+          })
+      );
       if (!currentProposal) {
         return {
           success: false,
@@ -630,10 +645,15 @@ export async function updateProposalVotingPower(
       }
     }
 
-    await prisma.proposal.update({
-      where: { proposalId },
-      data: nextVotePowerData,
-    });
+    await withIngestionDbWrite(
+      db,
+      `proposal-voting-power.update.${proposalId}`,
+      () =>
+        db.proposal.update({
+          where: { proposalId },
+          data: nextVotePowerData,
+        })
+    );
     console.log(
       `[Voting Power] Proposal update metrics: proposalId=${proposalId} changedFields=${changedFields}`
     );
