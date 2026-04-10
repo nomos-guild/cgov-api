@@ -298,6 +298,10 @@ model OnchainVote {
   spo      SPO?     @relation(fields: [spoId], references: [poolId])
 
   @@unique([txHash, proposalId, voterType, drepId, spoId, ccId])
+  @@index([drepId])
+  @@index([proposalId])
+  @@index([voterType])
+  @@index([votedAt(sort: Desc)])
   @@map("onchain_vote")
 }
 
