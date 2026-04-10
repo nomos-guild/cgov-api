@@ -26,7 +26,7 @@ export const KOIOS_ACCOUNT_UPDATE_HISTORY_PAGE_SIZE = 1000;
 // Keep tx_info batches small to respect Koios payload limits on public/free tiers.
 export const KOIOS_TX_INFO_BATCH_SIZE = 10;
 export const DREP_DELEGATOR_MIN_VOTING_POWER = BigInt(0);
-export const DREP_DELEGATION_SYNC_CONCURRENCY = 2;
+export const DREP_DELEGATION_SYNC_CONCURRENCY = 1;
 export const DREP_DELEGATION_DB_UPDATE_CONCURRENCY = 4;
 export const DREP_INFO_SYNC_CONCURRENCY = getBoundedIntEnv(
   "DREP_INFO_SYNC_CONCURRENCY",
