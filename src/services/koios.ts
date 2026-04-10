@@ -303,10 +303,10 @@ function getKoiosRetryOptionsForProfile(
   if (profile === "high_volume") {
     return {
       ...KOIOS_DEFAULT_RETRY_OPTIONS,
-      maxRetries: getBoundedIntEnv("KOIOS_RETRY_MAX_HIGH_VOLUME", 2, 0, 8),
+      maxRetries: getBoundedIntEnv("KOIOS_RETRY_MAX_HIGH_VOLUME", 3, 0, 8),
       maxRetriesForTimeouts: getBoundedIntEnv(
         "KOIOS_RETRY_TIMEOUT_HIGH_VOLUME",
-        1,
+        2,
         0,
         8
       ),

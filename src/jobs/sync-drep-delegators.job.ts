@@ -7,16 +7,10 @@
 
 import { prisma } from "../services";
 import { syncDrepDelegationChanges } from "../services/ingestion/epoch-analytics.service";
-import { getBoundedIntEnv } from "../services/ingestion/syncLock";
 import { startIngestionCronJob } from "./runIngestionCronJob";
 
 const JOB_NAME = "drep-delegator-sync";
-const LOCK_TTL_MS = getBoundedIntEnv(
-  "DREP_DELEGATOR_SYNC_LOCK_TTL_MS",
-  30 * 60 * 1000,
-  30_000,
-  60 * 60 * 1000
-);
+const LOCK_TTL_MS = 3 * 60 * 60 * 1000; // 3 hours — full sync (Phase 1+2+3) must complete within this window
 
 /**
  * Starts the DRep delegation change sync job.

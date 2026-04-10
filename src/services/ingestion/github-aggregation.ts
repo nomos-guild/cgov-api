@@ -183,13 +183,15 @@ export async function aggregateRecentToHistorical(
     for (let i = 0; i < bucketRows.length; i += DB_BATCH_SIZE) {
     const chunk = bucketRows.slice(i, i + DB_BATCH_SIZE);
     const values = Prisma.join(
-      chunk.map((b) =>
-        Prisma.sql`(${b.repoId}, ${b.date}, ${b.commitCount}, ${b.prOpened}, ${b.prMerged}, ${b.prClosed}, ${b.issuesOpened}, ${b.issuesClosed}, ${b.additions}, ${b.deletions}, ${b.contributors.size})`
-      )
+      chunk.map((b) => {
+        const id = `${b.repoId}:${b.date.toISOString().slice(0, 10)}`;
+        return Prisma.sql`(${id}, ${b.repoId}, ${b.date}, ${b.commitCount}, ${b.prOpened}, ${b.prMerged}, ${b.prClosed}, ${b.issuesOpened}, ${b.issuesClosed}, ${b.additions}, ${b.deletions}, ${b.contributors.size})`;
+      })
     );
     await withIngestionDbWrite(db, "github-aggregation.bulk-upsert-activity-historical", () =>
       db.$executeRaw`
       INSERT INTO "activity_historical" (
+        "id",
         "repo_id",
         "date",
         "commit_count",
