@@ -11,7 +11,7 @@ import type {
   KoiosSpo,
   KoiosSpoVotingPower,
 } from "../../types/koios.types";
-import type { IngestionDbClient } from "./dbSession";
+import { type IngestionDbClient, withIngestionDbWrite } from "./dbSession";
 import { getKoiosCurrentEpoch } from "./sync-utils";
 import {
   extractBooleanField,
@@ -286,18 +286,20 @@ async function ensureDrepExists(
     console.warn(`[Voter Service] Failed to fetch metadata for DRep ${drepId}`);
   }
 
-  const newDrep = await tx.drep.upsert({
-    where: { drepId },
-    create: {
-      drepId,
-      votingPower,
-      ...(name && { name }),
-      ...(paymentAddress && { paymentAddr: paymentAddress }),
-      ...(iconUrl && { iconUrl }),
-      ...(typeof doNotList === "boolean" && { doNotList }),
-    },
-    update: {},
-  });
+  const newDrep = await withIngestionDbWrite(tx, "voter-ingestion.drep.upsert", () =>
+    tx.drep.upsert({
+      where: { drepId },
+      create: {
+        drepId,
+        votingPower,
+        ...(name && { name }),
+        ...(paymentAddress && { paymentAddr: paymentAddress }),
+        ...(iconUrl && { iconUrl }),
+        ...(typeof doNotList === "boolean" && { doNotList }),
+      },
+      update: {},
+    })
+  );
 
   return {
     voterId: newDrep.drepId,
@@ -351,16 +353,18 @@ async function ensureSpoExists(
 
   const { poolName, ticker, iconUrl } = await fetchPoolMetadata(koiosSpo);
 
-  const createResult = await tx.sPO.createMany({
-    data: {
-      poolId,
-      poolName,
-      ticker,
-      votingPower,
-      ...(iconUrl && { iconUrl }),
-    },
-    skipDuplicates: true,
-  });
+  const createResult = await withIngestionDbWrite(tx, "voter-ingestion.spo.createMany", () =>
+    tx.sPO.createMany({
+      data: {
+        poolId,
+        poolName,
+        ticker,
+        votingPower,
+        ...(iconUrl && { iconUrl }),
+      },
+      skipDuplicates: true,
+    })
+  );
 
   if (createResult.count > 0) {
     return {
@@ -408,16 +412,18 @@ async function ensureCcExists(
     status = "expired";
   }
 
-  const createResult = await tx.cC.createMany({
-    data: {
-      ccId,
-      hotCredential: ccMember?.cc_hot_id || ccId,
-      coldCredential: ccMember?.cc_cold_id,
-      status,
-      memberName: null,
-    },
-    skipDuplicates: true,
-  });
+  const createResult = await withIngestionDbWrite(tx, "voter-ingestion.cc.createMany", () =>
+    tx.cC.createMany({
+      data: {
+        ccId,
+        hotCredential: ccMember?.cc_hot_id || ccId,
+        coldCredential: ccMember?.cc_cold_id,
+        status,
+        memberName: null,
+      },
+      skipDuplicates: true,
+    })
+  );
 
   if (createResult.count > 0) {
     return { voterId: ccId, created: true, updated: false };

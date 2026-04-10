@@ -5,7 +5,7 @@
  * - syncDrepDelegationChanges: Syncs delegation states and change log
  */
 
-import { Prisma } from "@prisma/client";
+import { Prisma, type StakeDelegationSyncState, type SyncStatus } from "@prisma/client";
 import {
   getAccountUpdateHistoryBatch,
   getTxInfoBatch,
@@ -35,6 +35,7 @@ import {
   refreshDrepDelegatorCountsFromDelegationState,
 } from "./drep-sync.service";
 import { logIntegrityEvent } from "./integrityMetrics";
+import { withIngestionDbWrite } from "./dbSession";
 
 const KOIOS_HEAVY_DREP_DELEGATORS_LANE_JOB_NAME =
   "koios-heavy-drep-delegators-lane";
@@ -426,13 +427,17 @@ async function updateStakeDelegationStateBatch(
 ): Promise<number> {
   if (rows.length === 0) return 0;
 
-  const values = Prisma.join(
-    rows.map((row) =>
-      Prisma.sql`(${row.stakeAddress}, ${row.drepId}, ${row.amount}, ${row.delegatedEpoch})`
-    )
-  );
+  return withIngestionDbWrite(
+    prisma,
+    "delegation-sync.stakeDelegationState.batch-update-raw",
+    async () => {
+      const values = Prisma.join(
+        rows.map((row) =>
+          Prisma.sql`(${row.stakeAddress}, ${row.drepId}, ${row.amount}, ${row.delegatedEpoch})`
+        )
+      );
 
-  const updated = await prisma.$executeRaw`
+      const updated = await prisma.$executeRaw`
     UPDATE "stake_delegation_state" AS s
     SET
       "drep_id" = v."drep_id",
@@ -444,7 +449,9 @@ async function updateStakeDelegationStateBatch(
     WHERE s."stake_address" = v."stake_address"
   `;
 
-  return Number(updated);
+      return Number(updated);
+    }
+  );
 }
 
 async function backfillStakeDelegationHistory(
@@ -477,14 +484,19 @@ async function backfillStakeDelegationHistory(
   const txStakeDrepCache = new Map<string, string | null>();
 
   if (options?.jobName) {
-    const status = await statusClient.syncStatus.upsert({
-      where: { jobName: options.jobName },
-      create: {
-        jobName: options.jobName,
-        displayName: options.displayName ?? options.jobName,
-      },
-      update: {},
-    });
+    const status = await withIngestionDbWrite(
+      prisma,
+      "delegation-sync.backfill.syncStatus.upsert",
+      (): Promise<SyncStatus> =>
+        statusClient.syncStatus.upsert({
+          where: { jobName: options.jobName },
+          create: {
+            jobName: options.jobName,
+            displayName: options.displayName ?? options.jobName,
+          },
+          update: {},
+        })
+    );
     cursor = status.backfillCursor ?? null;
     if (cursor) {
       remainingAddresses = remainingAddresses.filter(
@@ -492,16 +504,18 @@ async function backfillStakeDelegationHistory(
       );
     }
     processed = status.backfillItemsProcessed ?? 0;
-    await statusClient.syncStatus.update({
-      where: { jobName: options.jobName },
-      data: {
-        backfillIsRunning: true,
-        backfillStartedAt: now,
-        backfillCompletedAt: null,
-        backfillErrorMessage: null,
-        backfillItemsTotal: remainingAddresses.length,
-      },
-    });
+    await withIngestionDbWrite(prisma, "delegation-sync.backfill.syncStatus.mark-running", () =>
+      statusClient.syncStatus.update({
+        where: { jobName: options.jobName },
+        data: {
+          backfillIsRunning: true,
+          backfillStartedAt: now,
+          backfillCompletedAt: null,
+          backfillErrorMessage: null,
+          backfillItemsTotal: remainingAddresses.length,
+        },
+      })
+    );
   }
 
   let backfillError: string | null = null;
@@ -595,10 +609,15 @@ async function backfillStakeDelegationHistory(
           const chunkSize = 1000;
           for (let i = 0; i < changes.length; i += chunkSize) {
             const chunk = changes.slice(i, i + chunkSize);
-            const result = await statusClient.stakeDelegationChange.createMany({
-              data: chunk,
-              skipDuplicates: true,
-            });
+            const result = await withIngestionDbWrite(
+              prisma,
+              "delegation-sync.backfill.stakeDelegationChange.createMany",
+              (): Promise<Prisma.BatchPayload> =>
+                statusClient.stakeDelegationChange.createMany({
+                  data: chunk,
+                  skipDuplicates: true,
+                })
+            );
             changesInserted += result.count;
           }
         }
@@ -611,49 +630,63 @@ async function backfillStakeDelegationHistory(
           processed += 1;
           lastCursorUpdate = stakeAddress;
           if (processed % STATUS_UPDATE_INTERVAL === 0) {
-            await statusClient.syncStatus.update({
-              where: { jobName: options.jobName },
-              data: {
-                backfillCursor: lastCursorUpdate,
-                backfillItemsProcessed: processed,
-              },
-            });
+            await withIngestionDbWrite(
+              prisma,
+              "delegation-sync.backfill.syncStatus.checkpoint",
+              () =>
+                statusClient.syncStatus.update({
+                  where: { jobName: options.jobName },
+                  data: {
+                    backfillCursor: lastCursorUpdate,
+                    backfillItemsProcessed: processed,
+                  },
+                })
+            );
             lastCursorUpdate = null;
           }
         }
       }
     }
     if (options?.jobName && lastCursorUpdate) {
-      await statusClient.syncStatus.update({
-        where: { jobName: options.jobName },
-        data: {
-          backfillCursor: lastCursorUpdate,
-          backfillItemsProcessed: processed,
-        },
-      });
+      await withIngestionDbWrite(
+        prisma,
+        "delegation-sync.backfill.syncStatus.checkpoint-final",
+        () =>
+          statusClient.syncStatus.update({
+            where: { jobName: options.jobName },
+            data: {
+              backfillCursor: lastCursorUpdate,
+              backfillItemsProcessed: processed,
+            },
+          })
+      );
       lastCursorUpdate = null;
     }
   } catch (error: any) {
     backfillError = error?.message ?? String(error);
     if (options?.jobName) {
-      await statusClient.syncStatus.update({
-        where: { jobName: options.jobName },
-        data: {
-          backfillIsRunning: false,
-          backfillErrorMessage: backfillError,
-        },
-      });
+      await withIngestionDbWrite(prisma, "delegation-sync.backfill.syncStatus.mark-error", () =>
+        statusClient.syncStatus.update({
+          where: { jobName: options.jobName },
+          data: {
+            backfillIsRunning: false,
+            backfillErrorMessage: backfillError,
+          },
+        })
+      );
     }
     throw error;
   } finally {
     if (options?.jobName && backfillError == null) {
-      await statusClient.syncStatus.update({
-        where: { jobName: options.jobName },
-        data: {
-          backfillIsRunning: false,
-          backfillCompletedAt: new Date(),
-        },
-      });
+      await withIngestionDbWrite(prisma, "delegation-sync.backfill.syncStatus.mark-complete", () =>
+        statusClient.syncStatus.update({
+          where: { jobName: options.jobName },
+          data: {
+            backfillIsRunning: false,
+            backfillCompletedAt: new Date(),
+          },
+        })
+      );
     }
   }
 
@@ -684,11 +717,16 @@ export async function syncDrepDelegationChanges(
     stakeDelegationSyncState: any;
   };
   const currentEpoch = await getKoiosCurrentEpoch();
-  const syncState = await delegationClient.stakeDelegationSyncState.upsert({
-    where: { id: STAKE_DELEGATION_SYNC_STATE_ID },
-    update: {},
-    create: { id: STAKE_DELEGATION_SYNC_STATE_ID },
-  });
+  const syncState = await withIngestionDbWrite(
+    prisma,
+    "delegation-sync.stakeDelegationSyncState.upsert",
+    (): Promise<StakeDelegationSyncState> =>
+      delegationClient.stakeDelegationSyncState.upsert({
+        where: { id: STAKE_DELEGATION_SYNC_STATE_ID },
+        update: {},
+        create: { id: STAKE_DELEGATION_SYNC_STATE_ID },
+      })
+  );
   const lastProcessedEpoch = syncState.lastProcessedEpoch ?? 0;
 
   // Force full history backfill (via env var). This is designed to be enabled temporarily.
@@ -820,25 +858,27 @@ export async function syncDrepDelegationChanges(
   let phase1DelegatorRows = 0;
   const heavyLaneClient = prisma as Prisma.TransactionClient & { syncStatus: any };
   const heavyLaneStartedAt = new Date();
-  await heavyLaneClient.syncStatus.upsert({
-    where: { jobName: KOIOS_HEAVY_DREP_DELEGATORS_LANE_JOB_NAME },
-    create: {
-      jobName: KOIOS_HEAVY_DREP_DELEGATORS_LANE_JOB_NAME,
-      displayName: "Koios Heavy /drep_delegators Lane",
-      isRunning: true,
-      startedAt: heavyLaneStartedAt,
-      completedAt: null,
-      expiresAt: new Date(heavyLaneStartedAt.getTime() + HEAVY_LANE_LOCK_TTL_MS),
-      errorMessage: null,
-    },
-    update: {
-      isRunning: true,
-      startedAt: heavyLaneStartedAt,
-      completedAt: null,
-      expiresAt: new Date(heavyLaneStartedAt.getTime() + HEAVY_LANE_LOCK_TTL_MS),
-      errorMessage: null,
-    },
-  });
+  await withIngestionDbWrite(prisma, "delegation-sync.heavy-lane.syncStatus.upsert", () =>
+    heavyLaneClient.syncStatus.upsert({
+      where: { jobName: KOIOS_HEAVY_DREP_DELEGATORS_LANE_JOB_NAME },
+      create: {
+        jobName: KOIOS_HEAVY_DREP_DELEGATORS_LANE_JOB_NAME,
+        displayName: "Koios Heavy /drep_delegators Lane",
+        isRunning: true,
+        startedAt: heavyLaneStartedAt,
+        completedAt: null,
+        expiresAt: new Date(heavyLaneStartedAt.getTime() + HEAVY_LANE_LOCK_TTL_MS),
+        errorMessage: null,
+      },
+      update: {
+        isRunning: true,
+        startedAt: heavyLaneStartedAt,
+        completedAt: null,
+        expiresAt: new Date(heavyLaneStartedAt.getTime() + HEAVY_LANE_LOCK_TTL_MS),
+        errorMessage: null,
+      },
+    })
+  );
 
   let delegatorFetchResult: {
     successful: Array<{ drepId: string; delegators: KoiosDrepDelegator[] }>;
@@ -859,14 +899,16 @@ export async function syncDrepDelegationChanges(
       DREP_DELEGATION_SYNC_CONCURRENCY
     );
   } finally {
-    await heavyLaneClient.syncStatus.update({
-      where: { jobName: KOIOS_HEAVY_DREP_DELEGATORS_LANE_JOB_NAME },
-      data: {
-        isRunning: false,
-        completedAt: new Date(),
-        expiresAt: null,
-      },
-    });
+    await withIngestionDbWrite(prisma, "delegation-sync.heavy-lane.syncStatus.release", () =>
+      heavyLaneClient.syncStatus.update({
+        where: { jobName: KOIOS_HEAVY_DREP_DELEGATORS_LANE_JOB_NAME },
+        data: {
+          isRunning: false,
+          completedAt: new Date(),
+          expiresAt: null,
+        },
+      })
+    );
   }
 
   if (delegatorFetchResult.failed.length > 0) {
@@ -976,25 +1018,30 @@ export async function syncDrepDelegationChanges(
       failClosed: shouldFailClosed,
       drepIds: failed.slice(0, 20).map((entry) => entry.drepId),
     });
-    await (prisma as any).syncStatus.upsert({
-      where: { jobName: DELEGATION_FULL_SCAN_WINDOW_JOB_NAME },
-      create: {
-        jobName: DELEGATION_FULL_SCAN_WINDOW_JOB_NAME,
-        displayName: "DRep Delegation Full Scan Window",
-        isRunning: false,
-        completedAt: new Date(),
-        lastResult: shouldFailClosed ? "error" : "success",
-        itemsProcessed: allDelegatorsByStake.size,
-        errorMessage: failureSummary,
-      },
-      update: {
-        isRunning: false,
-        completedAt: new Date(),
-        lastResult: shouldFailClosed ? "error" : "success",
-        itemsProcessed: allDelegatorsByStake.size,
-        errorMessage: failureSummary,
-      },
-    });
+    await withIngestionDbWrite(
+      prisma,
+      "delegation-sync.full-scan-window.syncStatus.upsert-phase1-failures",
+      () =>
+        (prisma as any).syncStatus.upsert({
+          where: { jobName: DELEGATION_FULL_SCAN_WINDOW_JOB_NAME },
+          create: {
+            jobName: DELEGATION_FULL_SCAN_WINDOW_JOB_NAME,
+            displayName: "DRep Delegation Full Scan Window",
+            isRunning: false,
+            completedAt: new Date(),
+            lastResult: shouldFailClosed ? "error" : "success",
+            itemsProcessed: allDelegatorsByStake.size,
+            errorMessage: failureSummary,
+          },
+          update: {
+            isRunning: false,
+            completedAt: new Date(),
+            lastResult: shouldFailClosed ? "error" : "success",
+            itemsProcessed: allDelegatorsByStake.size,
+            errorMessage: failureSummary,
+          },
+        })
+    );
     if (shouldFailClosed) {
       const result = {
         currentEpoch,
@@ -1057,10 +1104,15 @@ export async function syncDrepDelegationChanges(
   );
 
   if (newStakeAddresses.length > 0) {
-    await delegationClient.stakeAddress.createMany({
-      data: newStakeAddresses.map((stakeAddress) => ({ stakeAddress })),
-      skipDuplicates: true,
-    });
+    await withIngestionDbWrite(
+      prisma,
+      "delegation-sync.stakeAddress.createMany",
+      () =>
+        delegationClient.stakeAddress.createMany({
+          data: newStakeAddresses.map((stakeAddress) => ({ stakeAddress })),
+          skipDuplicates: true,
+        })
+    );
   }
 
   // Handle initial backfill vs incremental sync
@@ -1273,48 +1325,58 @@ export async function syncDrepDelegationChanges(
 
       if (!clearGuard.allowClear) {
         toClear.length = 0;
-        await (prisma as any).syncStatus.upsert({
-          where: { jobName: DELEGATION_CLEAR_GUARD_JOB_NAME },
-          create: {
-            jobName: DELEGATION_CLEAR_GUARD_JOB_NAME,
-            displayName: "DRep Delegation Clear Guard",
-            isRunning: false,
-            completedAt: new Date(),
-            lastResult: "error",
-            itemsProcessed: clearGuard.checkpoint.toClearCount,
-            errorMessage: JSON.stringify(clearGuard.checkpoint),
-          },
-          update: {
-            isRunning: false,
-            completedAt: new Date(),
-            lastResult: "error",
-            itemsProcessed: clearGuard.checkpoint.toClearCount,
-            errorMessage: JSON.stringify(clearGuard.checkpoint),
-          },
-        });
+        await withIngestionDbWrite(
+          prisma,
+          "delegation-sync.clear-guard.syncStatus.upsert-blocked",
+          () =>
+            (prisma as any).syncStatus.upsert({
+              where: { jobName: DELEGATION_CLEAR_GUARD_JOB_NAME },
+              create: {
+                jobName: DELEGATION_CLEAR_GUARD_JOB_NAME,
+                displayName: "DRep Delegation Clear Guard",
+                isRunning: false,
+                completedAt: new Date(),
+                lastResult: "error",
+                itemsProcessed: clearGuard.checkpoint.toClearCount,
+                errorMessage: JSON.stringify(clearGuard.checkpoint),
+              },
+              update: {
+                isRunning: false,
+                completedAt: new Date(),
+                lastResult: "error",
+                itemsProcessed: clearGuard.checkpoint.toClearCount,
+                errorMessage: JSON.stringify(clearGuard.checkpoint),
+              },
+            })
+        );
         console.warn(
           `[Integrity] delegation_clear_guard_blocked reasons=${clearGuard.reasons.join(",")} activeStates=${clearGuard.checkpoint.activeDelegationStateCount} snapshotStakes=${clearGuard.checkpoint.snapshotStakeCount} toClear=${clearGuard.checkpoint.toClearCount} coverageRatio=${clearGuard.checkpoint.coverageRatio.toFixed(4)}`
         );
       } else {
-        await (prisma as any).syncStatus.upsert({
-          where: { jobName: DELEGATION_CLEAR_GUARD_JOB_NAME },
-          create: {
-            jobName: DELEGATION_CLEAR_GUARD_JOB_NAME,
-            displayName: "DRep Delegation Clear Guard",
-            isRunning: false,
-            completedAt: new Date(),
-            lastResult: "success",
-            itemsProcessed: toClear.length,
-            errorMessage: null,
-          },
-          update: {
-            isRunning: false,
-            completedAt: new Date(),
-            lastResult: "success",
-            itemsProcessed: toClear.length,
-            errorMessage: null,
-          },
-        });
+        await withIngestionDbWrite(
+          prisma,
+          "delegation-sync.clear-guard.syncStatus.upsert-allowed",
+          () =>
+            (prisma as any).syncStatus.upsert({
+              where: { jobName: DELEGATION_CLEAR_GUARD_JOB_NAME },
+              create: {
+                jobName: DELEGATION_CLEAR_GUARD_JOB_NAME,
+                displayName: "DRep Delegation Clear Guard",
+                isRunning: false,
+                completedAt: new Date(),
+                lastResult: "success",
+                itemsProcessed: toClear.length,
+                errorMessage: null,
+              },
+              update: {
+                isRunning: false,
+                completedAt: new Date(),
+                lastResult: "success",
+                itemsProcessed: toClear.length,
+                errorMessage: null,
+              },
+            })
+        );
         if (clearGuard.confirmedBySecondRun) {
           console.warn(
             `[Integrity] delegation_clear_guard_confirmed_second_run activeStates=${clearGuard.checkpoint.activeDelegationStateCount} snapshotStakes=${clearGuard.checkpoint.snapshotStakeCount} toClear=${clearGuard.checkpoint.toClearCount}`
@@ -1404,22 +1466,25 @@ export async function syncDrepDelegationChanges(
     }
   }
 
-  await syncStatusClient.syncStatus.upsert({
-    where: { jobName: DREP_DELEGATION_PHASE3_JOB_NAME },
-    create: {
-      jobName: DREP_DELEGATION_PHASE3_JOB_NAME,
-      displayName: "DRep Delegation Phase 3",
-      backfillCursor: JSON.stringify(checkpoint),
-    },
-    update: {},
-  });
+  await withIngestionDbWrite(prisma, "delegation-sync.phase3.syncStatus.upsert", () =>
+    syncStatusClient.syncStatus.upsert({
+      where: { jobName: DREP_DELEGATION_PHASE3_JOB_NAME },
+      create: {
+        jobName: DREP_DELEGATION_PHASE3_JOB_NAME,
+        displayName: "DRep Delegation Phase 3",
+        backfillCursor: JSON.stringify(checkpoint),
+      },
+      update: {},
+    })
+  );
 
   const buildCheckpointData = (updates: Partial<Phase3Checkpoint>) => {
     const next = { ...checkpoint, ...updates };
     return { next, data: { backfillCursor: JSON.stringify(next) } };
   };
 
-  // Batch create new states (with checkpoint)
+  // Batch create new states (with checkpoint).
+  // prisma.$transaction batches: retries apply at transaction boundary / job rerun, not per-statement (ingestion DB resilience plan).
   if (toCreate.length > 0 && !checkpoint.createsComplete) {
     const { next, data: checkpointData } = buildCheckpointData({ createsComplete: true });
     if (transactionClient.$transaction) {
@@ -1434,14 +1499,24 @@ export async function syncDrepDelegationChanges(
         }),
       ]);
     } else {
-      await delegationClient.stakeDelegationState.createMany({
-        data: toCreate,
-        skipDuplicates: true,
-      });
-      await syncStatusClient.syncStatus.update({
-        where: { jobName: DREP_DELEGATION_PHASE3_JOB_NAME },
-        data: checkpointData,
-      });
+      await withIngestionDbWrite(
+        prisma,
+        "delegation-sync.phase3.stakeDelegationState.createMany",
+        () =>
+          delegationClient.stakeDelegationState.createMany({
+            data: toCreate,
+            skipDuplicates: true,
+          })
+      );
+      await withIngestionDbWrite(
+        prisma,
+        "delegation-sync.phase3.syncStatus.update-after-create",
+        () =>
+          syncStatusClient.syncStatus.update({
+            where: { jobName: DREP_DELEGATION_PHASE3_JOB_NAME },
+            data: checkpointData,
+          })
+      );
     }
     checkpoint = next;
   }
@@ -1460,10 +1535,15 @@ export async function syncDrepDelegationChanges(
       const chunk = toUpdate.slice(i, i + updateChunkSize);
       const { next, data: checkpointData } = buildCheckpointData({ updateChunkIndex: chunkIndex + 1 });
       await updateStakeDelegationStateBatch(delegationClient, chunk);
-      await syncStatusClient.syncStatus.update({
-        where: { jobName: DREP_DELEGATION_PHASE3_JOB_NAME },
-        data: checkpointData,
-      });
+      await withIngestionDbWrite(
+        prisma,
+        "delegation-sync.phase3.syncStatus.update-after-state-batch",
+        () =>
+          syncStatusClient.syncStatus.update({
+            where: { jobName: DREP_DELEGATION_PHASE3_JOB_NAME },
+            data: checkpointData,
+          })
+      );
       checkpoint = next;
     }
   }
@@ -1477,17 +1557,22 @@ export async function syncDrepDelegationChanges(
     );
     for (let i = 0; i < toClear.length; i += clearChunkSize) {
       const chunk = toClear.slice(i, i + clearChunkSize);
-      await delegationClient.stakeDelegationState.updateMany({
-        where: {
-          stakeAddress: { in: chunk },
-          drepId: { not: null },
-        },
-        data: {
-          drepId: null,
-          amount: null,
-          delegatedEpoch: null,
-        },
-      });
+      await withIngestionDbWrite(
+        prisma,
+        "delegation-sync.stakeDelegationState.updateMany-clear",
+        () =>
+          delegationClient.stakeDelegationState.updateMany({
+            where: {
+              stakeAddress: { in: chunk },
+              drepId: { not: null },
+            },
+            data: {
+              drepId: null,
+              amount: null,
+              delegatedEpoch: null,
+            },
+          })
+      );
     }
   }
 
@@ -1509,6 +1594,7 @@ export async function syncDrepDelegationChanges(
   }
 
   // Batch insert change log entries (with per-chunk checkpoint).
+  // prisma.$transaction batches: retries at transaction boundary / job rerun (ingestion DB resilience plan).
   if (changeLogToInsert.length > 0) {
     const changesChunkSize = 1000;
     const startChunkIndex = checkpoint.changesChunkIndex;
@@ -1534,24 +1620,36 @@ export async function syncDrepDelegationChanges(
           }),
         ]);
       } else {
-        await delegationClient.stakeDelegationChange.createMany({
-          data: changeData,
-          skipDuplicates: true,
-        });
-        await syncStatusClient.syncStatus.update({
-          where: { jobName: DREP_DELEGATION_PHASE3_JOB_NAME },
-          data: checkpointData,
-        });
+        await withIngestionDbWrite(
+          prisma,
+          "delegation-sync.phase3.stakeDelegationChange.createMany",
+          () =>
+            delegationClient.stakeDelegationChange.createMany({
+              data: changeData,
+              skipDuplicates: true,
+            })
+        );
+        await withIngestionDbWrite(
+          prisma,
+          "delegation-sync.phase3.syncStatus.update-after-changes",
+          () =>
+            syncStatusClient.syncStatus.update({
+              where: { jobName: DREP_DELEGATION_PHASE3_JOB_NAME },
+              data: checkpointData,
+            })
+        );
       }
       checkpoint = next;
     }
   }
 
   // Clear checkpoint on successful completion
-  await syncStatusClient.syncStatus.update({
-    where: { jobName: DREP_DELEGATION_PHASE3_JOB_NAME },
-    data: { backfillCursor: null, backfillCompletedAt: new Date() },
-  });
+  await withIngestionDbWrite(prisma, "delegation-sync.phase3.syncStatus.clear-checkpoint", () =>
+    syncStatusClient.syncStatus.update({
+      where: { jobName: DREP_DELEGATION_PHASE3_JOB_NAME },
+      data: { backfillCursor: null, backfillCompletedAt: new Date() },
+    })
+  );
 
   // Always refresh DRep delegator_count after a successful reconciliation pass.
   const refreshResult = await refreshDrepDelegatorCountsFromDelegationState(
@@ -1569,31 +1667,41 @@ export async function syncDrepDelegationChanges(
 
   // Update sync state
   if (failed.length === 0 && maxDelegationEpoch >= lastProcessedEpoch) {
-    await delegationClient.stakeDelegationSyncState.update({
-      where: { id: STAKE_DELEGATION_SYNC_STATE_ID },
-      data: { lastProcessedEpoch: maxDelegationEpoch },
-    });
+    await withIngestionDbWrite(
+      prisma,
+      "delegation-sync.stakeDelegationSyncState.update-lastProcessedEpoch",
+      () =>
+        delegationClient.stakeDelegationSyncState.update({
+          where: { id: STAKE_DELEGATION_SYNC_STATE_ID },
+          data: { lastProcessedEpoch: maxDelegationEpoch },
+        })
+    );
   }
 
-  await (prisma as any).syncStatus.upsert({
-    where: { jobName: DELEGATION_FULL_SCAN_WINDOW_JOB_NAME },
-    create: {
-      jobName: DELEGATION_FULL_SCAN_WINDOW_JOB_NAME,
-      displayName: "DRep Delegation Full Scan Window",
-      isRunning: false,
-      completedAt: new Date(),
-      lastResult: "success",
-      itemsProcessed: allDelegatorsByStake.size,
-      errorMessage: null,
-    },
-    update: {
-      isRunning: false,
-      completedAt: new Date(),
-      lastResult: "success",
-      itemsProcessed: allDelegatorsByStake.size,
-      errorMessage: null,
-    },
-  });
+  await withIngestionDbWrite(
+    prisma,
+    "delegation-sync.full-scan-window.syncStatus.upsert-success",
+    () =>
+      (prisma as any).syncStatus.upsert({
+        where: { jobName: DELEGATION_FULL_SCAN_WINDOW_JOB_NAME },
+        create: {
+          jobName: DELEGATION_FULL_SCAN_WINDOW_JOB_NAME,
+          displayName: "DRep Delegation Full Scan Window",
+          isRunning: false,
+          completedAt: new Date(),
+          lastResult: "success",
+          itemsProcessed: allDelegatorsByStake.size,
+          errorMessage: null,
+        },
+        update: {
+          isRunning: false,
+          completedAt: new Date(),
+          lastResult: "success",
+          itemsProcessed: allDelegatorsByStake.size,
+          errorMessage: null,
+        },
+      })
+  );
 
   console.log(
     `[DRep Delegation Sync] metrics phase1Dreps=${drepIds.length} phase1Rows=${phase1DelegatorRows} uniqueStakes=${allStakeAddresses.size} duplicateStakeConflicts=${duplicateConflictStats.total} newStakes=${newStakeAddresses.length} creates=${toCreate.length} updates=${toUpdate.length} cleared=${toClear.length} changesCandidate=${changeLog.length} changesInserted=${changeLogToInsert.length} fetchFailures=${failed.length}`

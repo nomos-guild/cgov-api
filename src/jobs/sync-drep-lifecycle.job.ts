@@ -8,6 +8,7 @@
 
 import { prisma } from "../services";
 import { syncDrepLifecycleStep } from "../services/ingestion/epoch-analytics.service";
+import { DREP_LIFECYCLE_SYNC_LOCK_TTL_MS } from "../services/ingestion/sync-utils";
 import { startIngestionCronJob } from "./runIngestionCronJob";
 
 const JOB_NAME = "drep-lifecycle-sync";
@@ -21,6 +22,10 @@ export const startDrepLifecycleSyncJob = () =>
     skipDbPressure: true,
     skipKoiosPressure: true,
     useKoiosHeavyLane: true,
+    lockOptions: {
+      ttlMs: DREP_LIFECYCLE_SYNC_LOCK_TTL_MS,
+      source: "cron",
+    },
     run: async () => {
       const result = await syncDrepLifecycleStep(prisma);
       const timestamp = new Date().toISOString();

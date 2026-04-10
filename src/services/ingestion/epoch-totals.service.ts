@@ -23,6 +23,7 @@ import {
   getKoiosCurrentEpoch,
   EPOCH_TOTALS_BACKFILL_CONCURRENCY,
 } from "./sync-utils";
+import { withIngestionDbWrite } from "./dbSession";
 import { processInParallel } from "./parallel";
 
 const KOIOS_HEAVY_DREP_DELEGATORS_LANE_JOB_NAME =
@@ -393,12 +394,14 @@ export async function syncEpochTotals(
   });
 
   if (!existing) {
-    await prisma.epochTotals.create({
-      data: {
-        epoch: epochNo,
-        ...payload,
-      },
-    });
+    await withIngestionDbWrite(prisma, "epoch-totals.row.create", () =>
+      prisma.epochTotals.create({
+        data: {
+          epoch: epochNo,
+          ...payload,
+        },
+      })
+    );
     console.log(`[Epoch Totals] epoch=${epochNo} action=create`);
   } else {
     const changed =
@@ -425,10 +428,12 @@ export async function syncEpochTotals(
       existing.txCount !== payload.txCount;
 
     if (changed) {
-      await prisma.epochTotals.update({
-        where: { epoch: epochNo },
-        data: payload,
-      });
+      await withIngestionDbWrite(prisma, "epoch-totals.row.update", () =>
+        prisma.epochTotals.update({
+          where: { epoch: epochNo },
+          data: payload,
+        })
+      );
       console.log(`[Epoch Totals] epoch=${epochNo} action=update`);
     } else {
       console.log(
@@ -521,11 +526,13 @@ export async function syncMissingEpochAnalytics(
     totalsToSync,
     (epoch) => `${epoch}`,
     async (epoch) => {
-      await prisma.epochAnalyticsSync.upsert({
-        where: { epoch },
-        update: {},
-        create: { epoch },
-      });
+      await withIngestionDbWrite(prisma, "epoch-totals.checkpoint.upsert", () =>
+        prisma.epochAnalyticsSync.upsert({
+          where: { epoch },
+          update: {},
+          create: { epoch },
+        })
+      );
 
       const totals = await syncEpochTotals(prisma, epoch);
 
@@ -538,10 +545,15 @@ export async function syncMissingEpochAnalytics(
         );
       }
 
-      await prisma.epochAnalyticsSync.update({
-        where: { epoch },
-        data: { totalsSyncedAt: new Date() },
-      });
+      await withIngestionDbWrite(
+        prisma,
+        "epoch-totals.checkpoint.mark-totals-synced",
+        () =>
+          prisma.epochAnalyticsSync.update({
+            where: { epoch },
+            data: { totalsSyncedAt: new Date() },
+          })
+      );
       return epoch;
     },
     EPOCH_TOTALS_BACKFILL_CONCURRENCY

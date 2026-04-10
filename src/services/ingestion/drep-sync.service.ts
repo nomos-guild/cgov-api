@@ -24,6 +24,7 @@ import {
 import { getDrepInfoBatch } from "../drep-lookup";
 import { processInParallel } from "./parallel";
 import { getBoundedIntEnv } from "./syncLock";
+import { withIngestionDbWrite } from "./dbSession";
 
 const DREP_INFO_DELEGATOR_COUNT_REFRESH_COOLDOWN_MS = getBoundedIntEnv(
   "DREP_INFO_DELEGATOR_COUNT_REFRESH_COOLDOWN_MS",
@@ -199,10 +200,15 @@ export async function ensureDrepsExist(
   const missing = uniqueIds.filter((id) => !existingSet.has(id));
   if (missing.length === 0) return { created: 0 };
 
-  const createManyResult = await prisma.drep.createMany({
-    data: missing.map((drepId) => ({ drepId, votingPower: BigInt(0) })),
-    skipDuplicates: true,
-  });
+  const createManyResult = await withIngestionDbWrite(
+    prisma,
+    "drep-sync.ensure.createMany",
+    () =>
+      prisma.drep.createMany({
+        data: missing.map((drepId) => ({ drepId, votingPower: BigInt(0) })),
+        skipDuplicates: true,
+      })
+  );
   return { created: createManyResult.count };
 }
 
@@ -223,13 +229,18 @@ export async function syncAllDrepsInventory(
 
   let created = 0;
   if (missing.length > 0) {
-    const createManyResult = await prisma.drep.createMany({
-      data: missing.map((drepId) => ({
-        drepId,
-        votingPower: BigInt(0),
-      })),
-      skipDuplicates: true,
-    });
+    const createManyResult = await withIngestionDbWrite(
+      prisma,
+      "drep-sync.inventory.createMany",
+      () =>
+        prisma.drep.createMany({
+          data: missing.map((drepId) => ({
+            drepId,
+            votingPower: BigInt(0),
+          })),
+          skipDuplicates: true,
+        })
+    );
     created = createManyResult.count;
   }
 
@@ -266,7 +277,11 @@ export async function syncAllDrepsInventory(
 export async function refreshDrepDelegatorCountsFromDelegationState(
   prisma: Prisma.TransactionClient
 ): Promise<{ updated: number }> {
-  const updatedWithDelegators = await prisma.$executeRaw`
+  return withIngestionDbWrite(
+    prisma,
+    "drep-sync.delegator-count.refresh-raw",
+    async () => {
+      const updatedWithDelegators = await prisma.$executeRaw`
     UPDATE "drep" AS d
     SET "delegator_count" = counts.cnt
     FROM (
@@ -278,7 +293,7 @@ export async function refreshDrepDelegatorCountsFromDelegationState(
     WHERE d."drep_id" = counts."drep_id"
   `;
 
-  const updatedWithoutDelegators = await prisma.$executeRaw`
+      const updatedWithoutDelegators = await prisma.$executeRaw`
     UPDATE "drep" AS d
     SET "delegator_count" = 0
     WHERE NOT EXISTS (
@@ -289,7 +304,11 @@ export async function refreshDrepDelegatorCountsFromDelegationState(
       AND COALESCE(d."delegator_count", -1) <> 0
   `;
 
-  return { updated: Number(updatedWithDelegators) + Number(updatedWithoutDelegators) };
+      return {
+        updated: Number(updatedWithDelegators) + Number(updatedWithoutDelegators),
+      };
+    }
+  );
 }
 
 /**
@@ -371,32 +390,36 @@ export async function syncAllDrepsInfo(
           if (!info?.drep_id) return null;
           const metadata = metadataByDrepId.get(info.drep_id) ?? {};
 
-          await prisma.drep.update({
-            where: { drepId: info.drep_id },
-            data: {
-              ...(DREP_INFO_WRITE_VOTING_POWER && {
-                votingPower: toBigIntOrNull(info.amount) ?? BigInt(0),
-              }),
-              registered: info.registered ?? undefined,
-              active: info.active ?? undefined,
-              expiresEpoch: info.expires_epoch_no ?? undefined,
-              metaUrl: info.meta_url ?? undefined,
-              metaHash: info.meta_hash ?? undefined,
-              // Metadata from /drep_updates (only when changed)
-              ...(metadata.name && { name: metadata.name }),
-              ...(metadata.paymentAddr && { paymentAddr: metadata.paymentAddr }),
-              ...(metadata.iconUrl && { iconUrl: metadata.iconUrl }),
-              ...(typeof metadata.doNotList === "boolean" && {
-                doNotList: metadata.doNotList,
-              }),
-              // CIP-119 metadata
-              ...(metadata.bio && { bio: metadata.bio }),
-              ...(metadata.motivations && { motivations: metadata.motivations }),
-              ...(metadata.objectives && { objectives: metadata.objectives }),
-              ...(metadata.qualifications && { qualifications: metadata.qualifications }),
-              ...(metadata.references && { references: metadata.references }),
-            },
-          });
+          await withIngestionDbWrite(prisma, "drep-sync.info.update", () =>
+            prisma.drep.update({
+              where: { drepId: info.drep_id },
+              data: {
+                ...(DREP_INFO_WRITE_VOTING_POWER && {
+                  votingPower: toBigIntOrNull(info.amount) ?? BigInt(0),
+                }),
+                registered: info.registered ?? undefined,
+                active: info.active ?? undefined,
+                expiresEpoch: info.expires_epoch_no ?? undefined,
+                metaUrl: info.meta_url ?? undefined,
+                metaHash: info.meta_hash ?? undefined,
+                // Metadata from /drep_updates (only when changed)
+                ...(metadata.name && { name: metadata.name }),
+                ...(metadata.paymentAddr && { paymentAddr: metadata.paymentAddr }),
+                ...(metadata.iconUrl && { iconUrl: metadata.iconUrl }),
+                ...(typeof metadata.doNotList === "boolean" && {
+                  doNotList: metadata.doNotList,
+                }),
+                // CIP-119 metadata
+                ...(metadata.bio && { bio: metadata.bio }),
+                ...(metadata.motivations && { motivations: metadata.motivations }),
+                ...(metadata.objectives && { objectives: metadata.objectives }),
+                ...(metadata.qualifications && {
+                  qualifications: metadata.qualifications,
+                }),
+                ...(metadata.references && { references: metadata.references }),
+              },
+            })
+          );
           return info;
         },
         DREP_INFO_SYNC_CONCURRENCY
@@ -475,15 +498,20 @@ export async function snapshotDrepEpoch(
   const chunkSize = 500;
   for (let i = 0; i < dreps.length; i += chunkSize) {
     const chunk = dreps.slice(i, i + chunkSize);
-    const result = await prisma.drepEpochSnapshot.createMany({
-      data: chunk.map((d) => ({
-        drepId: d.drepId,
-        epoch,
-        delegatorCount: d.delegatorCount ?? 0,
-        votingPower: d.votingPower,
-      })),
-      skipDuplicates: true,
-    });
+    const result = await withIngestionDbWrite(
+      prisma,
+      "drep-sync.epoch-snapshot.createMany",
+      () =>
+        prisma.drepEpochSnapshot.createMany({
+          data: chunk.map((d) => ({
+            drepId: d.drepId,
+            epoch,
+            delegatorCount: d.delegatorCount ?? 0,
+            votingPower: d.votingPower,
+          })),
+          skipDuplicates: true,
+        })
+    );
     snapshotted += result.count;
   }
 

@@ -1,20 +1,11 @@
 import { Request, Response } from "express";
 import { syncDrepDelegationChanges } from "../../services/ingestion/epoch-analytics.service";
 import { prisma } from "../../services";
-import {
-  acquireJobLock,
-  getBoundedIntEnv,
-  releaseJobLock,
-} from "../../services/ingestion/syncLock";
+import { acquireJobLock, releaseJobLock } from "../../services/ingestion/syncLock";
+import { DREP_DELEGATOR_SYNC_LOCK_TTL_MS } from "../../services/ingestion/sync-utils";
 
 const JOB_NAME = "drep-delegator-sync";
 const DISPLAY_NAME = "DRep Delegator Sync";
-const LOCK_EXPIRY_MS = getBoundedIntEnv(
-  "DREP_DELEGATOR_SYNC_LOCK_TTL_MS",
-  30 * 60 * 1000,
-  30_000,
-  60 * 60 * 1000
-);
 
 /**
  * POST /data/trigger-drep-delegator-sync
@@ -31,7 +22,7 @@ export const postTriggerDrepDelegatorSync = async (
   try {
     // Try to acquire lock using database transaction
     acquired = await acquireJobLock(JOB_NAME, DISPLAY_NAME, {
-      ttlMs: LOCK_EXPIRY_MS,
+      ttlMs: DREP_DELEGATOR_SYNC_LOCK_TTL_MS,
       source: "api-instance",
     });
 
@@ -46,6 +37,14 @@ export const postTriggerDrepDelegatorSync = async (
           "DRep delegator sync is already running. Skipping duplicate trigger.",
       });
     }
+
+    const lease = await prisma.syncStatus.findUnique({
+      where: { jobName: JOB_NAME },
+      select: { startedAt: true, expiresAt: true, lockedBy: true },
+    });
+    console.log(
+      `[DRep Delegator Sync] lockLease startedAt=${lease?.startedAt?.toISOString() ?? "null"} expiresAt=${lease?.expiresAt?.toISOString() ?? "null"} lockedBy=${lease?.lockedBy ?? "null"}`
+    );
 
     console.log("[DRep Delegator Sync] Triggered via API endpoint");
 

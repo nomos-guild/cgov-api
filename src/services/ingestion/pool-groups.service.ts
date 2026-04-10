@@ -13,6 +13,7 @@ import {
   chunkArray,
 } from "./sync-utils";
 import { processInParallel } from "./parallel";
+import { withIngestionDbWrite } from "./dbSession";
 
 // ============================================================
 // Constants
@@ -177,10 +178,15 @@ export async function syncPoolGroups(
 
     // Batch create new pool groups
     if (toCreate.length > 0) {
-      const createResult = await poolGroupClient.poolGroup.createMany({
-        data: toCreate,
-        skipDuplicates: true,
-      });
+      const createResult = await withIngestionDbWrite(
+        prisma,
+        "pool-groups.createMany",
+        (): Promise<Prisma.BatchPayload> =>
+          poolGroupClient.poolGroup.createMany({
+            data: toCreate,
+            skipDuplicates: true,
+          })
+      );
       result.created = createResult.count;
     }
 
@@ -190,15 +196,17 @@ export async function syncPoolGroups(
         toUpdate,
         (row) => row.poolId,
         async (row) => {
-          await poolGroupClient.poolGroup.update({
-            where: { poolId: row.poolId },
-            data: {
-              poolGroup: row.poolGroup,
-              ticker: row.ticker,
-              adastatGroup: row.adastatGroup,
-              balanceanalyticsGroup: row.balanceanalyticsGroup,
-            },
-          });
+          await withIngestionDbWrite(prisma, "pool-groups.update", () =>
+            poolGroupClient.poolGroup.update({
+              where: { poolId: row.poolId },
+              data: {
+                poolGroup: row.poolGroup,
+                ticker: row.ticker,
+                adastatGroup: row.adastatGroup,
+                balanceanalyticsGroup: row.balanceanalyticsGroup,
+              },
+            })
+          );
           return row;
         },
         POOL_GROUPS_DB_UPDATE_CONCURRENCY

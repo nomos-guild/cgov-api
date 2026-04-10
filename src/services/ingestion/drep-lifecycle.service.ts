@@ -11,6 +11,7 @@ import type { KoiosDrepUpdate } from "../../types/koios.types";
 import {
   DREP_LIFECYCLE_SYNC_CONCURRENCY,
 } from "./sync-utils";
+import { withIngestionDbWrite } from "./dbSession";
 import { processInParallel } from "./parallel";
 
 // ============================================================
@@ -254,10 +255,15 @@ export async function syncDrepLifecycleEvents(
       }
 
       // Batch insert with skipDuplicates for idempotency
-      const inserted = await lifecycleClient.drepLifecycleEvent.createMany({
-        data: events,
-        skipDuplicates: true,
-      });
+      const inserted = await withIngestionDbWrite(
+        prisma,
+        "drep-lifecycle.createMany.events",
+        (): Promise<Prisma.BatchPayload> =>
+          lifecycleClient.drepLifecycleEvent.createMany({
+            data: events,
+            skipDuplicates: true,
+          })
+      );
 
       const eventsByType = { registration: 0, deregistration: 0, update: 0 };
       for (const event of events) {
@@ -393,10 +399,15 @@ export async function syncDrepLifecycleEventsForEpochRange(
         };
       }
 
-      const inserted = await lifecycleClient.drepLifecycleEvent.createMany({
-        data: filteredEvents,
-        skipDuplicates: true,
-      });
+      const inserted = await withIngestionDbWrite(
+        prisma,
+        "drep-lifecycle.createMany.events",
+        (): Promise<Prisma.BatchPayload> =>
+          lifecycleClient.drepLifecycleEvent.createMany({
+            data: filteredEvents,
+            skipDuplicates: true,
+          })
+      );
 
       const eventsByType = { registration: 0, deregistration: 0, update: 0 };
       for (const event of filteredEvents) {
