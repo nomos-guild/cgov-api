@@ -559,9 +559,13 @@ describe("delegation-sync.service", () => {
   });
 
   it("fails closed and skips writes when fetch failures exceed fixed threshold", async () => {
-    const prisma = createPrismaMock({
-      drepRows: [{ drepId: "drep_ok" }, { drepId: "drep_fail_1" }, { drepId: "drep_fail_2" }],
-    });
+    // maxFetchFailures = min(DREP_DELEGATION_MAX_FETCH_FAILURES, max(1, drepIds.length)).
+    // With default cap 10, need more than 10 failures while still having enough dreps (e.g. 12 dreps, 11 fail).
+    const drepRows = [
+      { drepId: "drep_ok" },
+      ...Array.from({ length: 11 }, (_, i) => ({ drepId: `drep_fail_${i}` })),
+    ];
+    const prisma = createPrismaMock({ drepRows });
     mockListAllDrepDelegators.mockImplementation(async ({ drepId }: any) => {
       if (drepId.startsWith("drep_fail")) {
         throw new Error("koios failure");
@@ -583,7 +587,7 @@ describe("delegation-sync.service", () => {
     expect(prisma.stakeDelegationChange.createMany).not.toHaveBeenCalled();
     expect(mockRefreshDrepDelegatorCounts).not.toHaveBeenCalled();
     expect(result.statesUpdated).toBe(0);
-    expect(result.failed).toHaveLength(2);
+    expect(result.failed).toHaveLength(11);
   });
 
   it("continues with partial fetch failures under threshold and skips stale clears", async () => {

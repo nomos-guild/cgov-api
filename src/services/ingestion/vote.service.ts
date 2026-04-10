@@ -1080,33 +1080,35 @@ export async function frontloadVote(input: FrontloadVoteInput) {
     surveyResponseResponderRole: input.surveyResponseResponderRole,
   };
 
-  return prisma.onchainVote.upsert({
-    where: { id: onchainVoteId },
-    create: {
-      id: onchainVoteId,
-      ...frontloadData,
-    },
-    update: {
-      // Only update metadata fields — do not overwrite chain-authoritative
-      // fields (votingPower, responseEpoch, votedAt) that the cron may have set
-      vote: frontloadData.vote,
-      anchorUrl: frontloadData.anchorUrl,
-      anchorHash: frontloadData.anchorHash,
-      rationale: frontloadData.rationale,
-      ...(frontloadData.surveyResponse !== undefined
-        ? { surveyResponse: frontloadData.surveyResponse }
-        : {}),
-      ...(frontloadData.surveyResponseSurveyTxId !== undefined
-        ? { surveyResponseSurveyTxId: frontloadData.surveyResponseSurveyTxId }
-        : {}),
-      ...(frontloadData.surveyResponseResponderRole !== undefined
-        ? {
-            surveyResponseResponderRole:
-              frontloadData.surveyResponseResponderRole,
-          }
-        : {}),
-    },
-  });
+  return withIngestionDbWrite(prisma, "vote.frontload-survey-metadata.upsert", () =>
+    prisma.onchainVote.upsert({
+      where: { id: onchainVoteId },
+      create: {
+        id: onchainVoteId,
+        ...frontloadData,
+      },
+      update: {
+        // Only update metadata fields — do not overwrite chain-authoritative
+        // fields (votingPower, responseEpoch, votedAt) that the cron may have set
+        vote: frontloadData.vote,
+        anchorUrl: frontloadData.anchorUrl,
+        anchorHash: frontloadData.anchorHash,
+        rationale: frontloadData.rationale,
+        ...(frontloadData.surveyResponse !== undefined
+          ? { surveyResponse: frontloadData.surveyResponse }
+          : {}),
+        ...(frontloadData.surveyResponseSurveyTxId !== undefined
+          ? { surveyResponseSurveyTxId: frontloadData.surveyResponseSurveyTxId }
+          : {}),
+        ...(frontloadData.surveyResponseResponderRole !== undefined
+          ? {
+              surveyResponseResponderRole:
+                frontloadData.surveyResponseResponderRole,
+            }
+          : {}),
+      },
+    })
+  );
 }
 
 /**

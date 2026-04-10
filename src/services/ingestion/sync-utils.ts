@@ -41,6 +41,10 @@ export const STAKE_DELEGATION_SYNC_STATE_ID = "current";
 export const DREP_DELEGATION_BACKFILL_JOB_NAME = "drep-delegation-backfill";
 export const FORCE_DREP_DELEGATION_BACKFILL_JOB_NAME = "drep-delegation-backfill-force";
 export const DREP_DELEGATION_PHASE3_JOB_NAME = "drep-delegation-phase3";
+/** Lease duration for `drep-delegator-sync` (HTTP trigger and in-process cron must match). */
+export const DREP_DELEGATOR_SYNC_LOCK_TTL_MS = 3 * 60 * 60 * 1000;
+/** Lease for `drep-lifecycle-sync` (/drep_updates for all DReps; runs can exceed 1–2h). */
+export const DREP_LIFECYCLE_SYNC_LOCK_TTL_MS = 3 * 60 * 60 * 1000;
 const KOIOS_CURRENT_EPOCH_CACHE_TTL_MS = 5_000;
 
 // ============================================================

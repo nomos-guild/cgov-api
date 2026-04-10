@@ -10,6 +10,7 @@
 import type { Prisma } from "@prisma/client";
 import { getDrepInfoBatchFromKoios } from "./governanceProvider";
 import { toBigIntOrNull } from "./ingestion/sync-utils";
+import { withIngestionDbWrite } from "./ingestion/dbSession";
 
 export interface DrepLookupResult {
   drepId: string;
@@ -93,10 +94,15 @@ export async function getDrepInfoBatch(
           }));
 
         if (createData.length > 0) {
-          await prisma.drep.createMany({
-            data: createData,
-            skipDuplicates: true,
-          });
+          await withIngestionDbWrite(
+            prisma,
+            "drep-lookup.createMany.from-koios",
+            () =>
+              prisma.drep.createMany({
+                data: createData,
+                skipDuplicates: true,
+              })
+          );
         }
       } catch (error: any) {
         console.warn(

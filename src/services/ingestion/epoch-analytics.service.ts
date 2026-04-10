@@ -14,6 +14,7 @@
  */
 
 import type { Prisma } from "@prisma/client";
+import { withIngestionDbWrite } from "./dbSession";
 import { getKoiosCurrentEpoch } from "./sync-utils";
 
 // Re-export from drep-sync.service
@@ -171,11 +172,16 @@ async function syncGovernanceAnalyticsForEpoch(
   }
 
   // Ensure a per-epoch sync state row exists.
-  const state = await prisma.epochAnalyticsSync.upsert({
-    where: { epoch: epochToSync },
-    update: {},
-    create: { epoch: epochToSync },
-  });
+  const state = await withIngestionDbWrite(
+    prisma,
+    "epoch-analytics.checkpoint.ensure",
+    () =>
+      prisma.epochAnalyticsSync.upsert({
+        where: { epoch: epochToSync },
+        update: {},
+        create: { epoch: epochToSync },
+      })
+  );
 
   const res: SyncGovernanceAnalyticsEpochResult = {
     epoch: epochToSync,
@@ -193,53 +199,80 @@ async function syncGovernanceAnalyticsForEpoch(
   // 1) DRep inventory (all DReps, not just voters)
   if (!state.drepsSyncedAt) {
     res.dreps = await syncAllDrepsInventory(prisma);
-    await prisma.epochAnalyticsSync.update({
-      where: { epoch: epochToSync },
-      data: { drepsSyncedAt: new Date() },
-    });
+    await withIngestionDbWrite(prisma, "epoch-analytics.checkpoint.mark-dreps-synced", () =>
+      prisma.epochAnalyticsSync.update({
+        where: { epoch: epochToSync },
+        data: { drepsSyncedAt: new Date() },
+      })
+    );
   }
 
   // 2) DRep info sync (update ALL DReps from /drep_info for this epoch)
   if (!state.drepInfoSyncedAt) {
     res.drepInfo = await syncAllDrepsInfo(prisma);
-    await prisma.epochAnalyticsSync.update({
-      where: { epoch: epochToSync },
-      data: { drepInfoSyncedAt: new Date() },
-    });
+    await withIngestionDbWrite(prisma, "epoch-analytics.checkpoint.mark-drep-info-synced", () =>
+      prisma.epochAnalyticsSync.update({
+        where: { epoch: epochToSync },
+        data: { drepInfoSyncedAt: new Date() },
+      })
+    );
   }
 
   // 3) DRep epoch snapshot (delegatorCount + votingPower for every DRep)
   if (!state.drepSnapshotSyncedAt) {
     res.drepSnapshot = await snapshotDrepEpoch(prisma, epochToSync);
-    await prisma.epochAnalyticsSync.update({
-      where: { epoch: epochToSync },
-      data: { drepSnapshotSyncedAt: new Date() },
-    });
+    await withIngestionDbWrite(
+      prisma,
+      "epoch-analytics.checkpoint.mark-drep-snapshot-synced",
+      () =>
+        prisma.epochAnalyticsSync.update({
+          where: { epoch: epochToSync },
+          data: { drepSnapshotSyncedAt: new Date() },
+        })
+    );
   }
 
   // 4) Epoch denominators/totals + timestamps (from /totals, /drep_epoch_summary, /epoch_info)
   if (!state.totalsSyncedAt) {
     res.totals = await syncEpochTotals(prisma, epochToSync);
-    await prisma.epochAnalyticsSync.update({
-      where: { epoch: epochToSync },
-      data: { totalsSyncedAt: new Date() },
-    });
+    await withIngestionDbWrite(prisma, "epoch-analytics.checkpoint.mark-totals-synced", () =>
+      prisma.epochAnalyticsSync.update({
+        where: { epoch: epochToSync },
+        data: { totalsSyncedAt: new Date() },
+      })
+    );
   }
 
   // 5) DRep lifecycle events (registrations, deregistrations, updates)
   if (!state.drepLifecycleSyncedAt) {
     res.drepLifecycle = await syncDrepLifecycleEvents(prisma);
-    // Mark checkpoint if we successfully talked to Koios (i.e., fetched any updates)
-    // or if we actually ingested rows. This avoids "false success" where Koios calls
-    // systematically fail/return empty and we mark the epoch as done anyway.
+    // Mark checkpoint only when Koios returned meaningful data AND every DRep worker
+    // succeeded. Partial failures must not mark the epoch done (skipDuplicates makes retry safe).
     const fetchedAnyUpdates = res.drepLifecycle.totalUpdatesFetched > 0;
     const hadAnySuccess = res.drepLifecycle.drepsProcessed > 0;
+    const noPerDrepFailures = res.drepLifecycle.failed.length === 0;
 
-    if (hadAnySuccess && (res.drepLifecycle.eventsIngested > 0 || fetchedAnyUpdates)) {
-      await prisma.epochAnalyticsSync.update({
-        where: { epoch: epochToSync },
-        data: { drepLifecycleSyncedAt: new Date() },
-      });
+    if (
+      hadAnySuccess &&
+      noPerDrepFailures &&
+      (res.drepLifecycle.eventsIngested > 0 || fetchedAnyUpdates)
+    ) {
+      await withIngestionDbWrite(
+        prisma,
+        "epoch-analytics.checkpoint.mark-drep-lifecycle-synced",
+        () =>
+          prisma.epochAnalyticsSync.update({
+            where: { epoch: epochToSync },
+            data: { drepLifecycleSyncedAt: new Date() },
+          })
+      );
+    } else if (!noPerDrepFailures) {
+      console.error(
+        `[Epoch Analytics] DRep lifecycle sync had ${res.drepLifecycle.failed.length} failed DRep(s) for epoch ${epochToSync}; ` +
+          `not marking drepLifecycleSyncedAt so the next run retries (idempotent). ` +
+          `(drepsAttempted=${res.drepLifecycle.drepsAttempted}, drepsProcessed=${res.drepLifecycle.drepsProcessed}, ` +
+          `updatesFetched=${res.drepLifecycle.totalUpdatesFetched}, eventsIngested=${res.drepLifecycle.eventsIngested})`
+      );
     } else {
       console.error(
         `[Epoch Analytics] DRep lifecycle sync appears to have fetched 0 updates total for epoch ${epochToSync}; ` +
@@ -254,10 +287,15 @@ async function syncGovernanceAnalyticsForEpoch(
   // 6) Pool groups (multi-pool operator mappings)
   if (!state.poolGroupsSyncedAt) {
     res.poolGroups = await syncPoolGroups(prisma);
-    await prisma.epochAnalyticsSync.update({
-      where: { epoch: epochToSync },
-      data: { poolGroupsSyncedAt: new Date() },
-    });
+    await withIngestionDbWrite(
+      prisma,
+      "epoch-analytics.checkpoint.mark-pool-groups-synced",
+      () =>
+        prisma.epochAnalyticsSync.update({
+          where: { epoch: epochToSync },
+          data: { poolGroupsSyncedAt: new Date() },
+        })
+    );
   }
 
   return res;
@@ -315,11 +353,13 @@ async function ensureEpochCheckpoint(
   prisma: Prisma.TransactionClient,
   epochToSync: number
 ) {
-  return prisma.epochAnalyticsSync.upsert({
-    where: { epoch: epochToSync },
-    update: {},
-    create: { epoch: epochToSync },
-  });
+  return withIngestionDbWrite(prisma, "epoch-analytics.checkpoint.ensure", () =>
+    prisma.epochAnalyticsSync.upsert({
+      where: { epoch: epochToSync },
+      update: {},
+      create: { epoch: epochToSync },
+    })
+  );
 }
 
 /**
@@ -346,18 +386,25 @@ export async function syncDrepInventoryStep(
 
   if (!state.drepsSyncedAt) {
     result.inventory = await syncAllDrepsInventory(prisma);
-    await prisma.epochAnalyticsSync.update({
-      where: { epoch: epochToSync },
-      data: { drepsSyncedAt: new Date() },
-    });
+    await withIngestionDbWrite(prisma, "epoch-analytics.checkpoint.mark-dreps-synced", () =>
+      prisma.epochAnalyticsSync.update({
+        where: { epoch: epochToSync },
+        data: { drepsSyncedAt: new Date() },
+      })
+    );
   }
 
   if (!state.drepSnapshotSyncedAt) {
     result.snapshot = await snapshotDrepEpoch(prisma, epochToSync);
-    await prisma.epochAnalyticsSync.update({
-      where: { epoch: epochToSync },
-      data: { drepSnapshotSyncedAt: new Date() },
-    });
+    await withIngestionDbWrite(
+      prisma,
+      "epoch-analytics.checkpoint.mark-drep-snapshot-synced",
+      () =>
+        prisma.epochAnalyticsSync.update({
+          where: { epoch: epochToSync },
+          data: { drepSnapshotSyncedAt: new Date() },
+        })
+    );
   }
 
   return result;
@@ -385,10 +432,12 @@ export async function syncDrepInfoStep(
   }
 
   const drepInfo = await syncAllDrepsInfo(prisma);
-  await prisma.epochAnalyticsSync.update({
-    where: { epoch: epochToSync },
-    data: { drepInfoSyncedAt: new Date() },
-  });
+  await withIngestionDbWrite(prisma, "epoch-analytics.checkpoint.mark-drep-info-synced", () =>
+    prisma.epochAnalyticsSync.update({
+      where: { epoch: epochToSync },
+      data: { drepInfoSyncedAt: new Date() },
+    })
+  );
 
   return { currentEpoch, epochToSync, drepInfo, skipped: false };
 }
@@ -425,10 +474,15 @@ export async function syncEpochTotalsStep(
             `[Epoch Totals] Previous epoch ${epochToSync} is still incomplete after retry; leaving totalsSyncedAt unchanged so it retries next run.`
           );
         } else {
-          await prisma.epochAnalyticsSync.update({
-            where: { epoch: epochToSync },
-            data: { totalsSyncedAt: new Date() },
-          });
+          await withIngestionDbWrite(
+            prisma,
+            "epoch-analytics.checkpoint.mark-totals-synced",
+            () =>
+              prisma.epochAnalyticsSync.update({
+                where: { epoch: epochToSync },
+                data: { totalsSyncedAt: new Date() },
+              })
+          );
         }
 
         result.skippedPrevious = false;
@@ -443,10 +497,12 @@ export async function syncEpochTotalsStep(
           `[Epoch Totals] Previous epoch ${epochToSync} is incomplete after sync; not setting totalsSyncedAt so it retries next run.`
         );
       } else {
-        await prisma.epochAnalyticsSync.update({
-          where: { epoch: epochToSync },
-          data: { totalsSyncedAt: new Date() },
-        });
+        await withIngestionDbWrite(prisma, "epoch-analytics.checkpoint.mark-totals-synced", () =>
+          prisma.epochAnalyticsSync.update({
+            where: { epoch: epochToSync },
+            data: { totalsSyncedAt: new Date() },
+          })
+        );
       }
     }
   } else {
@@ -481,15 +537,31 @@ export async function syncDrepLifecycleStep(
 
   const drepLifecycle = await syncDrepLifecycleEvents(prisma);
 
-  // Mark checkpoint only if we successfully talked to Koios
   const fetchedAnyUpdates = drepLifecycle.totalUpdatesFetched > 0;
   const hadAnySuccess = drepLifecycle.drepsProcessed > 0;
+  const noPerDrepFailures = drepLifecycle.failed.length === 0;
 
-  if (hadAnySuccess && (drepLifecycle.eventsIngested > 0 || fetchedAnyUpdates)) {
-    await prisma.epochAnalyticsSync.update({
-      where: { epoch: epochToSync },
-      data: { drepLifecycleSyncedAt: new Date() },
-    });
+  if (
+    hadAnySuccess &&
+    noPerDrepFailures &&
+    (drepLifecycle.eventsIngested > 0 || fetchedAnyUpdates)
+  ) {
+    await withIngestionDbWrite(
+      prisma,
+      "epoch-analytics.checkpoint.mark-drep-lifecycle-synced",
+      () =>
+        prisma.epochAnalyticsSync.update({
+          where: { epoch: epochToSync },
+          data: { drepLifecycleSyncedAt: new Date() },
+        })
+    );
+  } else if (!noPerDrepFailures) {
+    console.error(
+      `[Epoch Analytics] DRep lifecycle sync had ${drepLifecycle.failed.length} failed DRep(s) for epoch ${epochToSync}; ` +
+        `not marking drepLifecycleSyncedAt so the next run retries (idempotent). ` +
+        `(drepsAttempted=${drepLifecycle.drepsAttempted}, drepsProcessed=${drepLifecycle.drepsProcessed}, ` +
+        `updatesFetched=${drepLifecycle.totalUpdatesFetched}, eventsIngested=${drepLifecycle.eventsIngested})`
+    );
   } else {
     console.error(
       `[Epoch Analytics] DRep lifecycle sync appears to have fetched 0 updates total for epoch ${epochToSync}; ` +
@@ -523,10 +595,15 @@ export async function syncPoolGroupsStep(
   }
 
   const poolGroups = await syncPoolGroups(prisma);
-  await prisma.epochAnalyticsSync.update({
-    where: { epoch: epochToSync },
-    data: { poolGroupsSyncedAt: new Date() },
-  });
+  await withIngestionDbWrite(
+    prisma,
+    "epoch-analytics.checkpoint.mark-pool-groups-synced",
+    () =>
+      prisma.epochAnalyticsSync.update({
+        where: { epoch: epochToSync },
+        data: { poolGroupsSyncedAt: new Date() },
+      })
+  );
 
   return { currentEpoch, epochToSync, poolGroups, skipped: false };
 }

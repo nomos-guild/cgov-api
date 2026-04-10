@@ -9,6 +9,7 @@ import { prisma } from "../prisma";
 import { koiosGet } from "../koios";
 import type { KoiosProposal } from "../../types/koios.types";
 import { getKoiosCurrentEpoch } from "./sync-utils";
+import { withIngestionDbWrite } from "./dbSession";
 
 /**
  * Result of NCL update operation
@@ -207,14 +208,16 @@ async function updateNCLForYear(year: number, currentEpoch: number): Promise<NCL
 
   if (existingNCL) {
     // Update existing record
-    await prisma.nCL.update({
-      where: { year },
-      data: {
-        epoch: currentEpoch,
-        current: totalLovelace,
-        updatedAt: new Date(),
-      },
-    });
+    await withIngestionDbWrite(prisma, "ncl.update", () =>
+      prisma.nCL.update({
+        where: { year },
+        data: {
+          epoch: currentEpoch,
+          current: totalLovelace,
+          updatedAt: new Date(),
+        },
+      })
+    );
 
     console.log(`[NCL] Updated NCL for ${year}: current=${totalLovelace.toString()} lovelace`);
 
@@ -227,16 +230,18 @@ async function updateNCLForYear(year: number, currentEpoch: number): Promise<NCL
     };
   } else {
     // Create new record with limit = 0 (admin needs to set the limit)
-    await prisma.nCL.create({
-      data: {
-        id: `ncl-${year}`,
-        year,
-        epoch: currentEpoch,
-        current: totalLovelace,
-        limit: BigInt(0), // Admin must set this manually
-        updatedAt: new Date(),
-      },
-    });
+    await withIngestionDbWrite(prisma, "ncl.create", () =>
+      prisma.nCL.create({
+        data: {
+          id: `ncl-${year}`,
+          year,
+          epoch: currentEpoch,
+          current: totalLovelace,
+          limit: BigInt(0), // Admin must set this manually
+          updatedAt: new Date(),
+        },
+      })
+    );
 
     console.log(
       `[NCL] Created new NCL record for ${year}: current=${totalLovelace.toString()} lovelace, ` +
