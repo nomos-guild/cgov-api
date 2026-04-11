@@ -37,6 +37,14 @@ import {
 import { logIntegrityEvent } from "./integrityMetrics";
 import { withIngestionDbWrite } from "./dbSession";
 
+function batchPayloadCount(result: unknown): number {
+  if (result && typeof result === "object" && "count" in result) {
+    const value = (result as { count: unknown }).count;
+    return typeof value === "number" ? value : 0;
+  }
+  return 0;
+}
+
 const KOIOS_HEAVY_DREP_DELEGATORS_LANE_JOB_NAME =
   "koios-heavy-drep-delegators-lane";
 const DELEGATION_FULL_SCAN_WINDOW_JOB_NAME =
@@ -49,6 +57,8 @@ const DELEGATION_CLEAR_MIN_COVERAGE_RATIO = 0.9;
 const DELEGATION_CLEAR_HIGH_CLEAR_RATIO = 0.35;
 const DELEGATION_CLEAR_BASELINE_MIN_ACTIVE_STAKES = 200;
 const DELEGATION_CONFLICT_STAKE_SAMPLE_LIMIT = 10;
+/** Page size when scanning active delegation rows for stale-state reconciliation (memory bound). */
+const STALE_DELEGATION_STATE_PAGE_SIZE = 5000;
 
 // ============================================================
 // Result Types
@@ -1297,15 +1307,34 @@ export async function syncDrepDelegationChanges(
   // Reconcile stale states only when we have a complete snapshot.
   // If there are fetch failures, skip this destructive step to avoid false clears.
   if (failed.length === 0) {
-    const activeDelegationStates: Array<{ stakeAddress: string }> =
-      await delegationClient.stakeDelegationState.findMany({
-        where: { drepId: { not: null } },
-        select: { stakeAddress: true },
-      });
-    for (const row of activeDelegationStates) {
-      if (!allStakeAddresses.has(row.stakeAddress)) {
-        toClear.push(row.stakeAddress);
+    const activeDelegationStateCount = await delegationClient.stakeDelegationState.count({
+      where: { drepId: { not: null } },
+    });
+
+    let cursorStake: string | undefined;
+    while (true) {
+      const activeBatch: Array<{ stakeAddress: string }> =
+        await delegationClient.stakeDelegationState.findMany({
+          where: { drepId: { not: null } },
+          select: { stakeAddress: true },
+          orderBy: { stakeAddress: "asc" },
+          take: STALE_DELEGATION_STATE_PAGE_SIZE,
+          ...(cursorStake
+            ? { skip: 1, cursor: { stakeAddress: cursorStake } }
+            : {}),
+        });
+      if (activeBatch.length === 0) {
+        break;
       }
+      for (const row of activeBatch) {
+        if (!allStakeAddresses.has(row.stakeAddress)) {
+          toClear.push(row.stakeAddress);
+        }
+      }
+      if (activeBatch.length < STALE_DELEGATION_STATE_PAGE_SIZE) {
+        break;
+      }
+      cursorStake = activeBatch[activeBatch.length - 1]!.stakeAddress;
     }
 
     if (toClear.length > 0) {
@@ -1316,7 +1345,7 @@ export async function syncDrepDelegationChanges(
         clearGuardStatus?.errorMessage
       );
       const clearGuard = evaluateClearGuard({
-        activeDelegationStateCount: activeDelegationStates.length,
+        activeDelegationStateCount,
         snapshotStakeCount: allStakeAddresses.size,
         toClearCount: toClear.length,
         phase1DelegatorRows,
@@ -1390,51 +1419,14 @@ export async function syncDrepDelegationChanges(
     );
   }
 
-  // Deduplicate: skip Phase 3 change log entries when a row for (stakeAddress, toDrepId, delegatedEpoch)
-  // already exists (e.g. from backfill), so we don't insert a second row with amount for the same delegation.
-  let changeLogToInsert = changeLog;
-  if (changeLog.length > 0) {
-    const dedupeLookupChunkSize = getBoundedIntEnv(
-      "DELEGATION_CHANGE_DEDUPE_LOOKUP_CHUNK_SIZE",
-      400,
-      50,
-      2000
-    );
-    const dedupedCandidates = Array.from(
-      new Map(changeLog.map((entry) => [delegationChangeKey(entry), entry])).values()
-    );
-    const existingRows: Array<{
-      stakeAddress: string;
-      fromDrepId: string;
-      toDrepId: string;
-      delegatedEpoch: number;
-    }> = [];
-    const candidateChunks = chunkArray(dedupedCandidates, dedupeLookupChunkSize);
-    for (const chunk of candidateChunks) {
-      if (chunk.length === 0) continue;
-      const rows = await delegationClient.stakeDelegationChange.findMany({
-        where: {
-          OR: chunk.map((entry) => ({
-            stakeAddress: entry.stakeAddress,
-            fromDrepId: entry.fromDrepId,
-            toDrepId: entry.toDrepId,
-            delegatedEpoch: entry.delegatedEpoch,
-          })),
-        },
-        select: {
-          stakeAddress: true,
-          fromDrepId: true,
-          toDrepId: true,
-          delegatedEpoch: true,
-        },
-      });
-      existingRows.push(...rows);
-    }
-    const existingKeySet = new Set(existingRows.map((entry) => delegationChangeKey(entry)));
-    changeLogToInsert = dedupedCandidates.filter(
-      (entry) => !existingKeySet.has(delegationChangeKey(entry))
-    );
-  }
+  // In-memory dedupe only. DB-level duplicates are skipped via createMany + skipDuplicates
+  // (unique on stakeAddress, fromDrepId, toDrepId, delegatedEpoch).
+  const changeLogToInsert =
+    changeLog.length > 0
+      ? Array.from(
+          new Map(changeLog.map((entry) => [delegationChangeKey(entry), entry])).values()
+        )
+      : [];
 
   // Initialize or load Phase 3 checkpoint
   const syncStatusClient = delegationClient as Prisma.TransactionClient & { syncStatus: any };
@@ -1595,6 +1587,7 @@ export async function syncDrepDelegationChanges(
 
   // Batch insert change log entries (with per-chunk checkpoint).
   // prisma.$transaction batches: retries at transaction boundary / job rerun (ingestion DB resilience plan).
+  let phase3ChangeRowsInserted = 0;
   if (changeLogToInsert.length > 0) {
     const changesChunkSize = 1000;
     const startChunkIndex = checkpoint.changesChunkIndex;
@@ -1609,7 +1602,7 @@ export async function syncDrepDelegationChanges(
       }));
       const { next, data: checkpointData } = buildCheckpointData({ changesChunkIndex: chunkIndex + 1 });
       if (transactionClient.$transaction) {
-        await transactionClient.$transaction([
+        const [createResult] = await transactionClient.$transaction([
           delegationClient.stakeDelegationChange.createMany({
             data: changeData,
             skipDuplicates: true,
@@ -1619,8 +1612,9 @@ export async function syncDrepDelegationChanges(
             data: checkpointData,
           }),
         ]);
+        phase3ChangeRowsInserted += batchPayloadCount(createResult);
       } else {
-        await withIngestionDbWrite(
+        const createResult = await withIngestionDbWrite(
           prisma,
           "delegation-sync.phase3.stakeDelegationChange.createMany",
           () =>
@@ -1629,6 +1623,7 @@ export async function syncDrepDelegationChanges(
               skipDuplicates: true,
             })
         );
+        phase3ChangeRowsInserted += batchPayloadCount(createResult);
         await withIngestionDbWrite(
           prisma,
           "delegation-sync.phase3.syncStatus.update-after-changes",
@@ -1662,7 +1657,7 @@ export async function syncDrepDelegationChanges(
   }
 
   console.log(
-    `[DRep Delegation Sync] Phase 3 complete: created=${toCreate.length}, updated=${toUpdate.length}, cleared=${toClear.length}, changes=${changeLogToInsert.length}`
+    `[DRep Delegation Sync] Phase 3 complete: created=${toCreate.length}, updated=${toUpdate.length}, cleared=${toClear.length}, changesInserted=${phase3ChangeRowsInserted} changesCandidates=${changeLogToInsert.length}`
   );
 
   // Update sync state
@@ -1704,7 +1699,7 @@ export async function syncDrepDelegationChanges(
   );
 
   console.log(
-    `[DRep Delegation Sync] metrics phase1Dreps=${drepIds.length} phase1Rows=${phase1DelegatorRows} uniqueStakes=${allStakeAddresses.size} duplicateStakeConflicts=${duplicateConflictStats.total} newStakes=${newStakeAddresses.length} creates=${toCreate.length} updates=${toUpdate.length} cleared=${toClear.length} changesCandidate=${changeLog.length} changesInserted=${changeLogToInsert.length} fetchFailures=${failed.length}`
+    `[DRep Delegation Sync] metrics phase1Dreps=${drepIds.length} phase1Rows=${phase1DelegatorRows} uniqueStakes=${allStakeAddresses.size} duplicateStakeConflicts=${duplicateConflictStats.total} newStakes=${newStakeAddresses.length} creates=${toCreate.length} updates=${toUpdate.length} cleared=${toClear.length} changesCandidate=${changeLog.length} changesInserted=${phase3ChangeRowsInserted} fetchFailures=${failed.length}`
   );
 
   const result = {
@@ -1714,7 +1709,7 @@ export async function syncDrepDelegationChanges(
     drepsProcessed: delegatorFetchResult.successful.length,
     delegatorsProcessed: allDelegatorsByStake.size,
     statesUpdated: toCreate.length + toUpdate.length + toClear.length,
-    changesInserted: changeLogToInsert.length,
+    changesInserted: phase3ChangeRowsInserted,
     failed,
   };
   logIntegrityEvent({

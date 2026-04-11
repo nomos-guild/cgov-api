@@ -117,35 +117,42 @@ async function withLockedSharedCursor<T>(
   mutator: (cursor: GithubSharedCursor) => T
 ): Promise<T> {
   return withDbWrite("github-shared-coordination.write", async () =>
-    prisma.$transaction(async (tx) => {
-      await tx.$executeRaw`
+    prisma.$transaction(
+      async (tx) => {
+        await tx.$executeRaw`
         INSERT INTO "sync_status" ("job_name", "display_name", "is_running", "created_at", "updated_at")
         VALUES (${GITHUB_COORDINATION_JOB_NAME}, ${GITHUB_COORDINATION_DISPLAY_NAME}, false, NOW(), NOW())
         ON CONFLICT ("job_name") DO NOTHING
       `;
 
-      const rows = await tx.$queryRaw<Array<{ backfill_cursor: string | null }>>`
+        const rows = await tx.$queryRaw<Array<{ backfill_cursor: string | null }>>`
         SELECT "backfill_cursor"
         FROM "sync_status"
         WHERE "job_name" = ${GITHUB_COORDINATION_JOB_NAME}
         FOR UPDATE
       `;
 
-      const current = parseCursor(rows[0]?.backfill_cursor ?? null);
-      const next = mutator(current);
-      current.updatedAt = new Date().toISOString();
+        const current = parseCursor(rows[0]?.backfill_cursor ?? null);
+        const next = mutator(current);
+        current.updatedAt = new Date().toISOString();
 
-      await tx.syncStatus.update({
-        where: { jobName: GITHUB_COORDINATION_JOB_NAME },
-        data: {
-          displayName: GITHUB_COORDINATION_DISPLAY_NAME,
-          isRunning: false,
-          backfillCursor: JSON.stringify(current),
-        },
-      });
+        await tx.syncStatus.update({
+          where: { jobName: GITHUB_COORDINATION_JOB_NAME },
+          data: {
+            displayName: GITHUB_COORDINATION_DISPLAY_NAME,
+            isRunning: false,
+            backfillCursor: JSON.stringify(current),
+          },
+        });
 
-      return next;
-    })
+        return next;
+      },
+      {
+        // Default 5s is tight over VPC/Cloud SQL or when this row is contended (FOR UPDATE).
+        maxWait: 10_000,
+        timeout: 30_000,
+      }
+    )
   );
 }
 
