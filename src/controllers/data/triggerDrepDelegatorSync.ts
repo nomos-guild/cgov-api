@@ -1,10 +1,17 @@
 import { Request, Response } from "express";
-import { syncDrepDelegationChanges } from "../../services/ingestion/epoch-analytics.service";
 import { prisma } from "../../services";
-import { acquireJobLock, releaseJobLock } from "../../services/ingestion/syncLock";
+import {
+  acquireJobLock,
+  releaseJobLock,
+} from "../../services/ingestion/syncLock";
+import {
+  DREP_DELEGATOR_SYNC_JOB_NAME,
+  isDrepDelegatorDailyBudgetExhausted,
+  readDrepDelegatorDailyBudgetCursor,
+  runDrepDelegatorSyncWithDailyRetry,
+} from "../../services/ingestion/drep-delegator-sync-run";
 import { DREP_DELEGATOR_SYNC_LOCK_TTL_MS } from "../../services/ingestion/sync-utils";
 
-const JOB_NAME = "drep-delegator-sync";
 const DISPLAY_NAME = "DRep Delegator Sync";
 
 /**
@@ -20,11 +27,27 @@ export const postTriggerDrepDelegatorSync = async (
   let acquired = false;
 
   try {
-    // Try to acquire lock using database transaction
-    acquired = await acquireJobLock(JOB_NAME, DISPLAY_NAME, {
-      ttlMs: DREP_DELEGATOR_SYNC_LOCK_TTL_MS,
-      source: "api-instance",
-    });
+    const preCursor = await readDrepDelegatorDailyBudgetCursor();
+    if (isDrepDelegatorDailyBudgetExhausted(preCursor)) {
+      console.log(
+        "[DRep Delegator Sync] Skipped - daily budget exhausted for this UTC day"
+      );
+      return res.status(202).json({
+        success: true,
+        accepted: false,
+        message:
+          "DRep delegator sync daily budget exhausted for this UTC day. No further heavy runs until next UTC day.",
+      });
+    }
+
+    acquired = await acquireJobLock(
+      DREP_DELEGATOR_SYNC_JOB_NAME,
+      DISPLAY_NAME,
+      {
+        ttlMs: DREP_DELEGATOR_SYNC_LOCK_TTL_MS,
+        source: "api-instance",
+      }
+    );
 
     if (!acquired) {
       console.log(
@@ -38,8 +61,23 @@ export const postTriggerDrepDelegatorSync = async (
       });
     }
 
+    const postCursor = await readDrepDelegatorDailyBudgetCursor();
+    if (isDrepDelegatorDailyBudgetExhausted(postCursor)) {
+      await releaseJobLock(DREP_DELEGATOR_SYNC_JOB_NAME, "success", 0);
+      acquired = false;
+      console.log(
+        "[DRep Delegator Sync] Skipped after lock - daily budget exhausted (race with other instance)"
+      );
+      return res.status(202).json({
+        success: true,
+        accepted: false,
+        message:
+          "DRep delegator sync daily budget exhausted for this UTC day. Lock released without running.",
+      });
+    }
+
     const lease = await prisma.syncStatus.findUnique({
-      where: { jobName: JOB_NAME },
+      where: { jobName: DREP_DELEGATOR_SYNC_JOB_NAME },
       select: { startedAt: true, expiresAt: true, lockedBy: true },
     });
     console.log(
@@ -48,60 +86,91 @@ export const postTriggerDrepDelegatorSync = async (
 
     console.log("[DRep Delegator Sync] Triggered via API endpoint");
 
-    // ✅ Respond immediately to avoid Cloud Scheduler timeout
     res.status(202).json({
       success: true,
       accepted: true,
       message: "DRep delegator sync started",
-      jobName: JOB_NAME,
+      jobName: DREP_DELEGATOR_SYNC_JOB_NAME,
     });
 
-    // ✅ Process asynchronously
     (async () => {
       try {
-        // Run the sync
-        const result = await syncDrepDelegationChanges(prisma);
+        const outcome = await runDrepDelegatorSyncWithDailyRetry(prisma);
 
-        // Mark sync as completed
+        if (outcome.kind === "skipped") {
+          const result = outcome.result;
+          await releaseJobLock(
+            DREP_DELEGATOR_SYNC_JOB_NAME,
+            "success",
+            result.statesUpdated + result.changesInserted
+          );
+          console.log("[DRep Delegator Sync] Completed (throttled/skipped):", {
+            skipReason: result.skipReason,
+          });
+          return;
+        }
+
+        const result = outcome.result;
         await releaseJobLock(
-          JOB_NAME,
-          "success",
-          result.statesUpdated + result.changesInserted
+          DREP_DELEGATOR_SYNC_JOB_NAME,
+          outcome.lockResult,
+          outcome.itemsProcessed
         );
 
-        console.log("[DRep Delegator Sync] Completed successfully:", {
+        console.log("[DRep Delegator Sync] Completed:", {
           currentEpoch: result.currentEpoch,
           drepsProcessed: result.drepsProcessed,
           delegatorsProcessed: result.delegatorsProcessed,
           statesUpdated: result.statesUpdated,
           changesInserted: result.changesInserted,
+          failed: result.failed.length,
+          lastResult: outcome.lockResult,
         });
       } catch (error) {
         console.error("[DRep Delegator Sync] Async processing error:", error);
 
-        const errorMessage = error instanceof Error ? error.message : "Unknown error";
+        const errorMessage =
+          error instanceof Error ? error.message : "Unknown error";
 
-        // Mark sync as failed
         try {
-          await releaseJobLock(JOB_NAME, "failed", 0, errorMessage);
+          await releaseJobLock(
+            DREP_DELEGATOR_SYNC_JOB_NAME,
+            "failed",
+            0,
+            errorMessage
+          );
         } catch (updateError) {
-          console.error("[DRep Delegator Sync] Failed to update sync status:", updateError);
+          console.error(
+            "[DRep Delegator Sync] Failed to update sync status:",
+            updateError
+          );
         }
       }
     })().catch((error) => {
-      console.error("[DRep Delegator Sync] Unhandled error in async processing:", error);
+      console.error(
+        "[DRep Delegator Sync] Unhandled error in async processing:",
+        error
+      );
     });
   } catch (error) {
     console.error("[DRep Delegator Sync] Setup error:", error);
 
-    const errorMessage = error instanceof Error ? error.message : "Unknown error";
+    const errorMessage =
+      error instanceof Error ? error.message : "Unknown error";
 
-    // Mark sync as failed (only if lock was acquired)
     if (acquired) {
       try {
-        await releaseJobLock(JOB_NAME, "failed", 0, errorMessage);
+        await releaseJobLock(
+          DREP_DELEGATOR_SYNC_JOB_NAME,
+          "failed",
+          0,
+          errorMessage
+        );
       } catch (updateError) {
-        console.error("[DRep Delegator Sync] Failed to update sync status:", updateError);
+        console.error(
+          "[DRep Delegator Sync] Failed to update sync status:",
+          updateError
+        );
       }
     }
 

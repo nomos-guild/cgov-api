@@ -174,13 +174,20 @@ export async function acquireJobLock(
   );
 }
 
+/** Stored on SyncStatus.lastResult (string column; extend as needed). */
+export type JobLockReleaseResult =
+  | "success"
+  | "partial"
+  | "failed"
+  | "expired";
+
 /**
- * Releases a job lock after work completes. Call with result "success", "failed",
- * or "expired". Optionally pass itemsProcessed and errorMessage for status tracking.
+ * Releases a job lock after work completes. Call with result "success", "partial",
+ * "failed", or "expired". Optionally pass itemsProcessed and errorMessage for status tracking.
  */
 export async function releaseJobLock(
   jobName: string,
-  result: "success" | "failed" | "expired",
+  result: JobLockReleaseResult,
   itemsProcessed?: number,
   errorMessage?: string | null
 ): Promise<void> {

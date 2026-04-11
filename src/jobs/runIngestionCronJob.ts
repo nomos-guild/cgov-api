@@ -14,12 +14,14 @@ import { applyCronJitter } from "./jitter";
 
 export interface IngestionCronRunResult {
   itemsProcessed?: number;
+  /** When set, passed to releaseJobLock (e.g. partial DRep delegator sync). */
+  lockResult?: "success" | "partial";
 }
 
 interface IngestionCronLockAdapter {
   acquire: () => Promise<boolean>;
   release: (
-    status: "success" | "failed",
+    status: "success" | "failed" | "partial",
     options?: { itemsProcessed?: number; errorMessage?: string }
   ) => Promise<void>;
 }
@@ -35,6 +37,8 @@ interface IngestionCronOptions {
   applyJitter?: boolean;
   lockOptions?: AcquireJobLockOptions;
   lockAdapter?: IngestionCronLockAdapter;
+  /** Return false to skip before acquiring the DB lock (e.g. daily budget exhausted). */
+  beforeAcquire?: () => Promise<boolean>;
   run: () => Promise<IngestionCronRunResult | void>;
 }
 
@@ -113,6 +117,13 @@ export function startIngestionCronJob(options: IngestionCronOptions): void {
         return;
       }
 
+      if (options.beforeAcquire) {
+        const proceed = await options.beforeAcquire();
+        if (!proceed) {
+          return;
+        }
+      }
+
       lockAcquired = await lockAdapter.acquire();
       if (!lockAcquired) {
         console.log(
@@ -135,7 +146,8 @@ export function startIngestionCronJob(options: IngestionCronOptions): void {
 
       console.log(`\n[${timestamp}] Starting ${options.displayName}...`);
       const result = await options.run();
-      await lockAdapter.release("success", {
+      const lockOk = result?.lockResult ?? "success";
+      await lockAdapter.release(lockOk, {
         itemsProcessed: result?.itemsProcessed ?? 0,
       });
       lockAcquired = false;
