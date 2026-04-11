@@ -22,7 +22,7 @@ jest.mock("../src/services/ingestion/drep-sync.service", () => ({
 
 jest.mock("../src/services/ingestion/sync-utils", () => ({
   DREP_DELEGATOR_MIN_VOTING_POWER: BigInt(0),
-  DREP_DELEGATION_SYNC_CONCURRENCY: 2,
+  DREP_DELEGATION_SYNC_CONCURRENCY: 4,
   DREP_DELEGATION_DB_UPDATE_CONCURRENCY: 2,
   STAKE_DELEGATION_SYNC_STATE_ID: "stake-delegation-sync",
   DREP_DELEGATION_BACKFILL_JOB_NAME: "drep-delegation-backfill",
@@ -94,11 +94,31 @@ function createPrismaMock(options: PrismaMockOptions = {}) {
       })),
     },
     stakeDelegationState: {
-      findMany: jest.fn().mockImplementation(async ({ where }: any) => {
+      count: jest.fn().mockImplementation(async ({ where }: any) => {
         if (where?.drepId?.not === null) {
-          return existingStates
+          return existingStates.filter((row) => row.drepId !== null).length;
+        }
+        return 0;
+      }),
+      findMany: jest.fn().mockImplementation(async (args: any) => {
+        const where = args?.where;
+        if (where?.drepId?.not === null) {
+          let rows = existingStates
             .filter((row) => row.drepId !== null)
-            .map((row) => ({ stakeAddress: row.stakeAddress }));
+            .map((row) => ({ stakeAddress: row.stakeAddress }))
+            .sort((a, b) => a.stakeAddress.localeCompare(b.stakeAddress));
+          if (args?.cursor?.stakeAddress) {
+            const idx = rows.findIndex((r) => r.stakeAddress === args.cursor.stakeAddress);
+            if (idx >= 0) {
+              const skip = args.skip ?? 0;
+              rows = rows.slice(idx + skip);
+            }
+          }
+          const take = args.take;
+          if (typeof take === "number") {
+            rows = rows.slice(0, take);
+          }
+          return rows;
         }
         const requested = new Set(where?.stakeAddress?.in ?? []);
         return existingStates.filter((row) => requested.has(row.stakeAddress));
@@ -146,9 +166,31 @@ function createPrismaMock(options: PrismaMockOptions = {}) {
         const requested = new Set(where?.stakeAddress?.in ?? []);
         return existingChangeRows.filter((row) => requested.has(row.stakeAddress));
       }),
-      createMany: jest.fn().mockImplementation(async ({ data }: any) => ({
-        count: data.length,
-      })),
+      createMany: jest.fn().mockImplementation(async ({ data, skipDuplicates }: any) => {
+        if (!skipDuplicates) {
+          return { count: data.length };
+        }
+        let inserted = 0;
+        for (const row of data) {
+          const exists = existingChangeRows.some(
+            (e) =>
+              e.stakeAddress === row.stakeAddress &&
+              e.fromDrepId === row.fromDrepId &&
+              e.toDrepId === row.toDrepId &&
+              e.delegatedEpoch === row.delegatedEpoch
+          );
+          if (!exists) {
+            inserted += 1;
+            existingChangeRows.push({
+              stakeAddress: row.stakeAddress,
+              fromDrepId: row.fromDrepId,
+              toDrepId: row.toDrepId,
+              delegatedEpoch: row.delegatedEpoch,
+            });
+          }
+        }
+        return { count: inserted };
+      }),
     },
     stakeDelegationSyncState: {
       upsert: jest.fn().mockResolvedValue(syncState),
@@ -296,6 +338,28 @@ describe("delegation-sync.service", () => {
     expect(mockSyncAllDrepsInventory).not.toHaveBeenCalled();
   });
 
+  it("counts phase 3 changesInserted from rows inserted (skipDuplicates)", async () => {
+    const prisma = createPrismaMock({
+      backfillStatus: { backfillCompletedAt: new Date() },
+      existingStakeAddresses: ["stake_test1"],
+      existingStates: [
+        {
+          stakeAddress: "stake_test1",
+          drepId: "drep_old",
+          amount: BigInt(50),
+          delegatedEpoch: 600,
+        },
+      ],
+      existingChangeRows: [],
+      drepRows: [{ drepId: "drep_new" }],
+    });
+    mockListAllDrepDelegators.mockResolvedValue([
+      { stake_address: "stake_test1", amount: "100", epoch_no: 601 },
+    ]);
+    const result = await syncDrepDelegationChanges(prisma);
+    expect(result.changesInserted).toBe(1);
+  });
+
   it("updates existing states without inserting duplicate phase-3 change rows", async () => {
     const prisma = createPrismaMock({
       backfillStatus: {
@@ -334,8 +398,21 @@ describe("delegation-sync.service", () => {
     expect(mockGetAccountUpdateHistoryBatch).toHaveBeenCalledTimes(1);
     expect(mockGetTxInfoBatch).toHaveBeenCalledTimes(0);
     expect(prisma.$executeRaw).toHaveBeenCalled();
-    expect(prisma.stakeDelegationChange.createMany).not.toHaveBeenCalled();
-    expect(mockEnsureDrepsExist).not.toHaveBeenCalled();
+    expect(prisma.stakeDelegationChange.createMany).toHaveBeenCalledWith({
+      data: [
+        {
+          stakeAddress: "stake_test1",
+          fromDrepId: "drep_old",
+          toDrepId: "drep_new",
+          delegatedEpoch: 601,
+        },
+      ],
+      skipDuplicates: true,
+    });
+    expect(mockEnsureDrepsExist).toHaveBeenCalledWith(
+      prisma,
+      expect.arrayContaining(["drep_old", "drep_new"])
+    );
     expect(result).toEqual({
       currentEpoch: 602,
       lastProcessedEpoch: 600,
@@ -516,19 +593,17 @@ describe("delegation-sync.service", () => {
 
     await syncDrepDelegationChanges(prisma);
 
-    expect(prisma.stakeDelegationState.updateMany).toHaveBeenCalledWith({
-      where: {
-        stakeAddress: {
-          in: Array.from({ length: 290 }, (_, index) => `stake_${index + 10}`),
-        },
-        drepId: { not: null },
-      },
-      data: {
-        drepId: null,
-        amount: null,
-        delegatedEpoch: null,
-      },
+    const expectedClear = new Set(
+      Array.from({ length: 290 }, (_, index) => `stake_${index + 10}`)
+    );
+    const updateCall = prisma.stakeDelegationState.updateMany.mock.calls[0]?.[0];
+    expect(updateCall?.where?.drepId).toEqual({ not: null });
+    expect(updateCall?.data).toEqual({
+      drepId: null,
+      amount: null,
+      delegatedEpoch: null,
     });
+    expect(new Set(updateCall?.where?.stakeAddress?.in ?? [])).toEqual(expectedClear);
   });
 
   it("always refreshes delegator counts even when no state mutations occur", async () => {

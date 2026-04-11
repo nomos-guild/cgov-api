@@ -20,13 +20,14 @@ export const KOIOS_DREP_INFO_BATCH_SIZE = 10;
 export const KOIOS_POOL_VP_PAGE_SIZE = 1000;
 export const KOIOS_DREP_DELEGATORS_PAGE_SIZE = 1000;
 export const KOIOS_ACCOUNT_LIST_PAGE_SIZE = 1000;
-export const KOIOS_ACCOUNT_UPDATE_HISTORY_BATCH_SIZE = 10;
+export const KOIOS_ACCOUNT_UPDATE_HISTORY_BATCH_SIZE = 25;
 // PostgREST endpoints cap responses to max 1000 rows; use explicit paging for history backfills.
 export const KOIOS_ACCOUNT_UPDATE_HISTORY_PAGE_SIZE = 1000;
-// Keep tx_info batches small to respect Koios payload limits on public/free tiers.
-export const KOIOS_TX_INFO_BATCH_SIZE = 10;
+// Keep tx_info batches bounded to respect Koios payload limits on public/free tiers.
+export const KOIOS_TX_INFO_BATCH_SIZE = 25;
 export const DREP_DELEGATOR_MIN_VOTING_POWER = BigInt(0);
-export const DREP_DELEGATION_SYNC_CONCURRENCY = 1;
+/** Parallel /drep_delegators fetches; bounded to stay within Koios heavy-lane etiquette. */
+export const DREP_DELEGATION_SYNC_CONCURRENCY = 4;
 export const DREP_DELEGATION_DB_UPDATE_CONCURRENCY = 4;
 export const DREP_INFO_SYNC_CONCURRENCY = getBoundedIntEnv(
   "DREP_INFO_SYNC_CONCURRENCY",
