@@ -3,6 +3,7 @@ import {
   getBoundedIntEnv,
   isJobLockActive,
   releaseJobLock,
+  type JobLockReleaseResult,
 } from "./syncLock";
 
 export const PROPOSAL_SYNC_JOB_NAME = "proposal-sync";
@@ -22,7 +23,7 @@ export interface AcquireProposalSyncLockOptions {
 }
 
 export interface ReleaseProposalSyncLockOptions {
-  status: "success" | "failed" | "expired";
+  status: JobLockReleaseResult;
   errorMessage?: string | null;
   itemsProcessed?: number;
 }

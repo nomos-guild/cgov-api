@@ -188,13 +188,13 @@ jobs:
           gcloud scheduler jobs delete drep-delegator-sync --location=${{ env.REGION }} --quiet || true
           gcloud scheduler jobs create http drep-delegator-sync \
             --location=${{ env.REGION }} \
-            --schedule="52 * * * *" \
+            --schedule="15 3 * * *" \
             --uri="${{ steps.url.outputs.url }}/data/trigger-drep-delegator-sync" \
             --http-method=POST \
             --headers="X-API-Key=${{ secrets.SERVER_API_KEY }}" \
             --attempt-deadline=900s \
             --time-zone="UTC" \
-            --description="Sync DRep delegation changes every hour at minute 52"
+            --description="Sync DRep delegation changes daily at 03:15 UTC (app enforces daily budget + in-run retry)"
 
       - name: Create/Update GitHub Discovery Scheduler Job
         run: |
@@ -315,7 +315,7 @@ jobs:
           echo "| drep-lifecycle-sync | \`37 * * * *\` | POST /data/trigger-drep-lifecycle-sync |" >> $GITHUB_STEP_SUMMARY
           echo "| pool-groups-sync | \`47 * * * *\` | POST /data/trigger-pool-groups-sync |" >> $GITHUB_STEP_SUMMARY
           echo "| missing-epochs-sync | \`5 1,13 * * *\` | POST /data/trigger-missing-epochs-sync |" >> $GITHUB_STEP_SUMMARY
-          echo "| drep-delegator-sync | \`52 * * * *\` | POST /data/trigger-drep-delegator-sync |" >> $GITHUB_STEP_SUMMARY
+          echo "| drep-delegator-sync | \`15 3 * * *\` | POST /data/trigger-drep-delegator-sync |" >> $GITHUB_STEP_SUMMARY
           echo "| github-discover | \`0 3 * * 0\` | POST /data/github/discover |" >> $GITHUB_STEP_SUMMARY
           echo "| github-sync-active | \`*/30 * * * *\` | POST /data/github/sync?tier=active |" >> $GITHUB_STEP_SUMMARY
           echo "| github-sync-moderate | \`0 */4 * * *\` | POST /data/github/sync?tier=moderate |" >> $GITHUB_STEP_SUMMARY
