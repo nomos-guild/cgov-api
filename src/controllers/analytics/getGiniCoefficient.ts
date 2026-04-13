@@ -1,6 +1,7 @@
 import { Request, Response } from "express";
 import { prisma } from "../../services";
 import { GetGiniCoefficientResponse } from "../../responses/analytics.response";
+import { formatAxiosLikeError } from "../../utils/format-http-client-error";
 
 /**
  * Calculates the Gini coefficient for a distribution of values.
@@ -130,7 +131,7 @@ export const getGiniCoefficient = async (req: Request, res: Response) => {
 
     res.json(response);
   } catch (error) {
-    console.error("Error calculating Gini coefficient", error);
+    console.error("Error calculating Gini coefficient", formatAxiosLikeError(error));
     res.status(500).json({
       error: "Failed to calculate Gini coefficient",
       message: error instanceof Error ? error.message : "Unknown error",

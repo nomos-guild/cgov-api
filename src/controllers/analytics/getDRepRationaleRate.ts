@@ -1,4 +1,5 @@
 import { Request, Response } from "express";
+import { formatAxiosLikeError } from "../../utils/format-http-client-error";
 import { VoterType } from "@prisma/client";
 import { prisma } from "../../services";
 import {
@@ -152,7 +153,7 @@ export const getDRepRationaleRate = async (req: Request, res: Response) => {
 
     res.json(response);
   } catch (error) {
-    console.error("Error fetching DRep rationale rate", error);
+    console.error("Error fetching DRep rationale rate", formatAxiosLikeError(error));
     res.status(500).json({
       error: "Failed to fetch DRep rationale rate",
       message: error instanceof Error ? error.message : "Unknown error",

@@ -273,6 +273,20 @@ export interface KoiosAccountListEntry {
 }
 
 /**
+ * Stake account info from Koios API
+ * Endpoint: POST /account_info
+ */
+export interface KoiosAccountInfo {
+  stake_address: string;
+  /** Current vote delegation target (CIP-129 bech32) or null if not delegating to a DRep. */
+  delegated_drep?: string | null;
+  /** Total controlled stake in lovelace (string), when exposed by Koios. */
+  total_balance?: string | null;
+  /** Alternative field name seen on some networks / schema versions. */
+  controlled_total_stake?: string | null;
+}
+
+/**
  * DRep Delegators from Koios API
  * Endpoint: GET /drep_delegators?_drep_id=<drepId>
  *

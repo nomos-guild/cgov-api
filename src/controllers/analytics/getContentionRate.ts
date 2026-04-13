@@ -9,6 +9,7 @@ import {
   computeSpoLedgerBuckets,
 } from "../../libs/ledgerVoteMath";
 import { getVotingThreshold } from "../../libs/proposalMapper";
+import { formatAxiosLikeError } from "../../utils/format-http-client-error";
 
 /**
  * Determines if a proposal is contentious based on vote split
@@ -233,7 +234,7 @@ export const getContentionRate = async (req: Request, res: Response) => {
 
     res.json(response);
   } catch (error) {
-    console.error("Error fetching contention rate", error);
+    console.error("Error fetching contention rate", formatAxiosLikeError(error));
     res.status(500).json({
       error: "Failed to fetch contention rate",
       message: error instanceof Error ? error.message : "Unknown error",

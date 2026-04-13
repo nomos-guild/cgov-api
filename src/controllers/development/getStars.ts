@@ -3,6 +3,7 @@ import { prisma } from "../../services/prisma";
 import { cacheGet, cacheSet } from "../../services/cache";
 import type { DevelopmentStarsResponse } from "../../responses";
 import { RANGE_DAYS } from "../../constants/development";
+import { formatAxiosLikeError } from "../../utils/format-http-client-error";
 
 const TTL = 60 * 60 * 1000; // 1 hour
 
@@ -71,7 +72,7 @@ export const getStars = async (req: Request, res: Response) => {
     cacheSet(cacheKey, response, TTL);
     res.json(response);
   } catch (error) {
-    console.error("Error fetching star trends", error);
+    console.error("Error fetching star trends", formatAxiosLikeError(error));
     res.status(500).json({
       error: "Failed to fetch star trends",
       message: error instanceof Error ? error.message : "Unknown error",

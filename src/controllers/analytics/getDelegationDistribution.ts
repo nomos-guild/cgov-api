@@ -1,4 +1,5 @@
 import { Request, Response } from "express";
+import { formatAxiosLikeError } from "../../utils/format-http-client-error";
 import { prisma } from "../../services";
 import {
   GetDelegationDistributionResponse,
@@ -108,7 +109,7 @@ export const getDelegationDistribution = async (req: Request, res: Response) => 
 
     res.json(response);
   } catch (error) {
-    console.error("Error fetching delegation distribution", error);
+    console.error("Error fetching delegation distribution", formatAxiosLikeError(error));
     res.status(500).json({
       error: "Failed to fetch delegation distribution",
       message: error instanceof Error ? error.message : "Unknown error",

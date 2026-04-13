@@ -1,4 +1,5 @@
 import { Request, Response } from "express";
+import { formatAxiosLikeError } from "../../utils/format-http-client-error";
 import { prisma } from "../../services";
 import {
   DRepConcentrationHistoryPoint,
@@ -120,7 +121,7 @@ export const getDRepConcentrationHistory = async (_req: Request, res: Response) 
     res.set("Cache-Control", "public, s-maxage=300, stale-while-revalidate=600");
     res.json(response);
   } catch (error) {
-    console.error("Error fetching DRep concentration history", error);
+    console.error("Error fetching DRep concentration history", formatAxiosLikeError(error));
     res.status(500).json({
       error: "Failed to fetch DRep concentration history",
       message: error instanceof Error ? error.message : "Unknown error",

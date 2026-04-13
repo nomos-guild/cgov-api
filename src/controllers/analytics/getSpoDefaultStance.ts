@@ -1,4 +1,5 @@
 import { Request, Response } from "express";
+import { formatAxiosLikeError } from "../../utils/format-http-client-error";
 import { prisma } from "../../services";
 import {
   GetSpoDefaultStanceResponse,
@@ -126,7 +127,7 @@ export const getSpoDefaultStance = async (req: Request, res: Response) => {
 
     res.json(response);
   } catch (error) {
-    console.error("Error fetching SPO default stance", error);
+    console.error("Error fetching SPO default stance", formatAxiosLikeError(error));
     res.status(500).json({
       error: "Failed to fetch SPO default stance",
       message: error instanceof Error ? error.message : "Unknown error",

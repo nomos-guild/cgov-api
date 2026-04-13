@@ -3,6 +3,7 @@
  */
 
 import { koiosGet } from "./src/services/koios";
+import { formatAxiosLikeError } from "./src/utils/format-http-client-error";
 import type { KoiosProposal } from "./src/types/koios.types";
 
 async function checkKoiosTypes() {
@@ -51,7 +52,7 @@ async function checkKoiosTypes() {
     console.log(`Last proposal: ${allProposals[allProposals.length - 1].proposal_id}`);
 
   } catch (error) {
-    console.error("Error:", error);
+    console.error("Error:", formatAxiosLikeError(error));
   }
 }
 

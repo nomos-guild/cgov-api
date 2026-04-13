@@ -1,4 +1,5 @@
 import { Request, Response } from "express";
+import { formatAxiosLikeError } from "../../utils/format-http-client-error";
 import { prisma } from "../../services";
 import {
   GetInactiveAdaResponse,
@@ -89,7 +90,7 @@ export const getInactiveAda = async (req: Request, res: Response) => {
 
     res.json(response);
   } catch (error) {
-    console.error("Error fetching inactive ada", error);
+    console.error("Error fetching inactive ada", formatAxiosLikeError(error));
     res.status(500).json({
       error: "Failed to fetch inactive ada",
       message: error instanceof Error ? error.message : "Unknown error",

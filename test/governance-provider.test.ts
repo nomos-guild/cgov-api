@@ -11,9 +11,12 @@ jest.mock("../src/services/koios", () => ({
   koiosGetAll: (...args: unknown[]) => mockKoiosGetAll(...args),
   getKoiosPressureState: (...args: unknown[]) =>
     mockGetKoiosPressureState(...args),
+  KOIOS_PUBLIC_MAX_BODY_BYTES: 1024,
 }));
 
 import {
+  chunkStakeAddressesForAccountInfo,
+  getAccountInfoBatch,
   getAccountUpdateHistoryBatch,
   getCommitteeInfo,
   getCurrentEpochFromKoios,
@@ -240,11 +243,9 @@ describe("governanceProvider", () => {
 
   it("batches tx info lookups and preserves request body flags", async () => {
     const txHashes = buildRows(11, (index) => `tx${index}`);
-    mockKoiosPost
-      .mockResolvedValueOnce(
-        txHashes.slice(0, 10).map((txHash) => ({ tx_hash: txHash }))
-      )
-      .mockResolvedValueOnce([{ tx_hash: "tx10" }]);
+    mockKoiosPost.mockResolvedValueOnce(
+      txHashes.map((txHash) => ({ tx_hash: txHash }))
+    );
 
     const rows = await getTxInfoBatch(txHashes, {
       includeMetadata: false,
@@ -253,25 +254,47 @@ describe("governanceProvider", () => {
     });
 
     expect(rows).toHaveLength(11);
-    expect(mockKoiosPost).toHaveBeenNthCalledWith(
-      1,
+    expect(mockKoiosPost).toHaveBeenCalledTimes(1);
+    expect(mockKoiosPost).toHaveBeenCalledWith(
       "/tx_info",
       {
-        _tx_hashes: txHashes.slice(0, 10),
+        _tx_hashes: txHashes,
         _metadata: false,
         _certs: true,
       },
       { source: "test.tx-info" }
     );
-    expect(mockKoiosPost).toHaveBeenNthCalledWith(
-      2,
-      "/tx_info",
-      {
-        _tx_hashes: ["tx10"],
-        _metadata: false,
-        _certs: true,
-      },
-      { source: "test.tx-info" }
+  });
+
+  it("chunks account_info POST bodies under the public max-bytes limit", () => {
+    const a = `a${"x".repeat(39)}`;
+    const b = `b${"y".repeat(39)}`;
+    const c = `c${"z".repeat(39)}`;
+    const chunks = chunkStakeAddressesForAccountInfo([a, b, c], 90);
+    expect(chunks.length).toBeGreaterThan(1);
+    for (const chunk of chunks) {
+      expect(
+        Buffer.byteLength(JSON.stringify({ _stake_addresses: chunk }), "utf8")
+      ).toBeLessThanOrEqual(90);
+    }
+  });
+
+  it("posts account_info via Koios POST /account_info", async () => {
+    mockKoiosPost.mockResolvedValueOnce([
+      { stake_address: "stake_a", delegated_drep: "drep1", total_balance: "100" },
+      { stake_address: "stake_b", delegated_drep: null, total_balance: "0" },
+    ]);
+
+    const rows = await getAccountInfoBatch(["stake_a", "stake_b"], {
+      source: "test.account-info",
+    });
+
+    expect(rows).toHaveLength(2);
+    expect(mockKoiosPost).toHaveBeenCalledTimes(1);
+    expect(mockKoiosPost).toHaveBeenCalledWith(
+      "/account_info",
+      { _stake_addresses: ["stake_a", "stake_b"] },
+      { source: "test.account-info" }
     );
   });
 

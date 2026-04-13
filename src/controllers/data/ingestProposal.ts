@@ -1,5 +1,6 @@
 import { Request, Response } from "express";
 import { ingestProposal } from "../../services/ingestion/proposal.service";
+import { formatAxiosLikeError } from "../../utils/format-http-client-error";
 
 /**
  * POST /data/proposal/:proposal_hash
@@ -43,7 +44,7 @@ export const postIngestProposal = async (req: Request, res: Response) => {
       });
     }
   } catch (error) {
-    console.error("[Ingest Proposal] Error:", error);
+    console.error("[Ingest Proposal] Error:", formatAxiosLikeError(error));
 
     const errorMessage =
       error instanceof Error ? error.message : "Unknown error";

@@ -9,6 +9,7 @@ import { GetProposalInfoResponse } from "../../responses";
 import { getCachedEligibleCCInfo } from "../../services/committeeState.service";
 import { buildProposalLookup } from "../../services/proposalLookup";
 import { syncProposalDetailsOnRead } from "../../services/syncOnRead";
+import { formatAxiosLikeError } from "../../utils/format-http-client-error";
 
 export const getProposalDetails = async (req: Request, res: Response) => {
   try {
@@ -60,7 +61,7 @@ export const getProposalDetails = async (req: Request, res: Response) => {
 
     return res.json(response);
   } catch (error) {
-    console.error("Error fetching proposal details", error);
+    console.error("Error fetching proposal details", formatAxiosLikeError(error));
     return res.status(500).json({
       error: "Failed to fetch proposal details",
       message: error instanceof Error ? error.message : "Unknown error",

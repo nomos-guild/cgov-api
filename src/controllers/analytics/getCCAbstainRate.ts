@@ -1,4 +1,5 @@
 import { Request, Response } from "express";
+import { formatAxiosLikeError } from "../../utils/format-http-client-error";
 import { VoterType, VoteType } from "@prisma/client";
 import { prisma } from "../../services";
 import {
@@ -140,7 +141,7 @@ export const getCCAbstainRate = async (req: Request, res: Response) => {
 
     res.json(response);
   } catch (error) {
-    console.error("Error fetching CC abstain rate", error);
+    console.error("Error fetching CC abstain rate", formatAxiosLikeError(error));
     res.status(500).json({
       error: "Failed to fetch CC abstain rate",
       message: error instanceof Error ? error.message : "Unknown error",

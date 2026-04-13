@@ -2,6 +2,7 @@ import { Request, Response } from "express";
 import { VoterType } from "@prisma/client";
 import { prisma } from "../../services";
 import { GetStakeParticipationResponse } from "../../responses/analytics.response";
+import { formatAxiosLikeError } from "../../utils/format-http-client-error";
 
 /**
  * GET /analytics/stake-participation
@@ -178,7 +179,7 @@ export const getStakeParticipation = async (req: Request, res: Response) => {
 
     res.json(response);
   } catch (error) {
-    console.error("Error fetching stake participation", error);
+    console.error("Error fetching stake participation", formatAxiosLikeError(error));
     res.status(500).json({
       error: "Failed to fetch stake participation",
       message: error instanceof Error ? error.message : "Unknown error",

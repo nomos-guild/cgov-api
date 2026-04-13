@@ -1,4 +1,5 @@
 import { Request, Response } from "express";
+import { formatAxiosLikeError } from "../../utils/format-http-client-error";
 import { VoterType } from "@prisma/client";
 import { prisma } from "../../services";
 import {
@@ -180,7 +181,7 @@ export const getEntityConcentration = async (req: Request, res: Response) => {
 
     res.json(response);
   } catch (error) {
-    console.error("Error fetching entity concentration", error);
+    console.error("Error fetching entity concentration", formatAxiosLikeError(error));
     res.status(500).json({
       error: "Failed to fetch entity concentration",
       message: error instanceof Error ? error.message : "Unknown error",

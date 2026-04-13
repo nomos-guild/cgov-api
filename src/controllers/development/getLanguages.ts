@@ -3,6 +3,7 @@ import { Prisma } from "@prisma/client";
 import { prisma } from "../../services/prisma";
 import { cacheGet, cacheSet } from "../../services/cache";
 import type { DevelopmentLanguagesResponse, LanguageBreakdown } from "../../responses";
+import { formatAxiosLikeError } from "../../utils/format-http-client-error";
 
 const TTL = 60 * 60 * 1000; // 1 hour
 
@@ -93,7 +94,7 @@ export const getLanguages = async (req: Request, res: Response) => {
     cacheSet(cacheKey, response, TTL);
     res.json(response);
   } catch (error) {
-    console.error("Error fetching languages", error);
+    console.error("Error fetching languages", formatAxiosLikeError(error));
     res.status(500).json({
       error: "Failed to fetch languages",
       message: error instanceof Error ? error.message : "Unknown error",

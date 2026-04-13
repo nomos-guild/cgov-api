@@ -1,3 +1,4 @@
+const mockGetAccountInfoBatch = jest.fn();
 const mockGetAccountUpdateHistoryBatch = jest.fn();
 const mockGetTxInfoBatch = jest.fn();
 const mockListAllDrepDelegators = jest.fn();
@@ -6,23 +7,38 @@ const mockEnsureDrepsExist = jest.fn();
 const mockRefreshDrepDelegatorCounts = jest.fn();
 const mockGetKoiosCurrentEpoch = jest.fn();
 
+jest.mock("../src/services/ingestion/delegation-writer-lock", () => ({
+  tryAcquireDelegationWriterLock: jest.fn().mockResolvedValue(true),
+  releaseDelegationWriterLock: jest.fn().mockResolvedValue(undefined),
+}));
+
 jest.mock("../src/services/governanceProvider", () => ({
+  getAccountInfoBatch: (...args: unknown[]) => mockGetAccountInfoBatch(...args),
   getAccountUpdateHistoryBatch: (...args: unknown[]) =>
     mockGetAccountUpdateHistoryBatch(...args),
   getTxInfoBatch: (...args: unknown[]) => mockGetTxInfoBatch(...args),
   listAllDrepDelegators: (...args: unknown[]) => mockListAllDrepDelegators(...args),
 }));
 
-jest.mock("../src/services/ingestion/drep-sync.service", () => ({
-  syncAllDrepsInventory: (...args: unknown[]) => mockSyncAllDrepsInventory(...args),
-  ensureDrepsExist: (...args: unknown[]) => mockEnsureDrepsExist(...args),
-  refreshDrepDelegatorCountsFromDelegationState: (...args: unknown[]) =>
-    mockRefreshDrepDelegatorCounts(...args),
-}));
+jest.mock("../src/services/ingestion/drep-sync.service", () => {
+  const actual = jest.requireActual(
+    "../src/services/ingestion/drep-sync.service"
+  ) as typeof import("../src/services/ingestion/drep-sync.service");
+  return {
+    ...actual,
+    syncAllDrepsInventory: (...args: unknown[]) => mockSyncAllDrepsInventory(...args),
+    ensureDrepsExist: (...args: unknown[]) => mockEnsureDrepsExist(...args),
+    refreshDrepDelegatorCountsForDrepIds: (...args: unknown[]) =>
+      mockRefreshDrepDelegatorCounts(...args),
+  };
+});
 
 jest.mock("../src/services/ingestion/sync-utils", () => ({
   DREP_DELEGATOR_MIN_VOTING_POWER: BigInt(0),
   DREP_DELEGATION_SYNC_CONCURRENCY: 4,
+  DREP_DELEGATION_SHARD_COUNT: 8,
+  DREP_DELEGATION_ACCOUNT_INFO_MAX_STAKES_PER_RUN: 2500,
+  DREP_DELEGATION_FULL_ALL_DREPS_MIN_INTERVAL_DAYS: 7,
   DREP_DELEGATION_DB_UPDATE_CONCURRENCY: 2,
   STAKE_DELEGATION_SYNC_STATE_ID: "stake-delegation-sync",
   DREP_DELEGATION_BACKFILL_JOB_NAME: "drep-delegation-backfill",
@@ -72,6 +88,8 @@ function createPrismaMock(options: PrismaMockOptions = {}) {
 
   const prisma = {
     $executeRaw: jest.fn().mockResolvedValue(1),
+    $queryRaw: jest.fn().mockResolvedValue([{ acquired: true }]),
+    $transaction: undefined as any,
     drep: {
       findMany: jest.fn().mockResolvedValue(drepRows),
     },
@@ -83,7 +101,11 @@ function createPrismaMock(options: PrismaMockOptions = {}) {
         ),
     },
     stakeAddress: {
-      findMany: jest.fn().mockImplementation(async ({ where }: any) => {
+      findMany: jest.fn().mockImplementation(async (args: any) => {
+        const where = args?.where;
+        if (where?.stakeAddress?.gt !== undefined) {
+          return [];
+        }
         const requested = where?.stakeAddress?.in ?? [];
         return requested
           .filter((stakeAddress: string) => existingStakeAddresses.has(stakeAddress))
@@ -196,6 +218,21 @@ function createPrismaMock(options: PrismaMockOptions = {}) {
       upsert: jest.fn().mockResolvedValue(syncState),
       update: jest.fn().mockResolvedValue({}),
     },
+    delegationSyncCheckpoint: {
+      upsert: jest.fn().mockResolvedValue({}),
+      findUnique: jest.fn().mockResolvedValue({
+        id: "default",
+        accountInfoStakeCursor: null,
+        drepShardIndex: 0,
+        phase3CheckpointJson: null,
+        lastFullAllDrepsScanAt: null,
+      }),
+      update: jest.fn().mockResolvedValue({}),
+    },
+    stakeDelegationStaging: {
+      createMany: jest.fn().mockResolvedValue({ count: 0 }),
+      deleteMany: jest.fn().mockResolvedValue({ count: 0 }),
+    },
     syncStatus: {
       findUnique: jest.fn().mockImplementation(async ({ where }: any) => {
         switch (where?.jobName) {
@@ -234,6 +271,7 @@ describe("delegation-sync.service", () => {
   let warnSpy: jest.SpyInstance;
 
   beforeEach(() => {
+    mockGetAccountInfoBatch.mockReset();
     mockGetAccountUpdateHistoryBatch.mockReset();
     mockGetTxInfoBatch.mockReset();
     mockListAllDrepDelegators.mockReset();
@@ -242,6 +280,7 @@ describe("delegation-sync.service", () => {
     mockRefreshDrepDelegatorCounts.mockReset();
     mockGetKoiosCurrentEpoch.mockReset();
     mockGetKoiosCurrentEpoch.mockResolvedValue(602);
+    mockGetAccountInfoBatch.mockResolvedValue([]);
     mockGetAccountUpdateHistoryBatch.mockResolvedValue([]);
     mockGetTxInfoBatch.mockResolvedValue([]);
     mockRefreshDrepDelegatorCounts.mockResolvedValue({ updated: 0 });
@@ -606,7 +645,7 @@ describe("delegation-sync.service", () => {
     expect(new Set(updateCall?.where?.stakeAddress?.in ?? [])).toEqual(expectedClear);
   });
 
-  it("always refreshes delegator counts even when no state mutations occur", async () => {
+  it("skips delegator count refresh when no DRep counts change", async () => {
     const prisma = createPrismaMock({
       existingStakeAddresses: ["stake_kept"],
       existingStates: [
@@ -629,7 +668,7 @@ describe("delegation-sync.service", () => {
 
     const result = await syncDrepDelegationChanges(prisma);
 
-    expect(mockRefreshDrepDelegatorCounts).toHaveBeenCalledTimes(1);
+    expect(mockRefreshDrepDelegatorCounts).not.toHaveBeenCalled();
     expect(result.statesUpdated).toBe(0);
   });
 

@@ -16,6 +16,7 @@
  */
 
 import "dotenv/config";
+import { formatAxiosLikeError } from "../utils/format-http-client-error";
 import { prisma } from "../services/prisma";
 import { koiosGet } from "../services/koios";
 import { processInParallel } from "../services/ingestion/parallel";
@@ -442,7 +443,7 @@ async function main() {
 
 main()
   .catch((error) => {
-    console.error("[Backfill] Fatal error:", error);
+    console.error("[Backfill] Fatal error:", formatAxiosLikeError(error));
     process.exit(1);
   })
   .finally(async () => {

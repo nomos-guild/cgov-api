@@ -2,6 +2,7 @@ import { Request, Response } from "express";
 import { syncEpochTotalsStep } from "../../services/ingestion/epoch-analytics.service";
 import { prisma } from "../../services";
 import { acquireJobLock, releaseJobLock } from "../../services/ingestion/syncLock";
+import { formatAxiosLikeError } from "../../utils/format-http-client-error";
 
 const JOB_NAME = "epoch-totals-sync";
 const DISPLAY_NAME = "Epoch Totals Sync";
@@ -45,23 +46,23 @@ export const postTriggerEpochTotalsSync = async (
           currentEpoch: result.currentEpoch, epochToSync: result.epochToSync, skippedPrevious: result.skippedPrevious,
         });
       } catch (error) {
-        console.error("[Epoch Totals Sync] Async processing error:", error);
+        console.error("[Epoch Totals Sync] Async processing error:", formatAxiosLikeError(error));
         const errorMessage = error instanceof Error ? error.message : "Unknown error";
         try {
           await releaseJobLock(JOB_NAME, "failed", 0, errorMessage);
         } catch (updateError) {
-          console.error("[Epoch Totals Sync] Failed to update sync status:", updateError);
+          console.error("[Epoch Totals Sync] Failed to update sync status:", formatAxiosLikeError(updateError));
         }
       }
-    })().catch((error) => { console.error("[Epoch Totals Sync] Unhandled error:", error); });
+    })().catch((error) => { console.error("[Epoch Totals Sync] Unhandled error:", formatAxiosLikeError(error)); });
   } catch (error) {
-    console.error("[Epoch Totals Sync] Setup error:", error);
+    console.error("[Epoch Totals Sync] Setup error:", formatAxiosLikeError(error));
     const errorMessage = error instanceof Error ? error.message : "Unknown error";
     if (acquired) {
       try {
         await releaseJobLock(JOB_NAME, "failed", 0, errorMessage);
       } catch (updateError) {
-        console.error("[Epoch Totals Sync] Failed to update sync status:", updateError);
+        console.error("[Epoch Totals Sync] Failed to update sync status:", formatAxiosLikeError(updateError));
       }
     }
     res.status(500).json({ success: false, error: "Failed to start epoch totals sync", message: errorMessage });

@@ -148,6 +148,35 @@ model StakeDelegationSyncState {
   @@map("stake_delegation_sync_state")
 }
 
+// Watermarks for DRep delegator sync (account_info cursor, shard rotation, Phase 3 JSON).
+model DelegationSyncCheckpoint {
+  id                     String    @id @default("default")
+  accountInfoStakeCursor String?   @map("account_info_stake_cursor")
+  drepShardIndex         Int       @default(0) @map("drep_shard_index")
+  lastFullAllDrepsScanAt DateTime? @map("last_full_all_dreps_scan_at")
+  phase3CheckpointJson   String?   @map("phase3_checkpoint_json")
+  schemaVersion          Int       @default(1) @map("schema_version")
+  updatedAt              DateTime  @updatedAt @map("updated_at")
+
+  @@map("delegation_sync_checkpoint")
+}
+
+// Staging rows for a single sync run (Koios → validate → merge to stake_delegation_state).
+model StakeDelegationStaging {
+  id               BigInt   @id @default(autoincrement())
+  runId            String   @map("run_id")
+  stakeAddress     String   @map("stake_address")
+  drepId           String?  @map("drep_id")
+  amount           String?  @map("amount")
+  delegatedEpochNo Int?     @map("delegated_epoch_no")
+  source           String   @map("source")
+  createdAt        DateTime @default(now()) @map("created_at")
+
+  @@index([runId])
+  @@index([stakeAddress])
+  @@map("stake_delegation_staging")
+}
+
 // Tracks per-epoch completion state for the governance analytics sync job.
 // This lets the job run frequently but only do heavy work once per epoch.
 model EpochAnalyticsSync {

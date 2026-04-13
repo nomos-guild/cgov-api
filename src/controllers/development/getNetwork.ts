@@ -3,6 +3,7 @@ import { getCachedGraph, precomputeNetworkGraphs } from "../../services/ingestio
 import { cacheGet, cacheSet } from "../../services/cache";
 import type { DevelopmentNetworkResponse, OrgBreakdown } from "../../responses";
 import { RANGE_DAYS } from "../../constants/development";
+import { formatAxiosLikeError } from "../../utils/format-http-client-error";
 
 const TTL = 30 * 60 * 1000; // 30 min
 
@@ -61,7 +62,7 @@ export const getNetwork = async (req: Request, res: Response) => {
     cacheSet(cacheKey, response, TTL);
     res.json(response);
   } catch (error) {
-    console.error("Error fetching network graph", error);
+    console.error("Error fetching network graph", formatAxiosLikeError(error));
     res.status(500).json({
       error: "Failed to fetch network graph",
       message: error instanceof Error ? error.message : "Unknown error",

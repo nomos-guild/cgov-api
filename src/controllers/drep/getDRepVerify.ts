@@ -2,6 +2,7 @@ import { Request, Response } from "express";
 import { prisma } from "../../services";
 import { GetDRepVerifyResponse } from "../../responses";
 import { getDrepInfoBatch } from "../../services/drep-lookup";
+import { formatAxiosLikeError } from "../../utils/format-http-client-error";
 
 export const getDRepVerify = async (req: Request, res: Response) => {
   try {
@@ -53,7 +54,7 @@ export const getDRepVerify = async (req: Request, res: Response) => {
 
     return res.json(response);
   } catch (error) {
-    console.error("Error verifying DRep", error);
+    console.error("Error verifying DRep", formatAxiosLikeError(error));
     return res.status(500).json({
       error: "Failed to verify DRep",
       message: error instanceof Error ? error.message : "Unknown error",

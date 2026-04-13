@@ -1,6 +1,7 @@
 import { Request, Response } from "express";
 import { VoteType, VoterType } from "@prisma/client";
 import { frontloadVote } from "../../services/ingestion/vote.service";
+import { formatAxiosLikeError } from "../../utils/format-http-client-error";
 
 const VALID_VOTE_TYPES = ["YES", "NO", "ABSTAIN"] as const;
 const VALID_VOTER_TYPES = ["DREP", "SPO", "CC"] as const;
@@ -78,7 +79,7 @@ export const postFrontloadVote = async (req: Request, res: Response) => {
       proposalId,
     });
   } catch (error) {
-    console.error("[Frontload Vote] Error:", error);
+    console.error("[Frontload Vote] Error:", formatAxiosLikeError(error));
 
     const errorMessage =
       error instanceof Error ? error.message : "Unknown error";

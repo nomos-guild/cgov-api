@@ -26,6 +26,20 @@ export const KOIOS_ACCOUNT_UPDATE_HISTORY_PAGE_SIZE = 1000;
 // Keep tx_info batches bounded to respect Koios payload limits on public/free tiers.
 export const KOIOS_TX_INFO_BATCH_SIZE = 25;
 export const DREP_DELEGATOR_MIN_VOTING_POWER = BigInt(0);
+/** Number of DRep shards; one shard is processed per sync run unless a full all-DRep scan runs. */
+export const DREP_DELEGATION_SHARD_COUNT = 8;
+/**
+ * Max stake addresses refreshed via POST /account_info per sync run (cursor wraps).
+ *
+ * Sweep cadence: one full pass over all stake_address rows needs
+ * ceil(stakeCount / this constant) successful runs. For ~70k stakes at 2500/run that is
+ * 28 runs per full sweep. Default schedule is hourly at :52 (24×/day); lower frequency
+ * lengthens the full sweep (see DREP_DELEGATOR_SYNC_SCHEDULE in sync-drep-delegators.job).
+ * If inventory grows, increase frequency or raise this constant in a PR.
+ */
+export const DREP_DELEGATION_ACCOUNT_INFO_MAX_STAKES_PER_RUN = 2500;
+/** Minimum days between full all-DRep GET /drep_delegators scans (drift safety net). */
+export const DREP_DELEGATION_FULL_ALL_DREPS_MIN_INTERVAL_DAYS = 7;
 /** Parallel /drep_delegators fetches; bounded to stay within Koios heavy-lane etiquette. */
 export const DREP_DELEGATION_SYNC_CONCURRENCY = 4;
 export const DREP_DELEGATION_DB_UPDATE_CONCURRENCY = 4;

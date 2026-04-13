@@ -3,6 +3,7 @@ import { ProposalStatus } from "@prisma/client";
 import { prisma } from "../../services";
 import { GetNCLDataResponse } from "../../responses";
 import { syncProposalsOverviewOnRead } from "../../services/syncOnRead";
+import { formatAxiosLikeError } from "../../utils/format-http-client-error";
 
 type StatusCountMap = Partial<Record<ProposalStatus, number>>;
 
@@ -55,7 +56,7 @@ export const getOverviewSummary = async (_req: Request, res: Response) => {
 
     res.json(response);
   } catch (error) {
-    console.error("Error fetching overview summary", error);
+    console.error("Error fetching overview summary", formatAxiosLikeError(error));
     res.status(500).json({
       error: "Failed to fetch overview data",
       message: error instanceof Error ? error.message : "Unknown error",

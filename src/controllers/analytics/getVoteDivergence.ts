@@ -1,4 +1,5 @@
 import { Request, Response } from "express";
+import { formatAxiosLikeError } from "../../utils/format-http-client-error";
 import { prisma } from "../../services";
 import {
   GetVoteDivergenceResponse,
@@ -171,7 +172,7 @@ export const getVoteDivergence = async (req: Request, res: Response) => {
 
     res.json(response);
   } catch (error) {
-    console.error("Error fetching vote divergence", error);
+    console.error("Error fetching vote divergence", formatAxiosLikeError(error));
     res.status(500).json({
       error: "Failed to fetch vote divergence",
       message: error instanceof Error ? error.message : "Unknown error",

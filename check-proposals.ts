@@ -3,6 +3,7 @@
  */
 
 import { prisma } from "./src/services";
+import { formatAxiosLikeError } from "./src/utils/format-http-client-error";
 
 async function checkProposals() {
   console.log("Checking proposals in database...\n");
@@ -67,7 +68,7 @@ async function checkProposals() {
       });
     }
   } catch (error) {
-    console.error("Error:", error);
+    console.error("Error:", formatAxiosLikeError(error));
   } finally {
     await prisma.$disconnect();
   }

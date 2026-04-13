@@ -21,6 +21,7 @@ import {
   getKoiosSharedCooldownSnapshot,
   mergeKoiosSharedCooldown,
 } from "./koios/sharedCoordination";
+import { formatAxiosLikeError } from "../utils/format-http-client-error";
 
 // Single tunable timeout for all Koios requests, read from env.
 const KOIOS_REQUEST_TIMEOUT_MS = getBoundedIntEnv(
@@ -94,7 +95,8 @@ const DEFAULT_KOIOS_TIMEOUT_COOLOFF_MS = 10_000;
 const KOIOS_SHARED_PULL_INTERVAL_MS = 3_000;
 const KOIOS_SHARED_PUBLISH_MIN_INTERVAL_MS = 1_000;
 const KOIOS_MAX_PAGE_LIMIT = 1000;
-const KOIOS_PUBLIC_MAX_BODY_BYTES = 1024;
+/** Public-tier Koios POST body limit; governanceProvider batches account_info to stay under this. */
+export const KOIOS_PUBLIC_MAX_BODY_BYTES = 1024;
 const KOIOS_REGISTERED_MAX_BODY_BYTES = 5 * 1024;
 const DEFAULT_PROPOSAL_LIST_INTERACTIVE_CACHE_TTL_MS = 5000;
 
@@ -263,6 +265,10 @@ const KOIOS_ENDPOINT_LIMITS = new Map<string, number>([
   [
     "/account_update_history",
     getBoundedIntEnv("KOIOS_MAX_CONCURRENT_ACCOUNT_UPDATE_HISTORY", 1, 1, 10),
+  ],
+  [
+    "/account_info",
+    getBoundedIntEnv("KOIOS_MAX_CONCURRENT_ACCOUNT_INFO", 2, 1, 10),
   ],
   ["/tx_info", getBoundedIntEnv("KOIOS_MAX_CONCURRENT_TX_INFO", 1, 1, 10)],
 ]);
@@ -1029,13 +1035,7 @@ export const getKoiosService = (): AxiosInstance => {
       }
       recordKoiosPressureSignal(error);
       recordKoiosTimeoutCooloffSignal(error);
-      console.error("Koios API Error:", {
-        source: error.config?.__koiosSource,
-        status: error.response?.status,
-        statusText: error.response?.statusText,
-        message: error.message,
-        url: error.config?.url,
-      });
+      console.error("Koios API Error:", formatAxiosLikeError(error));
       return Promise.reject(error);
     }
   );
@@ -1089,9 +1089,13 @@ async function koiosGetInternal<T>(
     );
   } catch (error: any) {
     if (!isKoiosAbortError(error)) {
-      console.error(
-        `[Koios Request Failed] source=${source} endpoint=${endpoint} profile=${retryProfile.name} timeoutMs=${attemptTimeoutMs} message=${error?.message ?? error}`
-      );
+      console.error("[Koios Request Failed]", {
+        source,
+        endpoint,
+        profile: retryProfile.name,
+        timeoutMs: attemptTimeoutMs,
+        error: formatAxiosLikeError(error),
+      });
     }
     throw error;
   }
@@ -1373,9 +1377,15 @@ export async function koiosPost<T>(
       }
     );
   } catch (error: any) {
-    console.error(
-      `[Koios Request Failed] source=${source} endpoint=${endpoint} profile=${retryProfile.name} timeoutMs=${attemptTimeoutMs} message=${error?.message ?? error}`
-    );
+    if (!isKoiosAbortError(error)) {
+      console.error("[Koios Request Failed]", {
+        source,
+        endpoint,
+        profile: retryProfile.name,
+        timeoutMs: attemptTimeoutMs,
+        error: formatAxiosLikeError(error),
+      });
+    }
     throw error;
   }
 }

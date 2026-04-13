@@ -1,6 +1,7 @@
 import {
   getKoiosProposalList,
   getKoiosPressureState,
+  KOIOS_PUBLIC_MAX_BODY_BYTES,
   koiosGet,
   koiosGetAll,
   koiosPost,
@@ -13,6 +14,7 @@ import {
   chunkArray,
 } from "./ingestion/sync-utils";
 import type {
+  KoiosAccountInfo,
   KoiosAccountUpdateHistoryEntry,
   KoiosCommitteeInfo,
   KoiosDrepDelegator,
@@ -642,6 +644,90 @@ export async function getCurrentEpochFromKoios(
 ): Promise<number> {
   const tip = await koiosGet<KoiosTip[]>("/tip", undefined, toKoiosContext(options));
   return tip?.[0]?.epoch_no ?? 0;
+}
+
+function buildAccountInfoRequestBody(
+  stakeAddresses: string[]
+): Record<string, unknown> {
+  return { _stake_addresses: stakeAddresses };
+}
+
+function estimateAccountInfoBodyUtf8Bytes(stakeAddresses: string[]): number {
+  return Buffer.byteLength(
+    JSON.stringify(buildAccountInfoRequestBody(stakeAddresses)),
+    "utf8"
+  );
+}
+
+/**
+ * Split stake addresses into POST /account_info batches that fit under the public-tier body limit.
+ */
+export function chunkStakeAddressesForAccountInfo(
+  stakeAddresses: string[],
+  maxBodyBytes: number = KOIOS_PUBLIC_MAX_BODY_BYTES
+): string[][] {
+  const unique = Array.from(
+    new Set(
+      stakeAddresses.filter((a): a is string => typeof a === "string" && a.length > 0)
+    )
+  );
+  if (unique.length === 0) {
+    return [];
+  }
+
+  const chunks: string[][] = [];
+  let current: string[] = [];
+  for (const addr of unique) {
+    const candidate = current.length === 0 ? [addr] : [...current, addr];
+    if (
+      current.length > 0 &&
+      estimateAccountInfoBodyUtf8Bytes(candidate) > maxBodyBytes
+    ) {
+      chunks.push(current);
+      current = [addr];
+    } else {
+      current = candidate;
+    }
+  }
+  if (current.length > 0) {
+    chunks.push(current);
+  }
+  return chunks;
+}
+
+/**
+ * POST /account_info for one or more stake addresses (batched to respect body size).
+ */
+export async function getAccountInfoBatch(
+  stakeAddresses: string[],
+  options?: GovernanceProviderOptions
+): Promise<KoiosAccountInfo[]> {
+  const chunks = chunkStakeAddressesForAccountInfo(stakeAddresses);
+  if (chunks.length === 0) {
+    return [];
+  }
+
+  const results: KoiosAccountInfo[] = [];
+  const baseDelayMs = 75;
+  for (let index = 0; index < chunks.length; index += 1) {
+    const chunk = chunks[index]!;
+    const pressureState = getKoiosPressureState();
+    const delayMs =
+      (index > 0 ? baseDelayMs : 0) + (pressureState.active ? 150 : 0);
+    if (delayMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+    const page = await koiosPost<KoiosAccountInfo[]>(
+      "/account_info",
+      buildAccountInfoRequestBody(chunk),
+      toKoiosContext(options)
+    );
+    if (page?.length) {
+      results.push(...page);
+    }
+  }
+
+  return results;
 }
 
 export async function getAccountUpdateHistoryBatch(

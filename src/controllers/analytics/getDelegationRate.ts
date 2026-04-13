@@ -1,4 +1,5 @@
 import { Request, Response } from "express";
+import { formatAxiosLikeError } from "../../utils/format-http-client-error";
 import { prisma } from "../../services";
 import {
   GetDelegationRateResponse,
@@ -91,7 +92,7 @@ export const getDelegationRate = async (req: Request, res: Response) => {
 
     res.json(response);
   } catch (error) {
-    console.error("Error fetching delegation rate", error);
+    console.error("Error fetching delegation rate", formatAxiosLikeError(error));
     res.status(500).json({
       error: "Failed to fetch delegation rate",
       message: error instanceof Error ? error.message : "Unknown error",

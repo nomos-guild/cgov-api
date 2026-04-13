@@ -12,6 +12,7 @@ import {
   toNumber,
 } from "../../libs/proposalMapper";
 import { GovernanceType } from "@prisma/client";
+import { formatAxiosLikeError } from "../../utils/format-http-client-error";
 
 const isKnownGovernanceType = (
   value: string | null
@@ -345,7 +346,7 @@ export const getVotingTurnout = async (req: Request, res: Response) => {
 
     res.json(response);
   } catch (error) {
-    console.error("Error fetching voting turnout", error);
+    console.error("Error fetching voting turnout", formatAxiosLikeError(error));
     res.status(500).json({
       error: "Failed to fetch voting turnout",
       message: error instanceof Error ? error.message : "Unknown error",

@@ -8,9 +8,6 @@
 import { prisma } from "../services";
 import {
   DREP_DELEGATOR_SYNC_JOB_NAME,
-  drepDelegatorBudgetUtcDay,
-  isDrepDelegatorDailyBudgetExhausted,
-  readDrepDelegatorDailyBudgetCursor,
   runDrepDelegatorSyncWithDailyRetry,
 } from "../services/ingestion/drep-delegator-sync-run";
 import { DREP_DELEGATOR_SYNC_LOCK_TTL_MS } from "../services/ingestion/sync-utils";
@@ -19,14 +16,17 @@ import { startIngestionCronJob } from "./runIngestionCronJob";
 /**
  * Starts the DRep delegation change sync job.
  * Schedule is configurable via DREP_DELEGATOR_SYNC_SCHEDULE env variable.
- * Default is once daily at 03:15 UTC (heavy /drep_delegators work + daily UTC budget).
+ *
+ * Default **hourly at :52** (24×/day, staggered like other ingestion crons) so an ~70k stake
+ * inventory completes one full `account_info` cursor cycle in ~1.2 days at 2500 stakes/run
+ * (28 runs); ~140k stakes needs ~2.3 days (56 runs).
  */
 export const startDrepDelegatorSyncJob = () =>
   startIngestionCronJob({
     jobName: DREP_DELEGATOR_SYNC_JOB_NAME,
     displayName: "DRep Delegator Sync",
     scheduleEnvKey: "DREP_DELEGATOR_SYNC_SCHEDULE",
-    defaultSchedule: "15 3 * * *",
+    defaultSchedule: "52 * * * *",
     lockOptions: {
       ttlMs: DREP_DELEGATOR_SYNC_LOCK_TTL_MS,
       source: "cron",
@@ -34,25 +34,7 @@ export const startDrepDelegatorSyncJob = () =>
     skipDbPressure: true,
     skipKoiosPressure: true,
     useKoiosHeavyLane: true,
-    beforeAcquire: async () => {
-      const cursor = await readDrepDelegatorDailyBudgetCursor();
-      if (!isDrepDelegatorDailyBudgetExhausted(cursor)) {
-        return true;
-      }
-      console.log(
-        `[Cron] DRep Delegator Sync skipped: daily budget exhausted for UTC ${drepDelegatorBudgetUtcDay()}`
-      );
-      return false;
-    },
     run: async () => {
-      const cursorAfterLock = await readDrepDelegatorDailyBudgetCursor();
-      if (isDrepDelegatorDailyBudgetExhausted(cursorAfterLock)) {
-        console.log(
-          `[Cron] DRep Delegator Sync skipped after lock: daily budget exhausted for UTC ${drepDelegatorBudgetUtcDay()}`
-        );
-        return { itemsProcessed: 0, lockResult: "success" };
-      }
-
       console.log("  [DRep Delegation Sync] Starting delegation change sync...");
       const outcome = await runDrepDelegatorSyncWithDailyRetry(prisma);
 

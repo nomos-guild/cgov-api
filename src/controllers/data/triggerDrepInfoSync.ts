@@ -1,4 +1,5 @@
 import { Request, Response } from "express";
+import { formatAxiosLikeError } from "../../utils/format-http-client-error";
 import { syncDrepInfoStep } from "../../services/ingestion/epoch-analytics.service";
 import { prisma } from "../../services";
 import {
@@ -53,23 +54,23 @@ export const postTriggerDrepInfoSync = async (
           currentEpoch: result.currentEpoch, epochToSync: result.epochToSync, itemsProcessed, skipped: result.skipped,
         });
       } catch (error) {
-        console.error("[DRep Info Sync] Async processing error:", error);
+        console.error("[DRep Info Sync] Async processing error:", formatAxiosLikeError(error));
         const errorMessage = error instanceof Error ? error.message : "Unknown error";
         try {
           await releaseJobLock(JOB_NAME, "failed", 0, errorMessage);
         } catch (updateError) {
-          console.error("[DRep Info Sync] Failed to update sync status:", updateError);
+          console.error("[DRep Info Sync] Failed to update sync status:", formatAxiosLikeError(updateError));
         }
       }
-    })().catch((error) => { console.error("[DRep Info Sync] Unhandled error:", error); });
+    })().catch((error) => { console.error("[DRep Info Sync] Unhandled error:", formatAxiosLikeError(error)); });
   } catch (error) {
-    console.error("[DRep Info Sync] Setup error:", error);
+    console.error("[DRep Info Sync] Setup error:", formatAxiosLikeError(error));
     const errorMessage = error instanceof Error ? error.message : "Unknown error";
     if (acquired) {
       try {
         await releaseJobLock(JOB_NAME, "failed", 0, errorMessage);
       } catch (updateError) {
-        console.error("[DRep Info Sync] Failed to update sync status:", updateError);
+        console.error("[DRep Info Sync] Failed to update sync status:", formatAxiosLikeError(updateError));
       }
     }
     res.status(500).json({ success: false, error: "Failed to start DRep info sync", message: errorMessage });

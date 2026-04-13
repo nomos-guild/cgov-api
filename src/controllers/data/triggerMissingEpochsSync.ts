@@ -1,4 +1,5 @@
 import { Request, Response } from "express";
+import { formatAxiosLikeError } from "../../utils/format-http-client-error";
 import { syncMissingEpochAnalytics } from "../../services/ingestion/epoch-analytics.service";
 import { prisma } from "../../services";
 import {
@@ -55,23 +56,23 @@ export const postTriggerMissingEpochsSync = async (
           failed: backfill.totals.failed.length,
         });
       } catch (error) {
-        console.error("[Missing Epochs Sync] Async processing error:", error);
+        console.error("[Missing Epochs Sync] Async processing error:", formatAxiosLikeError(error));
         const errorMessage = error instanceof Error ? error.message : "Unknown error";
         try {
           await releaseJobLock(JOB_NAME, "failed", 0, errorMessage);
         } catch (updateError) {
-          console.error("[Missing Epochs Sync] Failed to update sync status:", updateError);
+          console.error("[Missing Epochs Sync] Failed to update sync status:", formatAxiosLikeError(updateError));
         }
       }
-    })().catch((error) => { console.error("[Missing Epochs Sync] Unhandled error:", error); });
+    })().catch((error) => { console.error("[Missing Epochs Sync] Unhandled error:", formatAxiosLikeError(error)); });
   } catch (error) {
-    console.error("[Missing Epochs Sync] Setup error:", error);
+    console.error("[Missing Epochs Sync] Setup error:", formatAxiosLikeError(error));
     const errorMessage = error instanceof Error ? error.message : "Unknown error";
     if (acquired) {
       try {
         await releaseJobLock(JOB_NAME, "failed", 0, errorMessage);
       } catch (updateError) {
-        console.error("[Missing Epochs Sync] Failed to update sync status:", updateError);
+        console.error("[Missing Epochs Sync] Failed to update sync status:", formatAxiosLikeError(updateError));
       }
     }
     res.status(500).json({ success: false, error: "Failed to start missing epochs backfill", message: errorMessage });

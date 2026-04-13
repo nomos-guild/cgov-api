@@ -2,6 +2,7 @@ import { Request, Response } from "express";
 import { VoterType, VoteType } from "@prisma/client";
 import { prisma } from "../../services";
 import { GetDRepDetailResponse, VoteBreakdown } from "../../responses";
+import { formatAxiosLikeError } from "../../utils/format-http-client-error";
 
 /**
  * Converts lovelace (BigInt) to ADA string with 6 decimal places
@@ -153,7 +154,7 @@ export const getDRepDetail = async (req: Request, res: Response) => {
 
     return res.json(response);
   } catch (error) {
-    console.error("Error fetching DRep detail", error);
+    console.error("Error fetching DRep detail", formatAxiosLikeError(error));
     return res.status(500).json({
       error: "Failed to fetch DRep details",
       message: error instanceof Error ? error.message : "Unknown error",

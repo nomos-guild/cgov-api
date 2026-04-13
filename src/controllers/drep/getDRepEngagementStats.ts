@@ -1,6 +1,7 @@
 import { Request, Response } from "express";
 import { prisma } from "../../services";
 import { DRepEngagementStat, GetDRepEngagementStatsResponse } from "../../responses";
+import { formatAxiosLikeError } from "../../utils/format-http-client-error";
 
 type EngagementStatsRow = {
   drep_id: string;
@@ -123,7 +124,7 @@ export const getDRepEngagementStats = async (_req: Request, res: Response) => {
     res.setHeader("Cache-Control", "public, s-maxage=300, stale-while-revalidate=600");
     return res.json(response);
   } catch (error) {
-    console.error("Error fetching DRep engagement stats", error);
+    console.error("Error fetching DRep engagement stats", formatAxiosLikeError(error));
     return res.status(500).json({
       error: "Failed to fetch DRep engagement stats",
       message: error instanceof Error ? error.message : "Unknown error",

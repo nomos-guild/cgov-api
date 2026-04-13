@@ -2,6 +2,7 @@ import { Request, Response } from "express";
 import { prisma } from "../../services/prisma";
 import { getRateLimitState } from "../../services/github-graphql";
 import type { GithubStatusResponse } from "../../responses";
+import { formatAxiosLikeError } from "../../utils/format-http-client-error";
 
 export const getStatus = async (_req: Request, res: Response) => {
   try {
@@ -37,7 +38,7 @@ export const getStatus = async (_req: Request, res: Response) => {
 
     res.json(response);
   } catch (error) {
-    console.error("Error fetching status", error);
+    console.error("Error fetching status", formatAxiosLikeError(error));
     res.status(500).json({
       error: "Failed to fetch status",
       message: error instanceof Error ? error.message : "Unknown error",

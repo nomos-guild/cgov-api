@@ -1,4 +1,5 @@
 import { Request, Response } from "express";
+import { formatAxiosLikeError } from "../../utils/format-http-client-error";
 import { prisma } from "../../services";
 import {
   ingestDrep,
@@ -41,7 +42,7 @@ export const postIngestDrep = async (req: Request, res: Response) => {
       voter_id: result.voterId,
     });
   } catch (error) {
-    console.error("[Ingest DRep] Error:", error);
+    console.error("[Ingest DRep] Error:", formatAxiosLikeError(error));
 
     const errorMessage =
       error instanceof Error ? error.message : "Unknown error";
@@ -89,7 +90,7 @@ export const postIngestSpo = async (req: Request, res: Response) => {
       voter_id: result.voterId,
     });
   } catch (error) {
-    console.error("[Ingest SPO] Error:", error);
+    console.error("[Ingest SPO] Error:", formatAxiosLikeError(error));
 
     const errorMessage =
       error instanceof Error ? error.message : "Unknown error";
@@ -137,7 +138,7 @@ export const postIngestCc = async (req: Request, res: Response) => {
       voter_id: result.voterId,
     });
   } catch (error) {
-    console.error("[Ingest CC] Error:", error);
+    console.error("[Ingest CC] Error:", formatAxiosLikeError(error));
 
     const errorMessage =
       error instanceof Error ? error.message : "Unknown error";

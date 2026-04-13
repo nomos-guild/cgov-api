@@ -2,6 +2,7 @@ import { Request, Response } from "express";
 import { syncDrepInventoryStep } from "../../services/ingestion/epoch-analytics.service";
 import { prisma } from "../../services";
 import { acquireJobLock, releaseJobLock } from "../../services/ingestion/syncLock";
+import { formatAxiosLikeError } from "../../utils/format-http-client-error";
 
 const JOB_NAME = "drep-inventory-sync";
 const DISPLAY_NAME = "DRep Inventory Sync";
@@ -41,23 +42,23 @@ export const postTriggerDrepInventorySync = async (
           currentEpoch: result.currentEpoch, epochToSync: result.epochToSync, itemsProcessed,
         });
       } catch (error) {
-        console.error("[DRep Inventory Sync] Async processing error:", error);
+        console.error("[DRep Inventory Sync] Async processing error:", formatAxiosLikeError(error));
         const errorMessage = error instanceof Error ? error.message : "Unknown error";
         try {
           await releaseJobLock(JOB_NAME, "failed", 0, errorMessage);
         } catch (updateError) {
-          console.error("[DRep Inventory Sync] Failed to update sync status:", updateError);
+          console.error("[DRep Inventory Sync] Failed to update sync status:", formatAxiosLikeError(updateError));
         }
       }
-    })().catch((error) => { console.error("[DRep Inventory Sync] Unhandled error:", error); });
+    })().catch((error) => { console.error("[DRep Inventory Sync] Unhandled error:", formatAxiosLikeError(error)); });
   } catch (error) {
-    console.error("[DRep Inventory Sync] Setup error:", error);
+    console.error("[DRep Inventory Sync] Setup error:", formatAxiosLikeError(error));
     const errorMessage = error instanceof Error ? error.message : "Unknown error";
     if (acquired) {
       try {
         await releaseJobLock(JOB_NAME, "failed", 0, errorMessage);
       } catch (updateError) {
-        console.error("[DRep Inventory Sync] Failed to update sync status:", updateError);
+        console.error("[DRep Inventory Sync] Failed to update sync status:", formatAxiosLikeError(updateError));
       }
     }
     res.status(500).json({ success: false, error: "Failed to start DRep inventory sync", message: errorMessage });
