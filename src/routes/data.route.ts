@@ -384,9 +384,15 @@ router.post("/trigger-drep-lifecycle-sync", postTriggerDrepLifecycleSync);
  * /data/trigger-pool-groups-sync:
  *   post:
  *     summary: Trigger pool groups sync
- *     description: Syncs multi-pool operator groupings from Koios /pool_groups. Used by Cloud Scheduler.
+ *     description: Syncs multi-pool operator groupings from Koios /pool_groups. Used by Cloud Scheduler. Use query `force=true` to clear the epoch checkpoint and re-fetch even if this epoch was already marked synced.
  *     tags:
  *       - Data Ingestion
+ *     parameters:
+ *       - in: query
+ *         name: force
+ *         schema:
+ *           type: boolean
+ *         description: When true, clears poolGroupsSyncedAt for the current epoch checkpoint so ingestion runs again.
  *     responses:
  *       200:
  *         description: Sync started

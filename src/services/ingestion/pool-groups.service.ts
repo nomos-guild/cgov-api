@@ -40,6 +40,49 @@ async function fetchAllPoolGroups(): Promise<KoiosPoolGroup[]> {
   });
 }
 
+/**
+ * Koios /pool_groups pagination can return the same pool_id on multiple pages (overlap or API quirks).
+ * We key by pool_id_bech32 so sync metrics and createMany match real distinct pools.
+ */
+function dedupePoolGroupsByPoolId(rows: KoiosPoolGroup[]): KoiosPoolGroup[] {
+  const byPool = new Map<string, KoiosPoolGroup>();
+  for (const row of rows) {
+    const id = row.pool_id_bech32?.trim();
+    if (!id) continue;
+    byPool.set(id, { ...row, pool_id_bech32: id });
+  }
+  return Array.from(byPool.values()).sort((a, b) =>
+    a.pool_id_bech32.localeCompare(b.pool_id_bech32)
+  );
+}
+
+/**
+ * Stable entity id for PoolGroup.poolGroup (concentration / MPO mapping).
+ *
+ * Koios usually leaves `pool_group` null for single-pool operators and sets
+ * `balanceanalytics_group` to "SINGLEPOOL". The old sync required `pool_group`
+ * and dropped ~most~ rows, which capped the table near the count of multi-pool
+ * operators only (~1000) instead of all pools returned by /pool_groups.
+ *
+ * Priority: koios pool_group → adastat_group → balanceanalytics_group (except
+ * the generic SINGLEPOOL label) → pool id as its own entity.
+ */
+export function resolvePoolEntityId(pg: KoiosPoolGroup): string | null {
+  const poolId = pg.pool_id_bech32?.trim();
+  if (!poolId) return null;
+
+  const fromKoios = pg.pool_group?.trim();
+  if (fromKoios) return fromKoios;
+
+  const fromAdastat = pg.adastat_group?.trim();
+  if (fromAdastat) return fromAdastat;
+
+  const fromBa = pg.balanceanalytics_group?.trim();
+  if (fromBa && fromBa.toUpperCase() !== "SINGLEPOOL") return fromBa;
+
+  return poolId;
+}
+
 // ============================================================
 // Public API
 // ============================================================
@@ -73,10 +116,21 @@ export async function syncPoolGroups(
 
   try {
     // Fetch all pool groups from Koios
-    const poolGroups = await fetchAllPoolGroups();
+    const rawRows = await fetchAllPoolGroups();
+    const rawCount = rawRows.length;
+    const poolGroups = dedupePoolGroupsByPoolId(rawRows);
     result.totalFetched = poolGroups.length;
 
-    console.log(`[Pool Groups] Fetched ${poolGroups.length} pool group mappings from Koios`);
+    if (rawCount !== poolGroups.length) {
+      console.warn(
+        `[Pool Groups] De-duplicated Koios rows by pool_id: ${rawCount} -> ${poolGroups.length} unique pools ` +
+          `(${rawCount - poolGroups.length} duplicate / overlapping rows dropped)`
+      );
+    } else {
+      console.log(
+        `[Pool Groups] Fetched ${poolGroups.length} pool group mappings from Koios (all unique pool ids)`
+      );
+    }
 
     if (poolGroups.length === 0) {
       console.log(`[Pool Groups] No pool groups found`);
@@ -136,10 +190,37 @@ export async function syncPoolGroups(
       balanceanalyticsGroup: string | null;
     }> = [];
 
+    let skippedNoPoolId = 0;
+    const entitySource = {
+      koiosPoolGroup: 0,
+      adastat: 0,
+      balanceAnalytics: 0,
+      perPoolId: 0,
+    };
+
     for (const pg of poolGroups) {
-      const poolId = pg.pool_id_bech32;
-      const poolGroup = pg.pool_group ?? null;
-      if (!poolId || !poolGroup) continue;
+      const poolId = pg.pool_id_bech32?.trim();
+      if (!poolId) {
+        skippedNoPoolId++;
+        continue;
+      }
+
+      const poolGroup = resolvePoolEntityId(pg);
+      if (!poolGroup) {
+        skippedNoPoolId++;
+        continue;
+      }
+
+      if (pg.pool_group?.trim()) entitySource.koiosPoolGroup++;
+      else if (pg.adastat_group?.trim()) entitySource.adastat++;
+      else if (
+        pg.balanceanalytics_group?.trim() &&
+        pg.balanceanalytics_group.trim().toUpperCase() !== "SINGLEPOOL"
+      ) {
+        entitySource.balanceAnalytics++;
+      } else {
+        entitySource.perPoolId++;
+      }
 
       uniqueGroupIds.add(poolGroup);
 
@@ -175,6 +256,12 @@ export async function syncPoolGroups(
     }
 
     result.uniqueGroups = uniqueGroupIds.size;
+
+    console.log(
+      `[Pool Groups] Entity resolution: koios_pool_group=${entitySource.koiosPoolGroup}, ` +
+        `adastat=${entitySource.adastat}, balanceanalytics=${entitySource.balanceAnalytics}, ` +
+        `per_pool_id=${entitySource.perPoolId}, skipped_no_pool_id=${skippedNoPoolId}`
+    );
 
     // Batch create new pool groups
     if (toCreate.length > 0) {

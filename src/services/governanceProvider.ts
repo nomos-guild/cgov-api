@@ -831,6 +831,8 @@ export async function listPoolGroups(options?: {
   offset?: number;
   limit?: number;
   source?: string;
+  onRetryAttempt?: KoiosRequestContext["onRetryAttempt"];
+  signal?: AbortSignal;
 }): Promise<KoiosPoolGroup[]> {
   return koiosGet<KoiosPoolGroup[]>(
     "/pool_groups",
@@ -843,18 +845,42 @@ export async function listPoolGroups(options?: {
   );
 }
 
+/**
+ * If the main fetch ends on an exact multiple of the Koios page size, probe the next offset
+ * to detect truncation bugs (e.g. stopped after a full page while more rows exist).
+ */
+async function assertPoolGroupsDatasetComplete(
+  rows: KoiosPoolGroup[],
+  options?: GovernanceProviderOptions
+): Promise<void> {
+  if (rows.length === 0 || rows.length % KOIOS_POOL_GROUPS_PAGE_SIZE !== 0) {
+    return;
+  }
+  const probe = await koiosGet<KoiosPoolGroup[]>(
+    "/pool_groups",
+    {
+      order: "pool_id_bech32.asc",
+      limit: 1,
+      offset: rows.length,
+    },
+    toKoiosContext(options)
+  );
+  if (probe.length > 0) {
+    throw new Error(
+      `[Pool Groups] Koios /pool_groups fetch looks truncated at ${rows.length} rows (probe at offset ${rows.length} returned data).`
+    );
+  }
+}
+
 export async function listAllPoolGroups(
   options?: GovernanceProviderOptions
 ): Promise<KoiosPoolGroup[]> {
-  return collectPaginated({
-    pageSize: KOIOS_POOL_GROUPS_PAGE_SIZE,
-    delayMs: KOIOS_DEFAULT_PAGE_DELAY_MS,
-    adaptiveHighVolume: true,
-    fetchPage: ({ offset, limit }) =>
-      listPoolGroups({
-        offset,
-        limit,
-        source: options?.source,
-      }),
-  });
+  const rows = await koiosGetAll<KoiosPoolGroup>(
+    "/pool_groups",
+    { order: "pool_id_bech32.asc" },
+    toKoiosContext(options),
+    { pageDelayMs: KOIOS_DEFAULT_PAGE_DELAY_MS }
+  );
+  await assertPoolGroupsDatasetComplete(rows, options);
+  return rows;
 }

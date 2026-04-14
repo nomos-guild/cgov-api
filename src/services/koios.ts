@@ -1153,6 +1153,8 @@ export async function koiosGetAll<T>(
   options?: {
     overlapRows?: number;
     dedupeKey?: (row: T) => string;
+    /** Sleep this many ms between pages (after the first), in addition to high-volume pressure delay. */
+    pageDelayMs?: number;
   }
 ): Promise<T[]> {
   const passOneResults: T[] = [];
@@ -1167,8 +1169,10 @@ export async function koiosGetAll<T>(
       isHighVolumeEndpoint && pressureState.active
         ? Math.max(200, Math.floor(KOIOS_MAX_PAGE_LIMIT / 2))
         : KOIOS_MAX_PAGE_LIMIT;
+    const pageDelayBase = options?.pageDelayMs ?? 0;
     const adaptiveDelayMs =
-      isHighVolumeEndpoint && pressureState.active ? 150 : 0;
+      pageDelayBase +
+      (isHighVolumeEndpoint && pressureState.active ? 150 : 0);
     if (!isFirstPage && adaptiveDelayMs > 0) {
       await sleep(adaptiveDelayMs);
     }
@@ -1225,8 +1229,10 @@ export async function koiosGetAll<T>(
       isHighVolumeEndpoint && pressureState.active
         ? Math.max(200, Math.floor(KOIOS_MAX_PAGE_LIMIT / 2))
         : KOIOS_MAX_PAGE_LIMIT;
+    const pageDelayBase = options?.pageDelayMs ?? 0;
     const adaptiveDelayMs =
-      isHighVolumeEndpoint && pressureState.active ? 150 : 0;
+      pageDelayBase +
+      (isHighVolumeEndpoint && pressureState.active ? 150 : 0);
     if (!isFirstPage && adaptiveDelayMs > 0) {
       await sleep(adaptiveDelayMs);
     }

@@ -364,35 +364,63 @@ describe("governanceProvider", () => {
     );
   });
 
-  it("retrieves the full paginated pool groups dataset", async () => {
-    mockKoiosGet
-      .mockResolvedValueOnce(
-        buildRows(1000, (index) => ({
-          pool_id_bech32: `pool${index}`,
-          pool_group: `group${index}`,
-        }))
-      )
-      .mockResolvedValueOnce([
-        {
-          pool_id_bech32: "pool1000",
-          pool_group: "group1000",
-        },
-      ]);
+  it("retrieves the full pool groups dataset via koiosGetAll", async () => {
+    const allRows = [
+      ...buildRows(1000, (index) => ({
+        pool_id_bech32: `pool${index}`,
+        pool_group: `group${index}`,
+      })),
+      {
+        pool_id_bech32: "pool1000",
+        pool_group: "group1000",
+      },
+    ];
+    mockKoiosGetAll.mockResolvedValueOnce(allRows);
 
     const rows = await listAllPoolGroups({ source: "test.pool-groups" });
 
     expect(rows).toHaveLength(1001);
-    expect(mockKoiosGet).toHaveBeenNthCalledWith(
-      1,
+    expect(mockKoiosGetAll).toHaveBeenCalledWith(
       "/pool_groups",
-      { order: "pool_id_bech32.asc", limit: 1000, offset: 0 },
+      { order: "pool_id_bech32.asc" },
+      { source: "test.pool-groups" },
+      expect.objectContaining({ pageDelayMs: expect.any(Number) })
+    );
+    expect(mockKoiosGet).not.toHaveBeenCalled();
+  });
+
+  it("probes Koios when pool groups count is an exact page multiple", async () => {
+    mockKoiosGetAll.mockResolvedValueOnce(
+      buildRows(1000, (index) => ({
+        pool_id_bech32: `pool${index}`,
+        pool_group: `group${index}`,
+      }))
+    );
+    mockKoiosGet.mockResolvedValueOnce([]);
+
+    const rows = await listAllPoolGroups({ source: "test.pool-groups" });
+
+    expect(rows).toHaveLength(1000);
+    expect(mockKoiosGet).toHaveBeenCalledWith(
+      "/pool_groups",
+      { order: "pool_id_bech32.asc", limit: 1, offset: 1000 },
       { source: "test.pool-groups" }
     );
-    expect(mockKoiosGet).toHaveBeenNthCalledWith(
-      2,
-      "/pool_groups",
-      { order: "pool_id_bech32.asc", limit: 1000, offset: 1000 },
-      { source: "test.pool-groups" }
+  });
+
+  it("rejects pool groups fetch when probe finds more rows after a full page", async () => {
+    mockKoiosGetAll.mockResolvedValueOnce(
+      buildRows(1000, (index) => ({
+        pool_id_bech32: `pool${index}`,
+        pool_group: `group${index}`,
+      }))
     );
+    mockKoiosGet.mockResolvedValueOnce([
+      { pool_id_bech32: "pool1000", pool_group: "group1000" },
+    ]);
+
+    await expect(
+      listAllPoolGroups({ source: "test.pool-groups" })
+    ).rejects.toThrow(/truncated at 1000 rows/);
   });
 });
