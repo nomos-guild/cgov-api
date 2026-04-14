@@ -35,6 +35,8 @@ export {
   getEpochDuration,
   type SyncEpochTotalsResult,
   type SyncMissingEpochsResult,
+  type SyncMissingEpochAnalyticsMode,
+  type SyncMissingEpochAnalyticsOptions,
 } from "./epoch-totals.service";
 
 // Re-export from delegation-sync.service
