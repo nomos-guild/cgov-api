@@ -1,6 +1,7 @@
 import { Request, Response } from "express";
 import { getBlockfrostService } from "../../services";
 import { extractTreasuryWithdrawalAmountFromProposalLike } from "../../services/ingestion/proposalStatus.policy";
+import { formatAxiosLikeError } from "../../utils/format-http-client-error";
 
 type RawGovernanceProposal = {
   [key: string]: unknown;
@@ -88,7 +89,7 @@ export const getProposals = async (req: Request, res: Response) => {
 
     res.json(withAggregatedWithdrawalAmount(allProposals));
   } catch (error) {
-    console.error("Error fetching proposals:", error);
+    console.error("Error fetching proposals:", formatAxiosLikeError(error));
     res.status(500).json({
       error: "Failed to fetch governance proposals",
       message: error instanceof Error ? error.message : "Unknown error",

@@ -1,6 +1,7 @@
 import { Request, Response } from "express";
 import { Prisma } from "@prisma/client";
 import { prisma } from "../../services";
+import { formatAxiosLikeError } from "../../utils/format-http-client-error";
 
 /** Epoch boundary: epoch 612 starts on Feb 8 2026 ~21:44 UTC */
 const NCL_2026_START_EPOCH = 612;
@@ -83,7 +84,7 @@ export const getNCLData = async (_req: Request, res: Response) => {
 
     res.json(response);
   } catch (error) {
-    console.error("Error fetching NCL data", error);
+    console.error("Error fetching NCL data", formatAxiosLikeError(error));
     res.status(500).json({
       error: "Failed to fetch NCL data",
       message: error instanceof Error ? error.message : "Unknown error",
@@ -138,7 +139,7 @@ export const getNCLDataByYear = async (req: Request, res: Response) => {
 
     res.json(response);
   } catch (error) {
-    console.error("Error fetching NCL data by year", error);
+    console.error("Error fetching NCL data by year", formatAxiosLikeError(error));
     res.status(500).json({
       error: "Failed to fetch NCL data",
       message: error instanceof Error ? error.message : "Unknown error",

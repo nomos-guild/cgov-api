@@ -1,4 +1,5 @@
 import { Request, Response } from "express";
+import { formatAxiosLikeError } from "../../utils/format-http-client-error";
 import { prisma } from "../../services";
 import {
   GetActionVolumeResponse,
@@ -129,7 +130,7 @@ export const getActionVolume = async (req: Request, res: Response) => {
 
     res.json(response);
   } catch (error) {
-    console.error("Error fetching action volume", error);
+    console.error("Error fetching action volume", formatAxiosLikeError(error));
     res.status(500).json({
       error: "Failed to fetch action volume",
       message: error instanceof Error ? error.message : "Unknown error",

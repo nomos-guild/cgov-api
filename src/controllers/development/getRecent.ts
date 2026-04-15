@@ -2,6 +2,7 @@ import { Request, Response } from "express";
 import { prisma } from "../../services/prisma";
 import { cacheGet, cacheSet } from "../../services/cache";
 import type { DevelopmentRecentResponse } from "../../responses";
+import { formatAxiosLikeError } from "../../utils/format-http-client-error";
 
 const TTL = 60 * 1000; // 1 min
 
@@ -50,7 +51,7 @@ export const getRecent = async (req: Request, res: Response) => {
     cacheSet(cacheKey, response, TTL);
     res.json(response);
   } catch (error) {
-    console.error("Error fetching recent activity", error);
+    console.error("Error fetching recent activity", formatAxiosLikeError(error));
     res.status(500).json({
       error: "Failed to fetch recent activity",
       message: error instanceof Error ? error.message : "Unknown error",

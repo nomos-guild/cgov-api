@@ -1,4 +1,5 @@
 import { Request, Response } from "express";
+import { formatAxiosLikeError } from "../../utils/format-http-client-error";
 
 /**
  * POST /data/ipfs/upload
@@ -77,7 +78,7 @@ export const postUploadToIpfs = async (req: Request, res: Response) => {
       url: `https://ipfs.io/ipfs/${cid}`,
     });
   } catch (error) {
-    console.error("[IPFS Upload] Error:", error);
+    console.error("[IPFS Upload] Error:", formatAxiosLikeError(error));
 
     const errorMessage =
       error instanceof Error ? error.message : "Unknown error";

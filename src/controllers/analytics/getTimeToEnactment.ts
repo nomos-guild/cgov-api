@@ -1,4 +1,5 @@
 import { Request, Response } from "express";
+import { formatAxiosLikeError } from "../../utils/format-http-client-error";
 import { prisma } from "../../services";
 import {
   GetTimeToEnactmentResponse,
@@ -224,7 +225,7 @@ export const getTimeToEnactment = async (req: Request, res: Response) => {
 
     res.json(response);
   } catch (error) {
-    console.error("Error fetching time to enactment", error);
+    console.error("Error fetching time to enactment", formatAxiosLikeError(error));
     res.status(500).json({
       error: "Failed to fetch time to enactment",
       message: error instanceof Error ? error.message : "Unknown error",

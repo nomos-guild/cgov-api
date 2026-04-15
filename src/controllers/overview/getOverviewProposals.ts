@@ -8,6 +8,7 @@ import {
 } from "../../libs/proposalMapper";
 import { syncProposalsOverviewOnRead } from "../../services/syncOnRead";
 import { getCachedEligibleCCInfo } from "../../services/committeeState.service";
+import { formatAxiosLikeError } from "../../utils/format-http-client-error";
 
 export const getOverviewProposals = async (_req: Request, res: Response) => {
   try {
@@ -36,7 +37,7 @@ export const getOverviewProposals = async (_req: Request, res: Response) => {
 
     res.json(response);
   } catch (error) {
-    console.error("Error fetching overview proposals", error);
+    console.error("Error fetching overview proposals", formatAxiosLikeError(error));
     res.status(500).json({
       error: "Failed to fetch proposals overview",
       message: error instanceof Error ? error.message : "Unknown error",

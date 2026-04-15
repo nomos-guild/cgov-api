@@ -3,6 +3,7 @@ import { syncDrepLifecycleStep } from "../../services/ingestion/epoch-analytics.
 import { prisma } from "../../services";
 import { acquireJobLock, releaseJobLock } from "../../services/ingestion/syncLock";
 import { DREP_LIFECYCLE_SYNC_LOCK_TTL_MS } from "../../services/ingestion/sync-utils";
+import { formatAxiosLikeError } from "../../utils/format-http-client-error";
 
 const JOB_NAME = "drep-lifecycle-sync";
 const DISPLAY_NAME = "DRep Lifecycle Sync";
@@ -51,23 +52,23 @@ export const postTriggerDrepLifecycleSync = async (
           currentEpoch: result.currentEpoch, epochToSync: result.epochToSync, itemsProcessed, skipped: result.skipped,
         });
       } catch (error) {
-        console.error("[DRep Lifecycle Sync] Async processing error:", error);
+        console.error("[DRep Lifecycle Sync] Async processing error:", formatAxiosLikeError(error));
         const errorMessage = error instanceof Error ? error.message : "Unknown error";
         try {
           await releaseJobLock(JOB_NAME, "failed", 0, errorMessage);
         } catch (updateError) {
-          console.error("[DRep Lifecycle Sync] Failed to update sync status:", updateError);
+          console.error("[DRep Lifecycle Sync] Failed to update sync status:", formatAxiosLikeError(updateError));
         }
       }
-    })().catch((error) => { console.error("[DRep Lifecycle Sync] Unhandled error:", error); });
+    })().catch((error) => { console.error("[DRep Lifecycle Sync] Unhandled error:", formatAxiosLikeError(error)); });
   } catch (error) {
-    console.error("[DRep Lifecycle Sync] Setup error:", error);
+    console.error("[DRep Lifecycle Sync] Setup error:", formatAxiosLikeError(error));
     const errorMessage = error instanceof Error ? error.message : "Unknown error";
     if (acquired) {
       try {
         await releaseJobLock(JOB_NAME, "failed", 0, errorMessage);
       } catch (updateError) {
-        console.error("[DRep Lifecycle Sync] Failed to update sync status:", updateError);
+        console.error("[DRep Lifecycle Sync] Failed to update sync status:", formatAxiosLikeError(updateError));
       }
     }
     res.status(500).json({ success: false, error: "Failed to start DRep lifecycle sync", message: errorMessage });

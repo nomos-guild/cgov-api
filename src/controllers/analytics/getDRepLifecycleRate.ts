@@ -1,4 +1,5 @@
 import { Request, Response } from "express";
+import { formatAxiosLikeError } from "../../utils/format-http-client-error";
 import { prisma } from "../../services";
 import {
   GetDRepLifecycleRateResponse,
@@ -101,7 +102,7 @@ export const getDRepLifecycleRate = async (req: Request, res: Response) => {
 
     res.json(response);
   } catch (error) {
-    console.error("Error fetching DRep lifecycle rate", error);
+    console.error("Error fetching DRep lifecycle rate", formatAxiosLikeError(error));
     res.status(500).json({
       error: "Failed to fetch DRep lifecycle rate",
       message: error instanceof Error ? error.message : "Unknown error",

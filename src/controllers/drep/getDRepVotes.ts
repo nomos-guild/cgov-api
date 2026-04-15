@@ -2,6 +2,7 @@ import { Request, Response } from "express";
 import { VoterType } from "@prisma/client";
 import { prisma } from "../../services";
 import { GetDRepVotesResponse, DRepVoteRecord } from "../../responses";
+import { formatAxiosLikeError } from "../../utils/format-http-client-error";
 
 /**
  * Extracts rationale text from vote metadata JSON
@@ -139,7 +140,7 @@ export const getDRepVotes = async (req: Request, res: Response) => {
 
     return res.json(response);
   } catch (error) {
-    console.error("Error fetching DRep votes", error);
+    console.error("Error fetching DRep votes", formatAxiosLikeError(error));
     return res.status(500).json({
       error: "Failed to fetch DRep voting history",
       message: error instanceof Error ? error.message : "Unknown error",

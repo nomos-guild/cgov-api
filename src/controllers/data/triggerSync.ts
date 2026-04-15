@@ -1,4 +1,5 @@
 import { Request, Response } from "express";
+import { formatAxiosLikeError } from "../../utils/format-http-client-error";
 import { syncAllProposals } from "../../services/ingestion/proposal.service";
 import { updateNCL } from "../../services/ingestion/ncl.service";
 import {
@@ -67,7 +68,7 @@ export const postTriggerSync = async (_req: Request, res: Response) => {
           nclUpdated: !!nclResult,
         });
       } catch (error) {
-        console.error("[Manual Sync] Async processing error:", error);
+        console.error("[Manual Sync] Async processing error:", formatAxiosLikeError(error));
 
         const errorMessage = error instanceof Error ? error.message : "Unknown error";
 
@@ -78,14 +79,14 @@ export const postTriggerSync = async (_req: Request, res: Response) => {
             errorMessage,
           });
         } catch (updateError) {
-          console.error("[Manual Sync] Failed to update sync status:", updateError);
+          console.error("[Manual Sync] Failed to update sync status:", formatAxiosLikeError(updateError));
         }
       }
     })().catch((error) => {
-      console.error("[Manual Sync] Unhandled error in async processing:", error);
+      console.error("[Manual Sync] Unhandled error in async processing:", formatAxiosLikeError(error));
     });
   } catch (error) {
-    console.error("[Manual Sync] Setup error:", error);
+    console.error("[Manual Sync] Setup error:", formatAxiosLikeError(error));
 
     const errorMessage = error instanceof Error ? error.message : "Unknown error";
 
@@ -97,7 +98,7 @@ export const postTriggerSync = async (_req: Request, res: Response) => {
         errorMessage,
       });
       } catch (updateError) {
-        console.error("[Manual Sync] Failed to update sync status:", updateError);
+        console.error("[Manual Sync] Failed to update sync status:", formatAxiosLikeError(updateError));
       }
     }
 

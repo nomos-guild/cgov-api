@@ -5,6 +5,7 @@ import {
   ProposalSilentStake,
 } from "../../responses/analytics.response";
 import { computeSpoLedgerBuckets } from "../../libs/ledgerVoteMath";
+import { formatAxiosLikeError } from "../../utils/format-http-client-error";
 
 /**
  * GET /analytics/spo-silent-stake
@@ -158,7 +159,7 @@ export const getSpoSilentStake = async (req: Request, res: Response) => {
 
     res.json(response);
   } catch (error) {
-    console.error("Error fetching SPO silent stake", error);
+    console.error("Error fetching SPO silent stake", formatAxiosLikeError(error));
     res.status(500).json({
       error: "Failed to fetch SPO silent stake",
       message: error instanceof Error ? error.message : "Unknown error",

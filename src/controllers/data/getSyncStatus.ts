@@ -1,5 +1,6 @@
 import { Request, Response } from "express";
 import { prisma } from "../../services/prisma";
+import { formatAxiosLikeError } from "../../utils/format-http-client-error";
 
 /**
  * GET /data/sync-status
@@ -42,7 +43,7 @@ export const getSyncStatus = async (req: Request, res: Response) => {
       data: rows,
     });
   } catch (error) {
-    console.error("[Sync Status] Failed to fetch sync status:", error);
+    console.error("[Sync Status] Failed to fetch sync status:", formatAxiosLikeError(error));
     res.status(500).json({
       success: false,
       error: "Failed to fetch sync status",

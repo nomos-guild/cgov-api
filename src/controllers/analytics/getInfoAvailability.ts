@@ -1,4 +1,5 @@
 import { Request, Response } from "express";
+import { formatAxiosLikeError } from "../../utils/format-http-client-error";
 import { prisma } from "../../services";
 import {
   GetInfoAvailabilityResponse,
@@ -140,7 +141,7 @@ export const getInfoAvailability = async (req: Request, res: Response) => {
 
     res.json(response);
   } catch (error) {
-    console.error("Error fetching info availability", error);
+    console.error("Error fetching info availability", formatAxiosLikeError(error));
     res.status(500).json({
       error: "Failed to fetch info availability",
       message: error instanceof Error ? error.message : "Unknown error",

@@ -1,4 +1,5 @@
 import { Request, Response } from "express";
+import { formatAxiosLikeError } from "../../utils/format-http-client-error";
 import { prisma } from "../../services";
 import {
   GetTreasuryRateResponse,
@@ -91,7 +92,7 @@ export const getTreasuryRate = async (req: Request, res: Response) => {
 
     res.json(response);
   } catch (error) {
-    console.error("Error fetching treasury rate", error);
+    console.error("Error fetching treasury rate", formatAxiosLikeError(error));
     res.status(500).json({
       error: "Failed to fetch treasury rate",
       message: error instanceof Error ? error.message : "Unknown error",

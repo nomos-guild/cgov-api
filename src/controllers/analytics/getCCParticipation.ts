@@ -8,6 +8,7 @@ import {
   CCMemberParticipation,
 } from "../../responses/analytics.response";
 import { getKoiosCurrentEpoch } from "../../services/ingestion/sync-utils";
+import { formatAxiosLikeError } from "../../utils/format-http-client-error";
 
 type KoiosCcMemberInfo = {
   status: "authorized" | "resigned";
@@ -324,7 +325,7 @@ export const getCCParticipation = async (req: Request, res: Response) => {
 
     res.json(response);
   } catch (error) {
-    console.error("Error fetching CC participation", error);
+    console.error("Error fetching CC participation", formatAxiosLikeError(error));
     res.status(500).json({
       error: "Failed to fetch CC participation",
       message: error instanceof Error ? error.message : "Unknown error",

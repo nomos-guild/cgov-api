@@ -2,6 +2,7 @@ import { Request, Response } from "express";
 import { syncAllVoterVotingPower } from "../../services/ingestion/voterPowerSync.service";
 import { prisma } from "../../services";
 import { acquireJobLock, releaseJobLock } from "../../services/ingestion/syncLock";
+import { formatAxiosLikeError } from "../../utils/format-http-client-error";
 
 const JOB_NAME = "voter-power-sync";
 const DISPLAY_NAME = "Voter Power Sync";
@@ -57,7 +58,7 @@ export const postTriggerVoterSync = async (_req: Request, res: Response) => {
 
         console.log("[Manual Voter Sync] Completed successfully:", results);
       } catch (error) {
-        console.error("[Manual Voter Sync] Async processing error:", error);
+        console.error("[Manual Voter Sync] Async processing error:", formatAxiosLikeError(error));
 
         const errorMessage = error instanceof Error ? error.message : "Unknown error";
 
@@ -65,14 +66,14 @@ export const postTriggerVoterSync = async (_req: Request, res: Response) => {
         try {
           await releaseJobLock(JOB_NAME, "failed", 0, errorMessage);
         } catch (updateError) {
-          console.error("[Manual Voter Sync] Failed to update sync status:", updateError);
+          console.error("[Manual Voter Sync] Failed to update sync status:", formatAxiosLikeError(updateError));
         }
       }
     })().catch((error) => {
-      console.error("[Manual Voter Sync] Unhandled error in async processing:", error);
+      console.error("[Manual Voter Sync] Unhandled error in async processing:", formatAxiosLikeError(error));
     });
   } catch (error) {
-    console.error("[Manual Voter Sync] Setup error:", error);
+    console.error("[Manual Voter Sync] Setup error:", formatAxiosLikeError(error));
 
     const errorMessage = error instanceof Error ? error.message : "Unknown error";
 
@@ -81,7 +82,7 @@ export const postTriggerVoterSync = async (_req: Request, res: Response) => {
       try {
         await releaseJobLock(JOB_NAME, "failed", 0, errorMessage);
       } catch (updateError) {
-        console.error("[Manual Voter Sync] Failed to update sync status:", updateError);
+        console.error("[Manual Voter Sync] Failed to update sync status:", formatAxiosLikeError(updateError));
       }
     }
 

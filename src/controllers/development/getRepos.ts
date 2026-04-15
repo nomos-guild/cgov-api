@@ -3,6 +3,7 @@ import { prisma } from "../../services/prisma";
 import { cacheGet, cacheSet } from "../../services/cache";
 import type { DevelopmentReposResponse, RepoSummary } from "../../responses";
 import { RANGE_DAYS } from "../../constants/development";
+import { formatAxiosLikeError } from "../../utils/format-http-client-error";
 
 const TTL = 10 * 60 * 1000; // 10 min
 
@@ -106,7 +107,7 @@ export const getRepos = async (req: Request, res: Response) => {
     cacheSet(cacheKey, response, TTL);
     res.json(response);
   } catch (error) {
-    console.error("Error fetching repos", error);
+    console.error("Error fetching repos", formatAxiosLikeError(error));
     res.status(500).json({
       error: "Failed to fetch repos",
       message: error instanceof Error ? error.message : "Unknown error",

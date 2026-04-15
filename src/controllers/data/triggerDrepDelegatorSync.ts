@@ -6,11 +6,10 @@ import {
 } from "../../services/ingestion/syncLock";
 import {
   DREP_DELEGATOR_SYNC_JOB_NAME,
-  isDrepDelegatorDailyBudgetExhausted,
-  readDrepDelegatorDailyBudgetCursor,
   runDrepDelegatorSyncWithDailyRetry,
 } from "../../services/ingestion/drep-delegator-sync-run";
 import { DREP_DELEGATOR_SYNC_LOCK_TTL_MS } from "../../services/ingestion/sync-utils";
+import { formatAxiosLikeError } from "../../utils/format-http-client-error";
 
 const DISPLAY_NAME = "DRep Delegator Sync";
 
@@ -27,19 +26,6 @@ export const postTriggerDrepDelegatorSync = async (
   let acquired = false;
 
   try {
-    const preCursor = await readDrepDelegatorDailyBudgetCursor();
-    if (isDrepDelegatorDailyBudgetExhausted(preCursor)) {
-      console.log(
-        "[DRep Delegator Sync] Skipped - daily budget exhausted for this UTC day"
-      );
-      return res.status(202).json({
-        success: true,
-        accepted: false,
-        message:
-          "DRep delegator sync daily budget exhausted for this UTC day. No further heavy runs until next UTC day.",
-      });
-    }
-
     acquired = await acquireJobLock(
       DREP_DELEGATOR_SYNC_JOB_NAME,
       DISPLAY_NAME,
@@ -58,21 +44,6 @@ export const postTriggerDrepDelegatorSync = async (
         accepted: false,
         message:
           "DRep delegator sync is already running. Skipping duplicate trigger.",
-      });
-    }
-
-    const postCursor = await readDrepDelegatorDailyBudgetCursor();
-    if (isDrepDelegatorDailyBudgetExhausted(postCursor)) {
-      await releaseJobLock(DREP_DELEGATOR_SYNC_JOB_NAME, "success", 0);
-      acquired = false;
-      console.log(
-        "[DRep Delegator Sync] Skipped after lock - daily budget exhausted (race with other instance)"
-      );
-      return res.status(202).json({
-        success: true,
-        accepted: false,
-        message:
-          "DRep delegator sync daily budget exhausted for this UTC day. Lock released without running.",
       });
     }
 
@@ -127,7 +98,7 @@ export const postTriggerDrepDelegatorSync = async (
           lastResult: outcome.lockResult,
         });
       } catch (error) {
-        console.error("[DRep Delegator Sync] Async processing error:", error);
+        console.error("[DRep Delegator Sync] Async processing error:", formatAxiosLikeError(error));
 
         const errorMessage =
           error instanceof Error ? error.message : "Unknown error";
@@ -141,19 +112,15 @@ export const postTriggerDrepDelegatorSync = async (
           );
         } catch (updateError) {
           console.error(
-            "[DRep Delegator Sync] Failed to update sync status:",
-            updateError
-          );
+            "[DRep Delegator Sync] Failed to update sync status:", formatAxiosLikeError(updateError));
         }
       }
     })().catch((error) => {
       console.error(
-        "[DRep Delegator Sync] Unhandled error in async processing:",
-        error
-      );
+        "[DRep Delegator Sync] Unhandled error in async processing:", formatAxiosLikeError(error));
     });
   } catch (error) {
-    console.error("[DRep Delegator Sync] Setup error:", error);
+    console.error("[DRep Delegator Sync] Setup error:", formatAxiosLikeError(error));
 
     const errorMessage =
       error instanceof Error ? error.message : "Unknown error";
@@ -168,9 +135,7 @@ export const postTriggerDrepDelegatorSync = async (
         );
       } catch (updateError) {
         console.error(
-          "[DRep Delegator Sync] Failed to update sync status:",
-          updateError
-        );
+          "[DRep Delegator Sync] Failed to update sync status:", formatAxiosLikeError(updateError));
       }
     }
 

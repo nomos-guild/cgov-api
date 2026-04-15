@@ -6,6 +6,7 @@ import { aggregateRecentToHistorical, precomputeNetworkGraphs } from "../../serv
 import { cacheInvalidatePrefix } from "../../services/cache";
 import { acquireJobLock, releaseJobLock } from "../../services/ingestion/syncLock";
 import { GITHUB_LOCK_KEYS } from "../../services/ingestion/githubLockKeys";
+import { formatAxiosLikeError } from "../../utils/format-http-client-error";
 
 const LOCK_EXPIRY_MS = 35 * 60 * 1000; // 35 minutes (generous for large syncs, handles snapshot's 30min timeout)
 
@@ -42,7 +43,7 @@ export const postTriggerGithubDiscovery = async (_req: Request, res: Response) =
       await releaseJobLock(jobName, "success", result.newRepos + result.updatedRepos);
       console.log(`[${jobName}] Completed successfully:`, result);
     } catch (error) {
-      console.error(`[${jobName}] Failed:`, error);
+      console.error(`[${jobName}] Failed:`, formatAxiosLikeError(error));
       await releaseJobLock(
         jobName,
         "failed",
@@ -51,7 +52,7 @@ export const postTriggerGithubDiscovery = async (_req: Request, res: Response) =
       );
     }
   })().catch((error) => {
-    console.error(`[${jobName}] Unhandled error in async processing:`, error);
+    console.error(`[${jobName}] Unhandled error in async processing:`, formatAxiosLikeError(error));
   });
 };
 
@@ -118,7 +119,7 @@ export const postTriggerGithubSync = async (req: Request, res: Response) => {
       await releaseJobLock(jobName, "success", result.success || 0);
       console.log(`[${jobName}] Completed successfully:`, result);
     } catch (error) {
-      console.error(`[${jobName}] Failed:`, error);
+      console.error(`[${jobName}] Failed:`, formatAxiosLikeError(error));
       await releaseJobLock(
         jobName,
         "failed",
@@ -127,7 +128,7 @@ export const postTriggerGithubSync = async (req: Request, res: Response) => {
       );
     }
   })().catch((error) => {
-    console.error(`[${jobName}] Unhandled error in async processing:`, error);
+    console.error(`[${jobName}] Unhandled error in async processing:`, formatAxiosLikeError(error));
   });
 };
 
@@ -167,7 +168,7 @@ export const postTriggerGithubBackfill = async (req: Request, res: Response) => 
       await releaseJobLock(jobName, "success", result.success);
       console.log(`[${jobName}] Completed successfully:`, result);
     } catch (error) {
-      console.error(`[${jobName}] Failed:`, error);
+      console.error(`[${jobName}] Failed:`, formatAxiosLikeError(error));
       await releaseJobLock(
         jobName,
         "failed",
@@ -176,7 +177,7 @@ export const postTriggerGithubBackfill = async (req: Request, res: Response) => 
       );
     }
   })().catch((error) => {
-    console.error(`[${jobName}] Unhandled error in async processing:`, error);
+    console.error(`[${jobName}] Unhandled error in async processing:`, formatAxiosLikeError(error));
   });
 };
 
@@ -213,7 +214,7 @@ export const postTriggerGithubSnapshot = async (_req: Request, res: Response) =>
       await releaseJobLock(jobName, "success", result.success);
       console.log(`[${jobName}] Completed successfully:`, result);
     } catch (error) {
-      console.error(`[${jobName}] Failed:`, error);
+      console.error(`[${jobName}] Failed:`, formatAxiosLikeError(error));
       await releaseJobLock(
         jobName,
         "failed",
@@ -222,7 +223,7 @@ export const postTriggerGithubSnapshot = async (_req: Request, res: Response) =>
       );
     }
   })().catch((error) => {
-    console.error(`[${jobName}] Unhandled error in async processing:`, error);
+    console.error(`[${jobName}] Unhandled error in async processing:`, formatAxiosLikeError(error));
   });
 };
 
@@ -261,7 +262,7 @@ export const postTriggerGithubAggregate = async (_req: Request, res: Response) =
       await releaseJobLock(jobName, "success", rollup.daysRolledUp);
       console.log(`[${jobName}] Completed successfully:`, { rollup });
     } catch (error) {
-      console.error(`[${jobName}] Failed:`, error);
+      console.error(`[${jobName}] Failed:`, formatAxiosLikeError(error));
       await releaseJobLock(
         jobName,
         "failed",
@@ -270,6 +271,6 @@ export const postTriggerGithubAggregate = async (_req: Request, res: Response) =
       );
     }
   })().catch((error) => {
-    console.error(`[${jobName}] Unhandled error in async processing:`, error);
+    console.error(`[${jobName}] Unhandled error in async processing:`, formatAxiosLikeError(error));
   });
 };

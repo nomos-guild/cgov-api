@@ -6,7 +6,7 @@
  * - syncAllDrepsInfo: Updates all DRep info once per epoch
  */
 
-import type { Prisma } from "@prisma/client";
+import { Prisma } from "@prisma/client";
 import {
   getDrepInfoBatchFromKoios,
   listAllDrepIds,
@@ -172,24 +172,40 @@ async function fetchDrepMetadata(drepId: string): Promise<DrepMetadata> {
 // Public API
 // ============================================================
 
-/** Special DRep IDs we do not ensure exist in the DRep table (e.g. system/sentinel DReps). */
-const DREP_IDS_EXCLUDED_FROM_ENSURE = new Set([
+/** Built-in vote-delegation targets from Koios `account_info.delegated_drep` (not fetched via /drep_delegators in this job). */
+export const CARDANO_ALWAYS_DELEGATION_DREP_IDS = [
   "drep_always_abstain",
   "drep_always_no_confidence",
-]);
+] as const;
+
+const CARDANO_ALWAYS_DELEGATION_DREP_ID_SET = new Set<string>(
+  CARDANO_ALWAYS_DELEGATION_DREP_IDS
+);
+
+/** True for Cardano built-in vote targets (`drep_always_abstain`, `drep_always_no_confidence`). */
+export function isCardanoAlwaysDelegationDrepId(
+  drepId: string | null | undefined
+): boolean {
+  if (drepId == null || typeof drepId !== "string") return false;
+  const t = drepId.trim();
+  return t.length > 0 && CARDANO_ALWAYS_DELEGATION_DREP_ID_SET.has(t);
+}
+
+/** Kept out of {@link ensureDrepsExist} so inventory / change-log paths do not auto-create these rows. */
+const DREP_IDS_EXCLUDED_FROM_ENSURE = CARDANO_ALWAYS_DELEGATION_DREP_ID_SET;
 
 /**
  * Ensures the given DRep IDs exist in the DRep table (creates missing rows with votingPower 0).
- * Use when recording delegation changes so that both "from" and "to" DReps are in inventory
- * (e.g. retired DReps that are no longer returned by /drep_list).
- * Excludes special DReps (drep_always_abstain, drep_always_no_confidence).
+ * Use when recording delegation changes so "from" / "to" DReps exist (e.g. retired DReps no longer
+ * in /drep_list). Does not create always-abstain / always-no-confidence rows (delegation sync excludes those).
  */
 export async function ensureDrepsExist(
   prisma: Prisma.TransactionClient,
   drepIds: string[]
 ): Promise<{ created: number }> {
-  const uniqueIds = [...new Set(drepIds)]
-    .filter((id) => id && id.trim() !== "" && !DREP_IDS_EXCLUDED_FROM_ENSURE.has(id));
+  const uniqueIds = [...new Set(drepIds)].filter(
+    (id) => id && id.trim() !== "" && !DREP_IDS_EXCLUDED_FROM_ENSURE.has(id)
+  );
   if (uniqueIds.length === 0) return { created: 0 };
 
   const existing = await prisma.drep.findMany({
@@ -303,6 +319,54 @@ export async function refreshDrepDelegatorCountsFromDelegationState(
     )
       AND COALESCE(d."delegator_count", -1) <> 0
   `;
+
+      return {
+        updated: Number(updatedWithDelegators) + Number(updatedWithoutDelegators),
+      };
+    }
+  );
+}
+
+/**
+ * Refreshes delegator_count only for DReps that may have changed (after a partial merge).
+ */
+export async function refreshDrepDelegatorCountsForDrepIds(
+  prisma: Prisma.TransactionClient,
+  drepIds: string[]
+): Promise<{ updated: number }> {
+  const unique = [...new Set(drepIds.filter((id) => typeof id === "string" && id.length > 0))];
+  if (unique.length === 0) {
+    return { updated: 0 };
+  }
+
+  return withIngestionDbWrite(
+    prisma,
+    "drep-sync.delegator-count.refresh-for-dreps",
+    async () => {
+      const updatedWithDelegators = await prisma.$executeRaw`
+        UPDATE "drep" AS d
+        SET "delegator_count" = counts.cnt
+        FROM (
+          SELECT "drep_id", COUNT(*)::int AS cnt
+          FROM "stake_delegation_state"
+          WHERE "drep_id" IS NOT NULL
+            AND "drep_id" IN (${Prisma.join(unique)})
+          GROUP BY "drep_id"
+        ) AS counts
+        WHERE d."drep_id" = counts."drep_id"
+      `;
+
+      const updatedWithoutDelegators = await prisma.$executeRaw`
+        UPDATE "drep" AS d
+        SET "delegator_count" = 0
+        WHERE d."drep_id" IN (${Prisma.join(unique)})
+          AND NOT EXISTS (
+            SELECT 1
+            FROM "stake_delegation_state" s
+            WHERE s."drep_id" = d."drep_id" AND s."drep_id" IS NOT NULL
+          )
+          AND COALESCE(d."delegator_count", -1) <> 0
+      `;
 
       return {
         updated: Number(updatedWithDelegators) + Number(updatedWithoutDelegators),

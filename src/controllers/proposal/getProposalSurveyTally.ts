@@ -1,4 +1,5 @@
 import { Request, Response } from "express";
+import { formatAxiosLikeError } from "../../utils/format-http-client-error";
 import { prisma } from "../../services";
 import { GetProposalSurveyTallyResponse } from "../../responses";
 import { syncProposalDetailsOnRead } from "../../services/syncOnRead";
@@ -227,7 +228,7 @@ export const getProposalSurveyTally = async (req: Request, res: Response) => {
 
     return res.json(tally);
   } catch (error) {
-    console.error("Error fetching proposal survey tally", error);
+    console.error("Error fetching proposal survey tally", formatAxiosLikeError(error));
     return res.status(500).json({
       error: "Failed to fetch proposal survey tally",
       message: error instanceof Error ? error.message : "Unknown error",

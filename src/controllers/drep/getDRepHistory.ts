@@ -1,6 +1,7 @@
 import { Request, Response } from "express";
 import { prisma } from "../../services";
 import { GetDRepHistoryResponse, DRepHistoryDataPoint } from "../../responses";
+import { formatAxiosLikeError } from "../../utils/format-http-client-error";
 
 /**
  * Converts lovelace (BigInt) to ADA string with 6 decimal places
@@ -82,7 +83,7 @@ export const getDRepHistory = async (req: Request, res: Response) => {
 
     return res.json(response);
   } catch (error) {
-    console.error("Error fetching DRep history", error);
+    console.error("Error fetching DRep history", formatAxiosLikeError(error));
     return res.status(500).json({
       error: "Failed to fetch DRep history",
       message: error instanceof Error ? error.message : "Unknown error",

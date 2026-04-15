@@ -1,5 +1,6 @@
 import { Request, Response } from "express";
 import { ingestVoteByTxHash } from "../../services/ingestion/vote.service";
+import { formatAxiosLikeError } from "../../utils/format-http-client-error";
 
 /**
  * POST /data/vote/:tx_hash
@@ -35,7 +36,7 @@ export const postIngestVote = async (req: Request, res: Response) => {
       result,
     });
   } catch (error) {
-    console.error("[Ingest Vote] Error:", error);
+    console.error("[Ingest Vote] Error:", formatAxiosLikeError(error));
 
     const errorMessage =
       error instanceof Error ? error.message : "Unknown error";

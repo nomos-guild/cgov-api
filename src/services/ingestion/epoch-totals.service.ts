@@ -70,6 +70,17 @@ export interface SyncMissingEpochsResult {
   };
 }
 
+export type SyncMissingEpochAnalyticsMode = "missing" | "all";
+
+export interface SyncMissingEpochAnalyticsOptions {
+  /** Inclusive lower bound (default 0). Clamped to >= 0. */
+  startEpoch?: number;
+  /** Inclusive upper bound for closed epochs (default currentEpoch - 1). Clamped to <= currentEpoch - 1. */
+  endEpoch?: number;
+  /** `missing`: only epochs without rows, checkpoint, or incomplete (after508). `all`: every epoch in range. */
+  mode?: SyncMissingEpochAnalyticsMode;
+}
+
 export const EPOCH_TOTALS_SELF_HEALING_AFTER_EPOCH = 508;
 
 const EPOCH_TOTALS_NULL_FIELD_FILTER: Prisma.EpochTotalsWhereInput[] = [
@@ -465,55 +476,85 @@ export async function syncEpochTotals(
 
 /**
  * Fill missing epochs for totals by comparing DB epochs to current epoch.
+ * Pass `options.mode: "all"` to resync every epoch in the resolved range (e.g. after a truncate).
  */
 export async function syncMissingEpochAnalytics(
-  prisma: Prisma.TransactionClient
+  prisma: Prisma.TransactionClient,
+  options?: SyncMissingEpochAnalyticsOptions
 ): Promise<SyncMissingEpochsResult> {
   const currentEpoch = await getKoiosCurrentEpoch();
-  const endEpoch = currentEpoch - 1;
+  const maxClosed = currentEpoch - 1;
 
-  if (endEpoch < 0) {
+  const rangeStart = Math.max(0, options?.startEpoch ?? 0);
+  const rangeEnd = Math.min(
+    options?.endEpoch !== undefined ? options.endEpoch : maxClosed,
+    maxClosed
+  );
+
+  if (maxClosed < 0) {
     return {
       currentEpoch,
-      startEpoch: 0,
-      endEpoch,
+      startEpoch: rangeStart,
+      endEpoch: maxClosed,
       totals: { missing: [], attempted: [], synced: [], failed: [] },
     };
   }
 
-  const startEpoch = 0;
-  const [totalsRows, syncStates, incompleteTotalsRows] = await Promise.all([
-    prisma.epochTotals.findMany({
-      where: { epoch: { gte: startEpoch, lte: endEpoch } },
-      select: { epoch: true },
-    }),
-    prisma.epochAnalyticsSync.findMany({
-      where: { epoch: { gte: startEpoch, lte: endEpoch } },
-    }),
-    prisma.epochTotals.findMany({
-      where: {
-        epoch: {
-          gt: EPOCH_TOTALS_SELF_HEALING_AFTER_EPOCH,
-          gte: startEpoch,
-          lte: endEpoch,
-        },
-        OR: EPOCH_TOTALS_NULL_FIELD_FILTER,
-      },
-      select: { epoch: true },
-    }),
-  ]);
+  if (rangeStart > rangeEnd) {
+    return {
+      currentEpoch,
+      startEpoch: rangeStart,
+      endEpoch: rangeEnd,
+      totals: { missing: [], attempted: [], synced: [], failed: [] },
+    };
+  }
 
-  const totalsSet = new Set(totalsRows.map((row) => row.epoch));
-  const syncStateMap = new Map(syncStates.map((row) => [row.epoch, row]));
-  const incompleteSet = new Set(incompleteTotalsRows.map((row) => row.epoch));
+  const mode: SyncMissingEpochAnalyticsMode = options?.mode ?? "missing";
 
-  const totalsMissing: number[] = [];
+  let totalsMissing: number[];
 
-  for (let epoch = startEpoch; epoch <= endEpoch; epoch += 1) {
-    const state = syncStateMap.get(epoch);
-
-    if (!totalsSet.has(epoch) || !state?.totalsSyncedAt || incompleteSet.has(epoch)) {
+  if (mode === "all") {
+    totalsMissing = [];
+    for (let epoch = rangeStart; epoch <= rangeEnd; epoch += 1) {
       totalsMissing.push(epoch);
+    }
+  } else {
+    const [totalsRows, syncStates, incompleteTotalsRows] = await Promise.all([
+      prisma.epochTotals.findMany({
+        where: { epoch: { gte: rangeStart, lte: rangeEnd } },
+        select: { epoch: true },
+      }),
+      prisma.epochAnalyticsSync.findMany({
+        where: { epoch: { gte: rangeStart, lte: rangeEnd } },
+      }),
+      prisma.epochTotals.findMany({
+        where: {
+          epoch: {
+            gt: EPOCH_TOTALS_SELF_HEALING_AFTER_EPOCH,
+            gte: rangeStart,
+            lte: rangeEnd,
+          },
+          OR: EPOCH_TOTALS_NULL_FIELD_FILTER,
+        },
+        select: { epoch: true },
+      }),
+    ]);
+
+    const totalsSet = new Set(totalsRows.map((row) => row.epoch));
+    const syncStateMap = new Map(syncStates.map((row) => [row.epoch, row]));
+    const incompleteSet = new Set(incompleteTotalsRows.map((row) => row.epoch));
+
+    totalsMissing = [];
+    for (let epoch = rangeStart; epoch <= rangeEnd; epoch += 1) {
+      const state = syncStateMap.get(epoch);
+
+      if (
+        !totalsSet.has(epoch) ||
+        !state?.totalsSyncedAt ||
+        incompleteSet.has(epoch)
+      ) {
+        totalsMissing.push(epoch);
+      }
     }
   }
 
@@ -569,8 +610,8 @@ export async function syncMissingEpochAnalytics(
 
   return {
     currentEpoch,
-    startEpoch,
-    endEpoch,
+    startEpoch: rangeStart,
+    endEpoch: rangeEnd,
     totals: {
       missing: totalsMissing,
       attempted: totalsToSync,

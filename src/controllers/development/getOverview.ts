@@ -3,6 +3,7 @@ import { prisma } from "../../services/prisma";
 import { cacheGet, cacheSet } from "../../services/cache";
 import type { DevelopmentOverviewResponse } from "../../responses";
 import { RANGE_DAYS } from "../../constants/development";
+import { formatAxiosLikeError } from "../../utils/format-http-client-error";
 
 const TTL = 5 * 60 * 1000; // 5 min
 
@@ -37,7 +38,7 @@ export const getOverview = async (req: Request, res: Response) => {
     cacheSet(cacheKey, response, TTL);
     res.json(response);
   } catch (error) {
-    console.error("Error fetching overview", error);
+    console.error("Error fetching overview", formatAxiosLikeError(error));
     res.status(500).json({
       error: "Failed to fetch overview",
       message: error instanceof Error ? error.message : "Unknown error",

@@ -35,6 +35,8 @@ export {
   getEpochDuration,
   type SyncEpochTotalsResult,
   type SyncMissingEpochsResult,
+  type SyncMissingEpochAnalyticsMode,
+  type SyncMissingEpochAnalyticsOptions,
 } from "./epoch-totals.service";
 
 // Re-export from delegation-sync.service
@@ -579,7 +581,8 @@ export async function syncDrepLifecycleStep(
  * Step: Pool groups (multi-pool operator mappings).
  */
 export async function syncPoolGroupsStep(
-  prisma: Prisma.TransactionClient
+  prisma: Prisma.TransactionClient,
+  opts?: { force?: boolean }
 ): Promise<StepPoolGroupsResult> {
   const currentEpoch = await getKoiosCurrentEpoch();
   const epochToSync = currentEpoch - 1;
@@ -588,7 +591,20 @@ export async function syncPoolGroupsStep(
     return { currentEpoch, epochToSync, skipped: true };
   }
 
-  const state = await ensureEpochCheckpoint(prisma, epochToSync);
+  let state = await ensureEpochCheckpoint(prisma, epochToSync);
+
+  if (opts?.force && state.poolGroupsSyncedAt) {
+    await withIngestionDbWrite(
+      prisma,
+      "epoch-analytics.checkpoint.clear-pool-groups-synced",
+      () =>
+        prisma.epochAnalyticsSync.update({
+          where: { epoch: epochToSync },
+          data: { poolGroupsSyncedAt: null },
+        })
+    );
+    state = { ...state, poolGroupsSyncedAt: null };
+  }
 
   if (state.poolGroupsSyncedAt) {
     return { currentEpoch, epochToSync, skipped: true };

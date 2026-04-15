@@ -1,4 +1,5 @@
 import { Request, Response } from "express";
+import { formatAxiosLikeError } from "../../utils/format-http-client-error";
 import { VoterType } from "@prisma/client";
 import { prisma } from "../../services";
 import {
@@ -291,7 +292,7 @@ export const getCCTimeToDecision = async (req: Request, res: Response) => {
 
     res.json(response);
   } catch (error) {
-    console.error("Error fetching CC time to decision", error);
+    console.error("Error fetching CC time to decision", formatAxiosLikeError(error));
     res.status(500).json({
       error: "Failed to fetch CC time to decision",
       message: error instanceof Error ? error.message : "Unknown error",

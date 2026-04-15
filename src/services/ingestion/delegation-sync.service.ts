@@ -5,8 +5,10 @@
  * - syncDrepDelegationChanges: Syncs delegation states and change log
  */
 
+import { randomUUID } from "crypto";
 import { Prisma, type StakeDelegationSyncState, type SyncStatus } from "@prisma/client";
 import {
+  getAccountInfoBatch,
   getAccountUpdateHistoryBatch,
   getTxInfoBatch,
   listAllDrepDelegators,
@@ -19,6 +21,9 @@ import type {
 import { processInParallel } from "./parallel";
 import {
   DREP_DELEGATION_SYNC_CONCURRENCY,
+  DREP_DELEGATION_SHARD_COUNT,
+  DREP_DELEGATION_ACCOUNT_INFO_MAX_STAKES_PER_RUN,
+  DREP_DELEGATION_FULL_ALL_DREPS_MIN_INTERVAL_DAYS,
   STAKE_DELEGATION_SYNC_STATE_ID,
   DREP_DELEGATION_BACKFILL_JOB_NAME,
   FORCE_DREP_DELEGATION_BACKFILL_JOB_NAME,
@@ -32,8 +37,14 @@ import { getBoundedIntEnv } from "./syncLock";
 import {
   syncAllDrepsInventory,
   ensureDrepsExist,
-  refreshDrepDelegatorCountsFromDelegationState,
+  isCardanoAlwaysDelegationDrepId,
+  CARDANO_ALWAYS_DELEGATION_DREP_IDS,
+  refreshDrepDelegatorCountsForDrepIds,
 } from "./drep-sync.service";
+import {
+  releaseDelegationWriterLock,
+  tryAcquireDelegationWriterLock,
+} from "./delegation-writer-lock";
 import { logIntegrityEvent } from "./integrityMetrics";
 import { withIngestionDbWrite } from "./dbSession";
 
@@ -50,7 +61,6 @@ const KOIOS_HEAVY_DREP_DELEGATORS_LANE_JOB_NAME =
 const DELEGATION_FULL_SCAN_WINDOW_JOB_NAME =
   "drep-delegation-full-scan-window";
 const DELEGATION_CLEAR_GUARD_JOB_NAME = "drep-delegation-clear-guard";
-const DELEGATION_FULL_SCAN_WINDOW_DEFAULT_MS = 55 * 60 * 1000;
 const DREP_DELEGATION_MAX_FETCH_FAILURES = 10;
 const HEAVY_LANE_LOCK_TTL_MS = 2 * 60 * 60 * 1000;
 const DELEGATION_CLEAR_MIN_COVERAGE_RATIO = 0.9;
@@ -120,6 +130,24 @@ function sortAccountUpdates(
 }
 
 type DelegatorCandidate = { drepId: string; delegator: KoiosDrepDelegator };
+
+/** Built-in delegation targets are not tracked here (would imply huge /drep_delegators load). */
+function stripCardanoAlwaysDelegationTargetsFromTrackedDelegators(
+  allDelegatorsByStake: Map<string, DelegatorCandidate>,
+  stakesWithUndelegatedAccountInfo: Set<string>,
+  allStakeAddresses: Set<string>
+): number {
+  let stripped = 0;
+  for (const [stakeAddress, cand] of [...allDelegatorsByStake.entries()]) {
+    if (isCardanoAlwaysDelegationDrepId(cand.drepId)) {
+      allDelegatorsByStake.delete(stakeAddress);
+      stakesWithUndelegatedAccountInfo.add(stakeAddress);
+      allStakeAddresses.add(stakeAddress);
+      stripped += 1;
+    }
+  }
+  return stripped;
+}
 
 type DuplicateConflictResolutionMethod =
   | "history-epoch-slot-block-time"
@@ -725,6 +753,8 @@ export async function syncDrepDelegationChanges(
     stakeDelegationState: any;
     stakeDelegationChange: any;
     stakeDelegationSyncState: any;
+    delegationSyncCheckpoint: any;
+    stakeDelegationStaging: any;
   };
   const currentEpoch = await getKoiosCurrentEpoch();
   const syncState = await withIngestionDbWrite(
@@ -759,33 +789,8 @@ export async function syncDrepDelegationChanges(
     !!backfillStatus?.backfillCursor && !backfillCompleted;
   const shouldBackfill = !backfillCompleted;
 
-  const fullScanThrottleEnabled =
-    process.env.DELEGATION_SYNC_FULL_SCAN_THROTTLE_ENABLED !== "false";
-  const fullScanMinIntervalMs = getBoundedIntEnv(
-    "DELEGATION_SYNC_FULL_SCAN_MIN_INTERVAL_MS",
-    DELEGATION_FULL_SCAN_WINDOW_DEFAULT_MS,
-    0,
-    24 * 60 * 60 * 1000
-  );
-  const fullScanWindowStatus = await (prisma as any).syncStatus.findUnique({
-    where: { jobName: DELEGATION_FULL_SCAN_WINDOW_JOB_NAME },
-  });
-  const lastFullScanAt = fullScanWindowStatus?.completedAt
-    ? new Date(fullScanWindowStatus.completedAt).getTime()
-    : 0;
-  const fullScanAgeMs = lastFullScanAt > 0 ? Date.now() - lastFullScanAt : null;
-  const shouldThrottleThisRun =
-    fullScanThrottleEnabled &&
-    fullScanMinIntervalMs > 0 &&
-    !shouldForceBackfill &&
-    !shouldBackfill &&
-    fullScanAgeMs !== null &&
-    fullScanAgeMs < fullScanMinIntervalMs;
-  if (shouldThrottleThisRun) {
-    const remainingMs = fullScanMinIntervalMs - (fullScanAgeMs ?? 0);
-    console.log(
-      `[DRep Delegation Sync] Skipping full scan due to throttle window: remainingMs=${remainingMs}`
-    );
+  const delegationWriterAcquired = await tryAcquireDelegationWriterLock(prisma);
+  if (!delegationWriterAcquired) {
     const result = {
       currentEpoch,
       lastProcessedEpoch,
@@ -794,9 +799,9 @@ export async function syncDrepDelegationChanges(
       delegatorsProcessed: 0,
       statesUpdated: 0,
       changesInserted: 0,
-      failed: [],
-      skipped: true,
-      skipReason: "full-scan-throttle-window",
+      failed: [] as Array<{ drepId: string; error: string }>,
+      skipped: true as const,
+      skipReason: "delegation-writer-lock",
     };
     logIntegrityEvent({
       stream: "delegation",
@@ -808,6 +813,7 @@ export async function syncDrepDelegationChanges(
     return result;
   }
 
+  try {
   // For initial backfill, ensure DRep inventory is complete before proceeding.
   // Check if EpochAnalyticsSync has a recent drepsSyncedAt entry.
   if (shouldBackfill) {
@@ -834,7 +840,7 @@ export async function syncDrepDelegationChanges(
   // These "special" DRep options can have massive delegator sets.
   // We intentionally exclude them from stake-address delegation tracking to avoid
   // ballooning the stake address inventory; we ingest only per-epoch aggregates elsewhere.
-  const excludedDrepIds = ["drep_always_abstain", "drep_always_no_confidence"];
+  const excludedDrepIds = [...CARDANO_ALWAYS_DELEGATION_DREP_IDS];
   let drepRows = await prisma.drep.findMany({
     select: { drepId: true },
     where: { drepId: { notIn: excludedDrepIds } },
@@ -858,14 +864,166 @@ export async function syncDrepDelegationChanges(
   );
 
   // ============================================================
-  // PHASE 1: Collect all delegators from all DReps
+  // PHASE 1: POST /account_info (known stakes) + sharded or full GET /drep_delegators
   // ============================================================
-  console.log(`[DRep Delegation Sync] Phase 1: Collecting delegators from all DReps...`);
+  console.log(
+    `[DRep Delegation Sync] Phase 1: account_info sweep + Koios /drep_delegators...`
+  );
 
-  const allDelegatorsByStake = new Map<string, DelegatorCandidate>();
+  const syncRunId = randomUUID();
+  await withIngestionDbWrite(
+    prisma,
+    "delegation-sync.checkpoint.upsert",
+    () =>
+      delegationClient.delegationSyncCheckpoint.upsert({
+        where: { id: "default" },
+        create: { id: "default" },
+        update: {},
+      })
+  );
+  let checkpointRow = await delegationClient.delegationSyncCheckpoint.findUnique({
+    where: { id: "default" },
+  });
+  if (checkpointRow && !checkpointRow.phase3CheckpointJson) {
+    const legacyPhase3 = await (prisma as any).syncStatus.findUnique({
+      where: { jobName: DREP_DELEGATION_PHASE3_JOB_NAME },
+      select: { backfillCursor: true },
+    });
+    if (legacyPhase3?.backfillCursor) {
+      await withIngestionDbWrite(
+        prisma,
+        "delegation-sync.checkpoint.migrate-phase3",
+        () =>
+          delegationClient.delegationSyncCheckpoint.update({
+            where: { id: "default" },
+            data: { phase3CheckpointJson: legacyPhase3.backfillCursor },
+          })
+      );
+      checkpointRow = await delegationClient.delegationSyncCheckpoint.findUnique({
+        where: { id: "default" },
+      });
+    }
+  }
+
   const delegatorCandidatesByStake = new Map<string, DelegatorCandidate[]>();
-  const allStakeAddresses = new Set<string>();
+  const stakesWithUndelegatedAccountInfo = new Set<string>();
   let phase1DelegatorRows = 0;
+
+  const acctCursor = checkpointRow?.accountInfoStakeCursor ?? null;
+  const stakeRows = await delegationClient.stakeAddress.findMany({
+    where: acctCursor ? { stakeAddress: { gt: acctCursor } } : undefined,
+    select: { stakeAddress: true },
+    orderBy: { stakeAddress: "asc" },
+    take: DREP_DELEGATION_ACCOUNT_INFO_MAX_STAKES_PER_RUN + 1,
+  });
+  const hasMoreStakes = stakeRows.length > DREP_DELEGATION_ACCOUNT_INFO_MAX_STAKES_PER_RUN;
+  const stakeBatch = hasMoreStakes
+    ? stakeRows.slice(0, DREP_DELEGATION_ACCOUNT_INFO_MAX_STAKES_PER_RUN)
+    : stakeRows;
+  const nextAcctCursor: string | null =
+    stakeBatch.length === 0
+      ? null
+      : hasMoreStakes
+        ? stakeBatch[stakeBatch.length - 1]!.stakeAddress
+        : null;
+
+  if (stakeBatch.length > 0) {
+    const infos = await getAccountInfoBatch(
+      stakeBatch.map((r) => r.stakeAddress),
+      { source: "ingestion.delegation-sync.account-info" }
+    );
+    const stagingRows: Array<{
+      runId: string;
+      stakeAddress: string;
+      drepId: string | null;
+      amount: string | null;
+      delegatedEpochNo: number | null;
+      source: string;
+    }> = [];
+
+    for (const info of infos) {
+      const sa = info.stake_address;
+      if (typeof sa !== "string" || !sa) continue;
+      const drepRaw = info.delegated_drep;
+      const drep = typeof drepRaw === "string" ? drepRaw.trim() : "";
+      const amountStr =
+        (typeof info.total_balance === "string" && info.total_balance) ||
+        (typeof info.controlled_total_stake === "string" && info.controlled_total_stake) ||
+        "0";
+
+      if (!drep || isCardanoAlwaysDelegationDrepId(drep)) {
+        stakesWithUndelegatedAccountInfo.add(sa);
+        stagingRows.push({
+          runId: syncRunId,
+          stakeAddress: sa,
+          drepId: null,
+          amount: null,
+          delegatedEpochNo: null,
+          source: "account_info",
+        });
+        continue;
+      }
+
+      const delegator: KoiosDrepDelegator = {
+        stake_address: sa,
+        amount: amountStr,
+        epoch_no: currentEpoch > 0 ? currentEpoch - 1 : null,
+      };
+      delegatorCandidatesByStake.set(sa, [{ drepId: drep, delegator }]);
+      stagingRows.push({
+        runId: syncRunId,
+        stakeAddress: sa,
+        drepId: drep,
+        amount: amountStr,
+        delegatedEpochNo:
+          typeof delegator.epoch_no === "number" ? delegator.epoch_no : null,
+        source: "account_info",
+      });
+    }
+
+    if (stagingRows.length > 0) {
+      await withIngestionDbWrite(
+        prisma,
+        "delegation-sync.staging.createMany-account-info",
+        () =>
+          delegationClient.stakeDelegationStaging.createMany({
+            data: stagingRows,
+          })
+      );
+    }
+  }
+
+  await withIngestionDbWrite(
+    prisma,
+    "delegation-sync.checkpoint.account-info-cursor",
+    () =>
+      delegationClient.delegationSyncCheckpoint.update({
+        where: { id: "default" },
+        data: { accountInfoStakeCursor: nextAcctCursor },
+      })
+  );
+
+  const msPerDay = 24 * 60 * 60 * 1000;
+  const lastFullAt = checkpointRow?.lastFullAllDrepsScanAt
+    ? new Date(checkpointRow.lastFullAllDrepsScanAt).getTime()
+    : 0;
+  const runFullAllDreps =
+    lastFullAt === 0 ||
+    Date.now() - lastFullAt > DREP_DELEGATION_FULL_ALL_DREPS_MIN_INTERVAL_DAYS * msPerDay ||
+    shouldForceBackfill ||
+    shouldBackfill;
+
+  let phase1DrepsTarget = drepIds;
+  if (!runFullAllDreps) {
+    const shardIdx =
+      ((checkpointRow?.drepShardIndex ?? 0) % DREP_DELEGATION_SHARD_COUNT +
+        DREP_DELEGATION_SHARD_COUNT) %
+      DREP_DELEGATION_SHARD_COUNT;
+    phase1DrepsTarget = drepIds.filter(
+      (_id, index) => index % DREP_DELEGATION_SHARD_COUNT === shardIdx
+    );
+  }
+
   const heavyLaneClient = prisma as Prisma.TransactionClient & { syncStatus: any };
   const heavyLaneStartedAt = new Date();
   await withIngestionDbWrite(prisma, "delegation-sync.heavy-lane.syncStatus.upsert", () =>
@@ -896,7 +1054,7 @@ export async function syncDrepDelegationChanges(
   };
   try {
     delegatorFetchResult = await processInParallel(
-      drepIds,
+      phase1DrepsTarget,
       (drepId) => drepId,
       async (drepId) => {
         const delegators = await fetchDelegatorsForDrep(drepId);
@@ -921,11 +1079,39 @@ export async function syncDrepDelegationChanges(
     );
   }
 
-  if (delegatorFetchResult.failed.length > 0) {
-    console.warn(
-      `[DRep Delegation Sync] Phase 1 fetch failures: ${delegatorFetchResult.failed.length}`
+  if (runFullAllDreps && delegatorFetchResult.failed.length === 0) {
+    await withIngestionDbWrite(
+      prisma,
+      "delegation-sync.checkpoint.full-dreps-scan",
+      () =>
+        delegationClient.delegationSyncCheckpoint.update({
+          where: { id: "default" },
+          data: {
+            lastFullAllDrepsScanAt: new Date(),
+          },
+        })
+    );
+  } else if (!runFullAllDreps && delegatorFetchResult.failed.length === 0) {
+    const prev = checkpointRow?.drepShardIndex ?? 0;
+    await withIngestionDbWrite(
+      prisma,
+      "delegation-sync.checkpoint.shard-advance",
+      () =>
+        delegationClient.delegationSyncCheckpoint.update({
+          where: { id: "default" },
+          data: { drepShardIndex: (prev + 1) % DREP_DELEGATION_SHARD_COUNT },
+        })
     );
   }
+
+  const shardStagingRows: Array<{
+    runId: string;
+    stakeAddress: string;
+    drepId: string | null;
+    amount: string | null;
+    delegatedEpochNo: number | null;
+    source: string;
+  }> = [];
 
   for (const { drepId, delegators } of delegatorFetchResult.successful) {
     for (const delegator of delegators) {
@@ -936,8 +1122,39 @@ export async function syncDrepDelegationChanges(
       } else {
         delegatorCandidatesByStake.set(stakeAddress, [{ drepId, delegator }]);
       }
+      shardStagingRows.push({
+        runId: syncRunId,
+        stakeAddress,
+        drepId,
+        amount: String(delegator.amount),
+        delegatedEpochNo:
+          typeof delegator.epoch_no === "number" ? delegator.epoch_no : null,
+        source: "drep_delegators_shard",
+      });
     }
   }
+
+  if (shardStagingRows.length > 0) {
+    await withIngestionDbWrite(
+      prisma,
+      "delegation-sync.staging.createMany-shard",
+      () =>
+        delegationClient.stakeDelegationStaging.createMany({
+          data: shardStagingRows,
+        })
+    );
+  }
+
+  if (delegatorFetchResult.failed.length > 0) {
+    console.warn(
+      `[DRep Delegation Sync] Phase 1 fetch failures: ${delegatorFetchResult.failed.length}`
+    );
+  }
+
+  const allDelegatorsByStake = new Map<string, DelegatorCandidate>();
+  const allStakeAddresses = new Set<string>();
+  const phase1CompleteForClears =
+    runFullAllDreps && delegatorFetchResult.failed.length === 0;
 
   const duplicateConflictStats: {
     total: number;
@@ -1011,13 +1228,28 @@ export async function syncDrepDelegationChanges(
     );
   }
 
+  const strippedBuiltInDelegation = stripCardanoAlwaysDelegationTargetsFromTrackedDelegators(
+    allDelegatorsByStake,
+    stakesWithUndelegatedAccountInfo,
+    allStakeAddresses
+  );
+  if (strippedBuiltInDelegation > 0) {
+    console.log(
+      `[DRep Delegation Sync] Excluded ${strippedBuiltInDelegation} stake(s) delegated to built-in always-abstain/no-confidence (not tracked in this job)`
+    );
+  }
+
+  for (const s of stakesWithUndelegatedAccountInfo) {
+    allStakeAddresses.add(s);
+  }
+
   const failed = delegatorFetchResult.failed.map((f) => ({
     drepId: f.id,
     error: f.error,
   }));
   const maxFetchFailures = Math.min(
     DREP_DELEGATION_MAX_FETCH_FAILURES,
-    Math.max(1, drepIds.length)
+    Math.max(1, phase1DrepsTarget.length)
   );
   const shouldFailClosed = failed.length > maxFetchFailures;
   if (failed.length > 0) {
@@ -1053,6 +1285,11 @@ export async function syncDrepDelegationChanges(
         })
     );
     if (shouldFailClosed) {
+      await withIngestionDbWrite(prisma, "delegation-sync.staging.delete-run-phase1-fail", () =>
+        delegationClient.stakeDelegationStaging.deleteMany({
+          where: { runId: syncRunId },
+        })
+      );
       const result = {
         currentEpoch,
         lastProcessedEpoch,
@@ -1078,7 +1315,7 @@ export async function syncDrepDelegationChanges(
   }
 
   console.log(
-    `[DRep Delegation Sync] Phase 1 complete: ${allStakeAddresses.size} unique stake addresses from ${delegatorFetchResult.successful.length} DReps`
+    `[DRep Delegation Sync] Phase 1 complete: ${allStakeAddresses.size} unique stake addresses (shard/full DReps fetched=${delegatorFetchResult.successful.length} fullAllDreps=${runFullAllDreps})`
   );
 
   // ============================================================
@@ -1304,9 +1541,22 @@ export async function syncDrepDelegationChanges(
     }
   }
 
-  // Reconcile stale states only when we have a complete snapshot.
+  for (const stakeAddress of allStakeAddresses) {
+    if (allDelegatorsByStake.has(stakeAddress)) continue;
+    const currentState = existingStateMap.get(stakeAddress);
+    if (!currentState?.drepId) continue;
+    toClear.push(stakeAddress);
+    changeLog.push({
+      stakeAddress,
+      fromDrepId: currentState.drepId ?? "",
+      toDrepId: "",
+      delegatedEpoch: -1,
+    });
+  }
+
+  // Reconcile stale states only when we have a complete all-DRep snapshot.
   // If there are fetch failures, skip this destructive step to avoid false clears.
-  if (failed.length === 0) {
+  if (failed.length === 0 && phase1CompleteForClears) {
     const activeDelegationStateCount = await delegationClient.stakeDelegationState.count({
       where: { drepId: { not: null } },
     });
@@ -1428,6 +1678,22 @@ export async function syncDrepDelegationChanges(
         )
       : [];
 
+  const drepIdsForStakeStateFk = new Set<string>();
+  for (const r of toCreate) drepIdsForStakeStateFk.add(r.drepId);
+  for (const r of toUpdate) drepIdsForStakeStateFk.add(r.drepId);
+  for (const c of changeLogToInsert) {
+    if (c.fromDrepId?.trim()) drepIdsForStakeStateFk.add(c.fromDrepId);
+    if (c.toDrepId?.trim()) drepIdsForStakeStateFk.add(c.toDrepId);
+  }
+  if (drepIdsForStakeStateFk.size > 0) {
+    const ensureResult = await ensureDrepsExist(prisma, [...drepIdsForStakeStateFk]);
+    if (ensureResult.created > 0) {
+      console.log(
+        `[DRep Delegation Sync] Ensured ${ensureResult.created} DRep row(s) in inventory for delegation state / change-log FKs`
+      );
+    }
+  }
+
   // Initialize or load Phase 3 checkpoint
   const syncStatusClient = delegationClient as Prisma.TransactionClient & { syncStatus: any };
   const transactionClient = prisma as Prisma.TransactionClient & {
@@ -1440,13 +1706,20 @@ export async function syncDrepDelegationChanges(
     changesChunkIndex: 0,
   };
 
-  const existingStatus = await syncStatusClient.syncStatus.findUnique({
-    where: { jobName: DREP_DELEGATION_PHASE3_JOB_NAME },
+  const cpPhase3 = await delegationClient.delegationSyncCheckpoint.findUnique({
+    where: { id: "default" },
   });
-
-  if (existingStatus?.backfillCursor) {
+  let phase3Raw: string | null | undefined = cpPhase3?.phase3CheckpointJson;
+  if (!phase3Raw) {
+    const legacyPhase3Status = await syncStatusClient.syncStatus.findUnique({
+      where: { jobName: DREP_DELEGATION_PHASE3_JOB_NAME },
+      select: { backfillCursor: true },
+    });
+    phase3Raw = legacyPhase3Status?.backfillCursor ?? null;
+  }
+  if (phase3Raw) {
     try {
-      const savedCheckpoint = JSON.parse(existingStatus.backfillCursor) as Phase3Checkpoint;
+      const savedCheckpoint = JSON.parse(phase3Raw) as Phase3Checkpoint;
       if (savedCheckpoint.epoch === currentEpoch) {
         checkpoint = savedCheckpoint;
         console.log(
@@ -1457,6 +1730,13 @@ export async function syncDrepDelegationChanges(
       // Invalid checkpoint, start fresh
     }
   }
+
+  await withIngestionDbWrite(prisma, "delegation-sync.phase3.checkpoint-init", () =>
+    delegationClient.delegationSyncCheckpoint.update({
+      where: { id: "default" },
+      data: { phase3CheckpointJson: JSON.stringify(checkpoint) },
+    })
+  );
 
   await withIngestionDbWrite(prisma, "delegation-sync.phase3.syncStatus.upsert", () =>
     syncStatusClient.syncStatus.upsert({
@@ -1472,22 +1752,32 @@ export async function syncDrepDelegationChanges(
 
   const buildCheckpointData = (updates: Partial<Phase3Checkpoint>) => {
     const next = { ...checkpoint, ...updates };
-    return { next, data: { backfillCursor: JSON.stringify(next) } };
+    return {
+      next,
+      delegationCheckpoint: { phase3CheckpointJson: JSON.stringify(next) },
+      syncData: { backfillCursor: JSON.stringify(next) },
+    };
   };
 
   // Batch create new states (with checkpoint).
   // prisma.$transaction batches: retries apply at transaction boundary / job rerun, not per-statement (ingestion DB resilience plan).
   if (toCreate.length > 0 && !checkpoint.createsComplete) {
-    const { next, data: checkpointData } = buildCheckpointData({ createsComplete: true });
+    const { next, delegationCheckpoint, syncData } = buildCheckpointData({
+      createsComplete: true,
+    });
     if (transactionClient.$transaction) {
       await transactionClient.$transaction([
         delegationClient.stakeDelegationState.createMany({
           data: toCreate,
           skipDuplicates: true,
         }),
+        delegationClient.delegationSyncCheckpoint.update({
+          where: { id: "default" },
+          data: delegationCheckpoint,
+        }),
         syncStatusClient.syncStatus.update({
           where: { jobName: DREP_DELEGATION_PHASE3_JOB_NAME },
-          data: checkpointData,
+          data: syncData,
         }),
       ]);
     } else {
@@ -1502,11 +1792,20 @@ export async function syncDrepDelegationChanges(
       );
       await withIngestionDbWrite(
         prisma,
+        "delegation-sync.phase3.checkpoint-after-create",
+        () =>
+          delegationClient.delegationSyncCheckpoint.update({
+            where: { id: "default" },
+            data: delegationCheckpoint,
+          })
+      );
+      await withIngestionDbWrite(
+        prisma,
         "delegation-sync.phase3.syncStatus.update-after-create",
         () =>
           syncStatusClient.syncStatus.update({
             where: { jobName: DREP_DELEGATION_PHASE3_JOB_NAME },
-            data: checkpointData,
+            data: syncData,
           })
       );
     }
@@ -1525,15 +1824,26 @@ export async function syncDrepDelegationChanges(
     for (let i = startChunkIndex * updateChunkSize; i < toUpdate.length; i += updateChunkSize) {
       const chunkIndex = Math.floor(i / updateChunkSize);
       const chunk = toUpdate.slice(i, i + updateChunkSize);
-      const { next, data: checkpointData } = buildCheckpointData({ updateChunkIndex: chunkIndex + 1 });
+      const { next, delegationCheckpoint, syncData } = buildCheckpointData({
+        updateChunkIndex: chunkIndex + 1,
+      });
       await updateStakeDelegationStateBatch(delegationClient, chunk);
+      await withIngestionDbWrite(
+        prisma,
+        "delegation-sync.phase3.checkpoint-after-state-batch",
+        () =>
+          delegationClient.delegationSyncCheckpoint.update({
+            where: { id: "default" },
+            data: delegationCheckpoint,
+          })
+      );
       await withIngestionDbWrite(
         prisma,
         "delegation-sync.phase3.syncStatus.update-after-state-batch",
         () =>
           syncStatusClient.syncStatus.update({
             where: { jobName: DREP_DELEGATION_PHASE3_JOB_NAME },
-            data: checkpointData,
+            data: syncData,
           })
       );
       checkpoint = next;
@@ -1568,23 +1878,6 @@ export async function syncDrepDelegationChanges(
     }
   }
 
-  // Ensure all from/to DReps referenced in the change log exist in the DRep table (e.g. retired "from" DReps).
-  if (changeLogToInsert.length > 0) {
-    const drepIdsFromChanges = new Set<string>();
-    for (const c of changeLogToInsert) {
-      if (c.fromDrepId?.trim()) drepIdsFromChanges.add(c.fromDrepId);
-      if (c.toDrepId?.trim()) drepIdsFromChanges.add(c.toDrepId);
-    }
-    if (drepIdsFromChanges.size > 0) {
-      const ensureResult = await ensureDrepsExist(prisma, [...drepIdsFromChanges]);
-      if (ensureResult.created > 0) {
-        console.log(
-          `[DRep Delegation Sync] Ensured ${ensureResult.created} DRep(s) in inventory for delegation change from/to refs`
-        );
-      }
-    }
-  }
-
   // Batch insert change log entries (with per-chunk checkpoint).
   // prisma.$transaction batches: retries at transaction boundary / job rerun (ingestion DB resilience plan).
   let phase3ChangeRowsInserted = 0;
@@ -1600,16 +1893,22 @@ export async function syncDrepDelegationChanges(
         toDrepId: c.toDrepId,
         delegatedEpoch: c.delegatedEpoch,
       }));
-      const { next, data: checkpointData } = buildCheckpointData({ changesChunkIndex: chunkIndex + 1 });
+      const { next, delegationCheckpoint, syncData } = buildCheckpointData({
+        changesChunkIndex: chunkIndex + 1,
+      });
       if (transactionClient.$transaction) {
         const [createResult] = await transactionClient.$transaction([
           delegationClient.stakeDelegationChange.createMany({
             data: changeData,
             skipDuplicates: true,
           }),
+          delegationClient.delegationSyncCheckpoint.update({
+            where: { id: "default" },
+            data: delegationCheckpoint,
+          }),
           syncStatusClient.syncStatus.update({
             where: { jobName: DREP_DELEGATION_PHASE3_JOB_NAME },
-            data: checkpointData,
+            data: syncData,
           }),
         ]);
         phase3ChangeRowsInserted += batchPayloadCount(createResult);
@@ -1626,11 +1925,20 @@ export async function syncDrepDelegationChanges(
         phase3ChangeRowsInserted += batchPayloadCount(createResult);
         await withIngestionDbWrite(
           prisma,
+          "delegation-sync.phase3.checkpoint-after-changes",
+          () =>
+            delegationClient.delegationSyncCheckpoint.update({
+              where: { id: "default" },
+              data: delegationCheckpoint,
+            })
+        );
+        await withIngestionDbWrite(
+          prisma,
           "delegation-sync.phase3.syncStatus.update-after-changes",
           () =>
             syncStatusClient.syncStatus.update({
               where: { jobName: DREP_DELEGATION_PHASE3_JOB_NAME },
-              data: checkpointData,
+              data: syncData,
             })
         );
       }
@@ -1639,6 +1947,12 @@ export async function syncDrepDelegationChanges(
   }
 
   // Clear checkpoint on successful completion
+  await withIngestionDbWrite(prisma, "delegation-sync.phase3.checkpoint-clear", () =>
+    delegationClient.delegationSyncCheckpoint.update({
+      where: { id: "default" },
+      data: { phase3CheckpointJson: null },
+    })
+  );
   await withIngestionDbWrite(prisma, "delegation-sync.phase3.syncStatus.clear-checkpoint", () =>
     syncStatusClient.syncStatus.update({
       where: { jobName: DREP_DELEGATION_PHASE3_JOB_NAME },
@@ -1646,13 +1960,34 @@ export async function syncDrepDelegationChanges(
     })
   );
 
-  // Always refresh DRep delegator_count after a successful reconciliation pass.
-  const refreshResult = await refreshDrepDelegatorCountsFromDelegationState(
-    delegationClient as Prisma.TransactionClient
+  await withIngestionDbWrite(prisma, "delegation-sync.staging.delete-run", () =>
+    delegationClient.stakeDelegationStaging.deleteMany({
+      where: { runId: syncRunId },
+    })
   );
+
+  const touchedDrepIds = new Set<string>();
+  for (const row of toCreate) touchedDrepIds.add(row.drepId);
+  for (const row of toUpdate) touchedDrepIds.add(row.drepId);
+  for (const sa of toClear) {
+    const prev = existingStateMap.get(sa);
+    if (prev?.drepId) touchedDrepIds.add(prev.drepId);
+  }
+  for (const c of changeLogToInsert) {
+    if (c.fromDrepId?.trim()) touchedDrepIds.add(c.fromDrepId);
+    if (c.toDrepId?.trim()) touchedDrepIds.add(c.toDrepId);
+  }
+
+  const refreshResult =
+    touchedDrepIds.size > 0
+      ? await refreshDrepDelegatorCountsForDrepIds(
+          delegationClient as Prisma.TransactionClient,
+          [...touchedDrepIds]
+        )
+      : { updated: 0 };
   if (refreshResult.updated > 0) {
     console.log(
-      `[DRep Delegation Sync] Refreshed delegator_count for ${refreshResult.updated} DRep(s)`
+      `[DRep Delegation Sync] Refreshed delegator_count for ${refreshResult.updated} DRep row(s) (partial)`
     );
   }
 
@@ -1720,4 +2055,11 @@ export async function syncDrepDelegationChanges(
     partialFailures: failed.length,
   });
   return result;
+  } finally {
+    await releaseDelegationWriterLock(prisma).catch((err: unknown) =>
+      console.warn(
+        `[DRep Delegation Sync] delegation writer unlock failed: ${err instanceof Error ? err.message : String(err)}`
+      )
+    );
+  }
 }
