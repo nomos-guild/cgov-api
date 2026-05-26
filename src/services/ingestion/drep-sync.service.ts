@@ -21,7 +21,7 @@ import {
   extractStringField,
   extractBooleanField,
 } from "./sync-utils";
-import { getDrepInfoBatch } from "../drep-lookup";
+import { getDrepInfoBatch, deriveKoiosRegistered } from "../drep-lookup";
 import { processInParallel } from "./parallel";
 import { getBoundedIntEnv } from "./syncLock";
 import { withIngestionDbWrite } from "./dbSession";
@@ -461,7 +461,7 @@ export async function syncAllDrepsInfo(
                 ...(DREP_INFO_WRITE_VOTING_POWER && {
                   votingPower: toBigIntOrNull(info.amount) ?? BigInt(0),
                 }),
-                registered: info.registered ?? undefined,
+                registered: deriveKoiosRegistered(info) ?? undefined,
                 active: info.active ?? undefined,
                 expiresEpoch: info.expires_epoch_no ?? undefined,
                 metaUrl: info.meta_url ?? undefined,

@@ -24,6 +24,22 @@ export interface DrepLookupResult {
 
 const BATCH_SIZE = 10;
 
+// Koios /drep_info occasionally omits `registered` even for DReps that have a
+// current registration. Treat `active && expires_epoch_no` as on-chain proof of
+// registration in that case — both fields are derived from registration certs,
+// so they cannot be set unless one exists. Without this derivation the row gets
+// stored with `registered: null`, which downstream readers (e.g. getDRepVerify)
+// would coerce to `false`.
+export function deriveKoiosRegistered(info: {
+  registered?: boolean | null;
+  active?: boolean | null;
+  expires_epoch_no?: number | null;
+}): boolean | null {
+  if (info.registered != null) return info.registered;
+  if (info.active === true && info.expires_epoch_no != null) return true;
+  return null;
+}
+
 /**
  * Look up DRep core info, preferring the local DB over Koios.
  *
@@ -72,7 +88,7 @@ export async function getDrepInfoBatch(
           fetchedDreps.push({
             drepId: info.drep_id,
             votingPower: toBigIntOrNull(info.amount) ?? BigInt(0),
-            registered: info.registered ?? null,
+            registered: deriveKoiosRegistered(info),
             active: info.active ?? null,
             expiresEpoch: info.expires_epoch_no ?? null,
             metaUrl: info.meta_url ?? null,
@@ -86,7 +102,7 @@ export async function getDrepInfoBatch(
           .map((info) => ({
             drepId: info.drep_id,
             votingPower: toBigIntOrNull(info.amount) ?? BigInt(0),
-            registered: info.registered ?? null,
+            registered: deriveKoiosRegistered(info),
             active: info.active ?? null,
             expiresEpoch: info.expires_epoch_no ?? null,
             metaUrl: info.meta_url ?? null,

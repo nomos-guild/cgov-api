@@ -29,10 +29,18 @@ export const getDRepVerify = async (req: Request, res: Response) => {
     });
 
     if (drep) {
+      // Koios sometimes omits `registered` in /drep_info responses even when the
+      // DRep has a current registration. In that case the column ends up null
+      // and `!!null` would wrongly report "not registered". `active === true`
+      // combined with a populated `expiresEpoch` is on-chain proof of a current
+      // registration (both fields are derived from registration certs).
+      const isRegistered =
+        !!drep.registered || (!!drep.active && drep.expiresEpoch != null);
+
       const response: GetDRepVerifyResponse = {
         drepId,
         exists: true,
-        isRegistered: !!drep.registered,
+        isRegistered,
         isActive: !!drep.active,
         expiresEpoch: drep.expiresEpoch ?? null,
         source: "db",
@@ -46,10 +54,14 @@ export const getDRepVerify = async (req: Request, res: Response) => {
     );
     const fetched = lookupResults[0];
 
+    const isRegistered =
+      !!fetched?.registered ||
+      (!!fetched?.active && fetched?.expiresEpoch != null);
+
     const response: GetDRepVerifyResponse = {
       drepId,
       exists: !!fetched,
-      isRegistered: !!fetched?.registered,
+      isRegistered,
       isActive: !!fetched?.active,
       expiresEpoch: fetched?.expiresEpoch ?? null,
       source: fetched ? "koios" : undefined,
