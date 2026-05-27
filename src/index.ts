@@ -19,6 +19,7 @@ import epochsRouter from "./routes/epochs.route";
 import actionsRouter from "./routes/actions.route";
 import migrationsRouter from "./routes/migrations.route";
 import snapshotRouter from "./routes/snapshot.route";
+import healthzRouter from "./routes/healthz.route";
 import { apiKeyAuth } from "./middleware/auth.middleware";
 import { requestLog } from "./middleware/request-log.middleware";
 import { startAllJobs } from "./jobs";
@@ -61,6 +62,7 @@ if (fs.existsSync(swaggerPath)) {
 }
 
 // Public read-only endpoints intended for browser clients (drep-lens, etc.)
+app.use("/healthz", healthzRouter);
 app.use("/epochs", epochsRouter);
 app.use("/actions", actionsRouter);
 app.use("/migrations", migrationsRouter);

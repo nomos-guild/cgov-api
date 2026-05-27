@@ -117,7 +117,16 @@ export async function getKoiosCurrentEpoch(): Promise<number> {
       source: "ingestion.sync-utils.current-epoch",
     })
     .then((tip) => {
-      const epoch = tip?.[0]?.epoch_no ?? 0;
+      const epoch = tip?.[0]?.epoch_no;
+      // A missing tip is a Koios failure (outage / contract drift), NOT epoch 0.
+      // Disguising it as 0 silently corrupts every caller that gates on the
+      // current epoch (sync windows, isFinal checks, boot recovery). Throw so
+      // the cron tick fails loudly and retries on the next schedule.
+      if (typeof epoch !== "number" || !Number.isFinite(epoch)) {
+        throw new Error(
+          `getKoiosCurrentEpoch: /tip returned no epoch_no (response=${JSON.stringify(tip)})`
+        );
+      }
       cachedKoiosCurrentEpoch = epoch;
       cachedKoiosCurrentEpochExpiresAt =
         Date.now() + KOIOS_CURRENT_EPOCH_CACHE_TTL_MS;

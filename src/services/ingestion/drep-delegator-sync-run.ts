@@ -32,12 +32,7 @@ function sumProcessed(r: SyncDrepDelegationChangesResult): number {
 export async function runDrepDelegatorSyncWithDailyRetry(
   db: PrismaClient
 ): Promise<DrepDelegatorSyncOutcome> {
-  let r1: SyncDrepDelegationChangesResult;
-  try {
-    r1 = await syncDrepDelegationChanges(db);
-  } catch (e) {
-    throw e;
-  }
+  const r1 = await syncDrepDelegationChanges(db);
 
   if (r1.skipped) {
     return { kind: "skipped", result: r1 };
@@ -46,15 +41,9 @@ export async function runDrepDelegatorSyncWithDailyRetry(
   let last = r1;
   let completedSyncCalls = 1;
 
-  const allowSecondPass = r1.failed.length > 0;
-
-  try {
-    if (allowSecondPass) {
-      completedSyncCalls = 2;
-      last = await syncDrepDelegationChanges(db);
-    }
-  } catch (e) {
-    throw e;
+  if (r1.failed.length > 0) {
+    completedSyncCalls = 2;
+    last = await syncDrepDelegationChanges(db);
   }
 
   const finalFullSuccess = last.failed.length === 0;

@@ -11,12 +11,7 @@ import {
   SnapshotVote,
 } from "../../responses";
 import { formatAxiosLikeError } from "../../utils/format-http-client-error";
-
-function parseIntOpt(value: unknown): number | undefined {
-  if (typeof value !== "string" || !value) return undefined;
-  const n = parseInt(value, 10);
-  return Number.isFinite(n) ? n : undefined;
-}
+import { parseIntegerQueryOpt } from "../../utils/query-params";
 
 /**
  * GET /snapshot/full
@@ -29,8 +24,14 @@ function parseIntOpt(value: unknown): number | undefined {
  */
 export const getSnapshotFull = async (req: Request, res: Response) => {
   try {
-    const epochStart = parseIntOpt(req.query.epochStart);
-    const epochEnd = parseIntOpt(req.query.epochEnd);
+    const epochStartR = parseIntegerQueryOpt(req.query.epochStart, "epochStart", { min: 0 });
+    if (!epochStartR.ok) return res.status(epochStartR.status).json(epochStartR);
+    const epochStart = epochStartR.value;
+
+    const epochEndR = parseIntegerQueryOpt(req.query.epochEnd, "epochEnd", { min: 0 });
+    if (!epochEndR.ok) return res.status(epochEndR.status).json(epochEndR);
+    const epochEnd = epochEndR.value;
+
     const includeHistory = req.query.includeHistory === "true";
 
     const [manifestCached, drepsCached] = await Promise.all([

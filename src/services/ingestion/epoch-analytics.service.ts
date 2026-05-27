@@ -128,6 +128,17 @@ export interface StepEpochTotalsResult {
   previousEpochTotals?: SyncEpochTotalsResult;
   currentEpochTotals: SyncEpochTotalsResult;
   skippedPrevious: boolean;
+  /**
+   * Best-effort downstream hooks that ran after the totals sync. Each is
+   * present only when the corresponding hook failed; absent fields mean the
+   * hook either succeeded or was skipped (e.g. snapshot rebuild contention).
+   * Surfaced so monitoring sees partial degradation rather than treating the
+   * step's success status as a green light for everything downstream.
+   */
+  denormRefreshError?: string;
+  snapshotRebuildError?: string;
+  /** True when the snapshot rebuild was skipped due to lock contention (not a failure). */
+  snapshotRebuildSkipped?: boolean;
 }
 
 export interface StepDrepLifecycleResult {
@@ -527,19 +538,26 @@ export async function syncEpochTotalsStep(
     }
   } catch (e) {
     console.error("[drep-denorm] refresh failed", e);
+    result.denormRefreshError = e instanceof Error ? e.message : String(e);
   }
 
   // Snapshot rebuild — best-effort, never fail the totals sync for a snapshot hiccup.
   // Triggers on every successful run (cheap when nothing changed: dreps + current chunk only).
   try {
     const rebuild = await rebuildAfterEpoch(currentEpoch);
-    if (rebuild.finalisedChunk) {
+    if (rebuild.skipped) {
+      result.snapshotRebuildSkipped = true;
+      console.log(
+        "[snapshot-builder] rebuildAfterEpoch skipped this tick — another replica holds the lock"
+      );
+    } else if (rebuild.finalisedChunk) {
       console.log(
         `[snapshot-builder] finalised chunk ${rebuild.finalisedChunk.start}-${rebuild.finalisedChunk.end} (${rebuild.finalisedChunk.byteSize}B); current epoch ${rebuild.currentEpoch}; total ${rebuild.durationMs}ms`
       );
     }
   } catch (e) {
     console.error("[snapshot-builder] rebuildAfterEpoch failed", e);
+    result.snapshotRebuildError = e instanceof Error ? e.message : String(e);
   }
 
   return result;

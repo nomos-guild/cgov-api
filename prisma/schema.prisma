@@ -33,35 +33,35 @@ model CrowdfundingCampaign {
 }
 
 model Drep {
-  drepId         String        @id @map("drep_id")
-  userId         String?       @unique @map("user_id")
-  name           String?
-  paymentAddr    String?       @map("payment_addr")
-  iconUrl        String?       @map("icon_url")
-  doNotList      Boolean?      @map("do_not_list")
-  votingPower           BigInt                 @default(0) @map("voting_power")
-  delegatorCount Int?          @map("delegator_count")
+  drepId                       String                 @id @map("drep_id")
+  userId                       String?                @unique @map("user_id")
+  name                         String?
+  paymentAddr                  String?                @map("payment_addr")
+  iconUrl                      String?                @map("icon_url")
+  doNotList                    Boolean?               @map("do_not_list")
+  votingPower                  BigInt                 @default(0) @map("voting_power")
+  delegatorCount               Int?                   @map("delegator_count")
   // Denormalised — populated by drep-denorm.service after each epoch sync.
   // Read by /dreps LIST + /snapshot/dreps to avoid expensive groupBys at request time.
-  firstSeenEpoch                Int?     @map("first_seen_epoch")
-  proposalParticipationPercent  Float?   @map("proposal_participation_percent")
-  registered            Boolean?               @map("registered")
-  active                Boolean?               @map("active")
-  expiresEpoch          Int?                   @map("expires_epoch")
-  metaUrl               String?                @map("meta_url")
-  metaHash              String?                @map("meta_hash")
+  firstSeenEpoch               Int?                   @map("first_seen_epoch")
+  proposalParticipationPercent Float?                 @map("proposal_participation_percent")
+  registered                   Boolean?               @map("registered")
+  active                       Boolean?               @map("active")
+  expiresEpoch                 Int?                   @map("expires_epoch")
+  metaUrl                      String?                @map("meta_url")
+  metaHash                     String?                @map("meta_hash")
   // CIP-119 metadata fields (from /drep_updates meta_json.body)
-  bio                   String?                @map("bio")
-  motivations           String?                @map("motivations")
-  objectives            String?                @map("objectives")
-  qualifications        String?                @map("qualifications")
-  references            String?                @map("references") // JSON string of references array
-  createdAt             DateTime?              @default(now()) @map("created_at")
-  updatedAt             DateTime?              @map("updated_at")
-  user                  User?                  @relation(fields: [userId], references: [id])
-  onchainVotes          OnchainVote[]
-  stakeDelegationStates StakeDelegationState[]
-  epochSnapshots        DrepEpochSnapshot[]
+  bio                          String?                @map("bio")
+  motivations                  String?                @map("motivations")
+  objectives                   String?                @map("objectives")
+  qualifications               String?                @map("qualifications")
+  references                   String?                @map("references") // JSON string of references array
+  createdAt                    DateTime?              @default(now()) @map("created_at")
+  updatedAt                    DateTime?              @map("updated_at")
+  user                         User?                  @relation(fields: [userId], references: [id])
+  onchainVotes                 OnchainVote[]
+  stakeDelegationStates        StakeDelegationState[]
+  epochSnapshots               DrepEpochSnapshot[]
 
   @@map("drep")
 }
@@ -150,18 +150,22 @@ model StakeDelegationChange {
 }
 
 // Pre-rendered snapshot bodies for /snapshot endpoints.
-// Each row holds one composed JSON payload (gzipped) keyed by cacheKey.
+// Each row holds one composed JSON payload (encoded per `contentEncoding`,
+// currently always "gzip") keyed by cacheKey.
 // Final chunks are immutable — written once when the chunk's last epoch finalises.
 // Manifest + dreps + current chunk are rewritten by snapshotBuilder.rebuildAfterEpoch.
 model SnapshotCache {
-  cacheKey       String   @id @map("cache_key")
-  body           Bytes
-  generatedAt    DateTime @map("generated_at")
-  schemaVersion  String   @map("schema_version")
-  isFinal        Boolean  @default(false) @map("is_final")
-  byteSize       Int      @map("byte_size")
-  etag           String
-  lastAccessedAt DateTime @updatedAt @map("last_accessed_at")
+  cacheKey        String   @id @map("cache_key")
+  bodyGzip        Bytes    @map("body_gzip")
+  /// IANA Content-Encoding token. Currently "gzip" for every row; the column
+  /// exists so a future migration can add e.g. "zstd" without another rename.
+  contentEncoding String   @default("gzip") @map("content_encoding")
+  generatedAt     DateTime @map("generated_at")
+  schemaVersion   String   @map("schema_version")
+  isFinal         Boolean  @default(false) @map("is_final")
+  byteSize        Int      @map("byte_size")
+  etag            String
+  lastAccessedAt  DateTime @updatedAt @map("last_accessed_at")
 
   @@index([lastAccessedAt])
   @@map("snapshot_cache")
@@ -227,15 +231,15 @@ model StakeDelegationStaging {
 // Tracks per-epoch completion state for the governance analytics sync job.
 // This lets the job run frequently but only do heavy work once per epoch.
 model EpochAnalyticsSync {
-  epoch                    Int       @id @map("epoch_no")
-  drepsSyncedAt            DateTime? @map("dreps_synced_at")
-  drepInfoSyncedAt         DateTime? @map("drep_info_synced_at")
-  drepSnapshotSyncedAt     DateTime? @map("drep_snapshot_synced_at")
-  totalsSyncedAt           DateTime? @map("totals_synced_at")
-  drepLifecycleSyncedAt    DateTime? @map("drep_lifecycle_synced_at")
-  poolGroupsSyncedAt       DateTime? @map("pool_groups_synced_at")
-  createdAt                DateTime  @default(now()) @map("created_at")
-  updatedAt                DateTime  @updatedAt @map("updated_at")
+  epoch                 Int       @id @map("epoch_no")
+  drepsSyncedAt         DateTime? @map("dreps_synced_at")
+  drepInfoSyncedAt      DateTime? @map("drep_info_synced_at")
+  drepSnapshotSyncedAt  DateTime? @map("drep_snapshot_synced_at")
+  totalsSyncedAt        DateTime? @map("totals_synced_at")
+  drepLifecycleSyncedAt DateTime? @map("drep_lifecycle_synced_at")
+  poolGroupsSyncedAt    DateTime? @map("pool_groups_synced_at")
+  createdAt             DateTime  @default(now()) @map("created_at")
+  updatedAt             DateTime  @updatedAt @map("updated_at")
 
   @@map("epoch_analytics_sync")
 }
@@ -348,25 +352,25 @@ model PoolGroup {
 }
 
 model OnchainVote {
-  id          String    @id
-  txHash      String    @map("tx_hash")
-  proposalId  String    @map("proposal_id")
-  vote        VoteType?
-  voterType   VoterType @map("voter_type")
-  votingPower BigInt?   @map("voting_power")
-  responseEpoch Int?    @map("response_epoch")
-  anchorUrl   String?   @map("anchor_url")
-  anchorHash  String?   @map("anchor_hash")
-  rationale   String?
+  id                          String    @id
+  txHash                      String    @map("tx_hash")
+  proposalId                  String    @map("proposal_id")
+  vote                        VoteType?
+  voterType                   VoterType @map("voter_type")
+  votingPower                 BigInt?   @map("voting_power")
+  responseEpoch               Int?      @map("response_epoch")
+  anchorUrl                   String?   @map("anchor_url")
+  anchorHash                  String?   @map("anchor_hash")
+  rationale                   String?
   surveyResponse              String?   @map("survey_response")
   surveyResponseSurveyTxId    String?   @map("survey_response_survey_tx_id")
   surveyResponseResponderRole String?   @map("survey_response_responder_role")
-  votedAt     DateTime? @default(now()) @map("voted_at")
-  createdAt   DateTime? @default(now()) @map("created_at")
-  updatedAt   DateTime? @map("updated_at")
-  drepId      String?   @map("drep_id")
-  spoId       String?   @map("spo_id")
-  ccId        String?   @map("cc_id")
+  votedAt                     DateTime? @default(now()) @map("voted_at")
+  createdAt                   DateTime? @default(now()) @map("created_at")
+  updatedAt                   DateTime? @map("updated_at")
+  drepId                      String?   @map("drep_id")
+  spoId                       String?   @map("spo_id")
+  ccId                        String?   @map("cc_id")
 
   cc       CC?      @relation(fields: [ccId], references: [ccId])
   drep     Drep?    @relation(fields: [drepId], references: [drepId])
@@ -524,22 +528,22 @@ model ActivityRecent {
 }
 
 model ActivityHistorical {
-  id                 String   @id @default(cuid())
-  repoId             String   @map("repo_id")
-  date               DateTime @db.Date
-  commitCount        Int      @default(0) @map("commit_count")
-  prOpened           Int      @default(0) @map("pr_opened")
-  prMerged           Int      @default(0) @map("pr_merged")
-  prClosed           Int      @default(0) @map("pr_closed")
-  issuesOpened       Int      @default(0) @map("issues_opened")
-  issuesClosed       Int      @default(0) @map("issues_closed")
-  additions          Int      @default(0)
-  deletions          Int      @default(0)
-  uniqueContributors Int      @default(0) @map("unique_contributors")
-  avgPrMergeHours          Float?   @map("avg_pr_merge_hours")
-  avgIssueResolutionHours  Float?   @map("avg_issue_resolution_hours")
-  releasesPublished        Int      @default(0) @map("releases_published")
-  createdAt          DateTime @default(now()) @map("created_at")
+  id                      String   @id @default(cuid())
+  repoId                  String   @map("repo_id")
+  date                    DateTime @db.Date
+  commitCount             Int      @default(0) @map("commit_count")
+  prOpened                Int      @default(0) @map("pr_opened")
+  prMerged                Int      @default(0) @map("pr_merged")
+  prClosed                Int      @default(0) @map("pr_closed")
+  issuesOpened            Int      @default(0) @map("issues_opened")
+  issuesClosed            Int      @default(0) @map("issues_closed")
+  additions               Int      @default(0)
+  deletions               Int      @default(0)
+  uniqueContributors      Int      @default(0) @map("unique_contributors")
+  avgPrMergeHours         Float?   @map("avg_pr_merge_hours")
+  avgIssueResolutionHours Float?   @map("avg_issue_resolution_hours")
+  releasesPublished       Int      @default(0) @map("releases_published")
+  createdAt               DateTime @default(now()) @map("created_at")
 
   repository GithubRepository @relation(fields: [repoId], references: [id])
 

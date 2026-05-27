@@ -28,11 +28,16 @@ export function requestLog(req: Request, res: Response, next: NextFunction): voi
     const bytesOut = res.getHeader("Content-Length") ?? "?";
     const etag = (res.getHeader("ETag") as string | undefined) ?? null;
     const encoding = res.getHeader("Content-Encoding") ?? "";
-    console.log(
-      `[req] ${req.method} ${req.originalUrl} ${res.statusCode} ${durationMs}ms ${bytesOut}B${
-        encoding ? ` enc=${encoding}` : ""
-      }${etag ? ` etag=${etag}` : ""}`
-    );
+    const message = `[req] ${req.method} ${req.originalUrl} ${res.statusCode} ${durationMs}ms ${bytesOut}B${
+      encoding ? ` enc=${encoding}` : ""
+    }${etag ? ` etag=${etag}` : ""}`;
+    // 5xx responses ride out at error severity so log aggregators can alert
+    // separately from the high-volume 2xx/3xx traffic on the same paths.
+    if (res.statusCode >= 500) {
+      console.error(message);
+    } else {
+      console.log(message);
+    }
   };
   res.on("finish", onFinish);
   res.on("close", onFinish);

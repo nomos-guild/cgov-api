@@ -3,44 +3,82 @@ import { prisma } from "../../services";
 import {
   getMigrationAggregateAccuracy,
 } from "../../services/ingestion/migration-aggregate.service";
-import { GetMigrationsResponse, MigrationRow } from "../../responses";
+import {
+  GetMigrationsResponse,
+  MigrationRow,
+  toAdaString,
+  toLovelaceString,
+} from "../../responses";
 import { formatAxiosLikeError } from "../../utils/format-http-client-error";
+import { parseIntegerQuery } from "../../utils/query-params";
+import { SENTINEL_DREP_IDS } from "../../libs/sentinels";
 
-const ALWAYS_ABSTAIN = "drep_always_abstain";
-const ALWAYS_NO_CONFIDENCE = "drep_always_no_confidence";
-
-function lovelaceToAda(lovelace: bigint): string {
-  return (Number(lovelace) / 1_000_000).toFixed(6);
-}
-
-function parseIntOpt(value: unknown, fallback: number): number {
-  if (typeof value !== "string" || !value) return fallback;
-  const n = parseInt(value, 10);
-  return Number.isFinite(n) ? n : fallback;
-}
+/** Default page size for /migrations. Bounded to keep the response under
+ *  ~1MB even with maximum-cardinality DRep churn per epoch. Operators can
+ *  raise via the `limit` query param up to MIGRATIONS_MAX_LIMIT. */
+const MIGRATIONS_DEFAULT_LIMIT = 500;
+const MIGRATIONS_MAX_LIMIT = 5000;
 
 /**
  * GET /migrations
  *
  * Query params:
- *   epochStart      — inclusive lower bound on delegated epoch (default 0)
- *   epochEnd        — inclusive upper bound (default Number.MAX_SAFE_INTEGER)
- *   fromDrepId      — optional source-DRep filter
- *   toDrepId        — optional target-DRep filter
+ *   epochStart       — inclusive lower bound on delegated epoch (default 0)
+ *   epochEnd         — inclusive upper bound (default = current largest epoch in the aggregate)
+ *   fromDrepId       — optional source-DRep filter
+ *   toDrepId         — optional target-DRep filter
  *   excludeSentinels — drop rows touching drep_always_* (default true)
- *   topNByPower     — optional cap: only return rows whose source AND target
- *                     DReps are among the top-N DReps by current voting_power.
+ *   topNByPower      — optional cap: only return rows whose source AND target
+ *                      DReps are among the top-N DReps by current voting_power.
+ *   limit            — page size (default 500, max 5000)
+ *   offset           — pagination offset (default 0)
  */
 export const getMigrations = async (req: Request, res: Response) => {
   try {
-    const epochStart = parseIntOpt(req.query.epochStart, 0);
     // Postgres INT max — Prisma rejects MAX_SAFE_INTEGER as out-of-range for an Int column.
     const POSTGRES_INT_MAX = 2_147_483_647;
-    const epochEnd = parseIntOpt(req.query.epochEnd, POSTGRES_INT_MAX);
+
+    const epochStartR = parseIntegerQuery(req.query.epochStart, "epochStart", {
+      min: 0,
+      max: POSTGRES_INT_MAX,
+      default: 0,
+    });
+    if (!epochStartR.ok) return res.status(epochStartR.status).json(epochStartR);
+    const epochStart = epochStartR.value;
+
+    const epochEndR = parseIntegerQuery(req.query.epochEnd, "epochEnd", {
+      min: 0,
+      max: POSTGRES_INT_MAX,
+      default: POSTGRES_INT_MAX,
+    });
+    if (!epochEndR.ok) return res.status(epochEndR.status).json(epochEndR);
+    const epochEnd = epochEndR.value;
+
+    const topNR = parseIntegerQuery(req.query.topNByPower, "topNByPower", {
+      min: 0,
+      default: 0,
+    });
+    if (!topNR.ok) return res.status(topNR.status).json(topNR);
+    const topNByPower = topNR.value;
+
+    const limitR = parseIntegerQuery(req.query.limit, "limit", {
+      min: 1,
+      max: MIGRATIONS_MAX_LIMIT,
+      default: MIGRATIONS_DEFAULT_LIMIT,
+    });
+    if (!limitR.ok) return res.status(limitR.status).json(limitR);
+    const limit = limitR.value;
+
+    const offsetR = parseIntegerQuery(req.query.offset, "offset", {
+      min: 0,
+      default: 0,
+    });
+    if (!offsetR.ok) return res.status(offsetR.status).json(offsetR);
+    const offset = offsetR.value;
+
     const fromDrepId = typeof req.query.fromDrepId === "string" ? req.query.fromDrepId : undefined;
     const toDrepId = typeof req.query.toDrepId === "string" ? req.query.toDrepId : undefined;
     const excludeSentinels = req.query.excludeSentinels !== "false";
-    const topNByPower = parseIntOpt(req.query.topNByPower, 0);
 
     let topNDrepIds: string[] | null = null;
     if (topNByPower > 0) {
@@ -56,7 +94,7 @@ export const getMigrations = async (req: Request, res: Response) => {
     const fromDrepIdFilter: Record<string, unknown> = {};
     if (fromDrepId) fromDrepIdFilter.equals = fromDrepId;
     if (excludeSentinels) {
-      fromDrepIdFilter.notIn = [ALWAYS_ABSTAIN, ALWAYS_NO_CONFIDENCE];
+      fromDrepIdFilter.notIn = [...SENTINEL_DREP_IDS];
     }
     if (topNDrepIds) {
       fromDrepIdFilter.in = topNDrepIds;
@@ -65,27 +103,34 @@ export const getMigrations = async (req: Request, res: Response) => {
     const toDrepIdFilter: Record<string, unknown> = {};
     if (toDrepId) toDrepIdFilter.equals = toDrepId;
     if (excludeSentinels) {
-      toDrepIdFilter.notIn = [ALWAYS_ABSTAIN, ALWAYS_NO_CONFIDENCE];
+      toDrepIdFilter.notIn = [...SENTINEL_DREP_IDS];
     }
     if (topNDrepIds) {
       toDrepIdFilter.in = topNDrepIds;
     }
 
-    const rows = await prisma.migrationAggregate.findMany({
-      where: {
-        epoch: { gte: epochStart, lte: epochEnd },
-        ...(Object.keys(fromDrepIdFilter).length ? { fromDrepId: fromDrepIdFilter as any } : {}),
-        ...(Object.keys(toDrepIdFilter).length ? { toDrepId: toDrepIdFilter as any } : {}),
-      },
-      orderBy: [{ epoch: "asc" }, { fromDrepId: "asc" }, { toDrepId: "asc" }],
-    });
+    const where = {
+      epoch: { gte: epochStart, lte: epochEnd },
+      ...(Object.keys(fromDrepIdFilter).length ? { fromDrepId: fromDrepIdFilter as any } : {}),
+      ...(Object.keys(toDrepIdFilter).length ? { toDrepId: toDrepIdFilter as any } : {}),
+    };
+
+    const [rows, total] = await Promise.all([
+      prisma.migrationAggregate.findMany({
+        where,
+        orderBy: [{ epoch: "asc" }, { fromDrepId: "asc" }, { toDrepId: "asc" }],
+        skip: offset,
+        take: limit,
+      }),
+      prisma.migrationAggregate.count({ where }),
+    ]);
 
     const migrations: MigrationRow[] = rows.map((r) => ({
       epoch: r.epoch,
       fromDrepId: r.fromDrepId,
       toDrepId: r.toDrepId,
-      lovelace: r.adaLovelace.toString(),
-      ada: lovelaceToAda(r.adaLovelace),
+      lovelace: toLovelaceString(r.adaLovelace),
+      ada: toAdaString(r.adaLovelace),
       delegators: r.delegators,
     }));
 
@@ -109,12 +154,19 @@ export const getMigrations = async (req: Request, res: Response) => {
         epochStart,
         epochEnd: epochEnd === POSTGRES_INT_MAX ? -1 : epochEnd,
         rowCount: migrations.length,
+        pagination: {
+          limit,
+          offset,
+          total,
+          hasMore: offset + migrations.length < total,
+        },
         accuracy: accuracy.level,
         sourceDistribution: {
           total: accuracy.totalChangeRows,
           koiosHistory: accuracy.rowsWithKoiosHistory,
           currentProxy: accuracy.rowsWithCurrentProxy,
           unknown: accuracy.rowsUnknown,
+          malformed: accuracy.rowsMalformed,
         },
         lastComputedAt: lastComputedAt ? lastComputedAt.toISOString() : null,
       },

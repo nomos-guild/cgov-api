@@ -5,6 +5,7 @@ import {
   getDrepUpdates,
   listDrepVotingPowerHistory,
 } from "../governanceProvider";
+import { SENTINEL_DREP_IDS } from "../../libs/sentinels";
 
 type InactivePowerMode = "active" | "completed";
 
@@ -33,7 +34,7 @@ export const DREP_INACTIVITY_START_EPOCH = 527;
 
 // Special predefined voting options are tracked in voting summaries, but they are
 // not real DRep identities and should never count as inactive DReps.
-const SPECIAL_DREP_IDS = ["drep_always_abstain", "drep_always_no_confidence"];
+const SPECIAL_DREP_IDS: readonly string[] = SENTINEL_DREP_IDS;
 
 const inactivePowerProcessCache = new Map<string, InactivePowerCacheEntry>();
 

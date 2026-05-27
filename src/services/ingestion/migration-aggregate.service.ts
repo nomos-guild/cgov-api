@@ -18,6 +18,10 @@
 import type { PrismaClient } from "@prisma/client";
 import { prisma as defaultPrisma } from "../prisma";
 import { withDbRead, withDbWrite } from "../prisma";
+import {
+  DREP_ALWAYS_ABSTAIN,
+  DREP_ALWAYS_NO_CONFIDENCE,
+} from "../../libs/sentinels";
 
 export interface MigrationAggregateRefreshResult {
   rowsWritten: number;
@@ -32,6 +36,8 @@ export interface MigrationAggregateAccuracy {
   rowsWithKoiosHistory: number;
   rowsWithCurrentProxy: number;
   rowsUnknown: number;
+  /** Rows that hit a Koios parse failure on a previous backfill pass. amount_at_switch is NULL → MigrationAggregate falls back to current proxy until the next pass retries. */
+  rowsMalformed: number;
 }
 
 /**
@@ -113,8 +119,6 @@ export async function getMigrationAggregateAccuracy(
   const POSTGRES_INT_MAX = 2_147_483_647;
   const epochStart = filter.epochStart ?? POSTGRES_INT_MIN;
   const epochEnd = filter.epochEnd ?? POSTGRES_INT_MAX;
-  const ALWAYS_ABSTAIN = "drep_always_abstain";
-  const ALWAYS_NO_CONFIDENCE = "drep_always_no_confidence";
   const excludeSentinels = filter.excludeSentinels !== false;
   const fromFilter = filter.fromDrepId ?? null;
   const toFilter = filter.toDrepId ?? null;
@@ -136,9 +140,9 @@ export async function getMigrationAggregateAccuracy(
   wheres.push(`"delegated_epoch_no" <= $${params.length}`);
 
   if (excludeSentinels) {
-    params.push(ALWAYS_ABSTAIN, ALWAYS_NO_CONFIDENCE);
+    params.push(DREP_ALWAYS_ABSTAIN, DREP_ALWAYS_NO_CONFIDENCE);
     wheres.push(`"from_drep_id" NOT IN ($${params.length - 1}, $${params.length})`);
-    params.push(ALWAYS_ABSTAIN, ALWAYS_NO_CONFIDENCE);
+    params.push(DREP_ALWAYS_ABSTAIN, DREP_ALWAYS_NO_CONFIDENCE);
     wheres.push(`"to_drep_id"   NOT IN ($${params.length - 1}, $${params.length})`);
   }
   if (fromFilter) {
@@ -174,12 +178,14 @@ export async function getMigrationAggregateAccuracy(
   let koios = 0;
   let proxy = 0;
   let unknown = 0;
+  let malformed = 0;
   for (const r of rows) {
     const n = Number(r.n);
     total += n;
     if (r.amount_source === "koios-history") koios += n;
     else if (r.amount_source === "current-proxy") proxy += n;
     else if (r.amount_source === "unknown") unknown += n;
+    else if (r.amount_source === "koios-malformed") malformed += n;
     else proxy += n;
   }
 
@@ -195,6 +201,7 @@ export async function getMigrationAggregateAccuracy(
     rowsWithKoiosHistory: koios,
     rowsWithCurrentProxy: proxy,
     rowsUnknown: unknown,
+    rowsMalformed: malformed,
   };
 }
 

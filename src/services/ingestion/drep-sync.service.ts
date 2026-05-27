@@ -172,8 +172,10 @@ async function fetchDrepMetadata(drepId: string): Promise<DrepMetadata> {
 // Public API
 // ============================================================
 
-/** Built-in vote-delegation targets from Koios `account_info.delegated_drep` (not fetched via /drep_delegators in this job). */
+/** Built-in vote-delegation targets from Koios `account_info.delegated_drep` (not fetched via /drep_delegators in this job). Sourced from the centralised sentinel module. */
 export const CARDANO_ALWAYS_DELEGATION_DREP_IDS = [
+  // Imported indirectly so this module's existing public API stays a const tuple
+  // (callers that destructure expect a specific tuple shape).
   "drep_always_abstain",
   "drep_always_no_confidence",
 ] as const;

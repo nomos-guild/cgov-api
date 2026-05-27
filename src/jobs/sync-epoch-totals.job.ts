@@ -41,6 +41,27 @@ export const startEpochTotalsSyncJob = () =>
         `  Totals (current epoch=${result.currentEpoch}): upserted=${cur.upserted}, circulation=${cur.circulation?.toString() ?? "null"}, treasury=${cur.treasury?.toString() ?? "null"}, delegatedDrepPower=${cur.delegatedDrepPower?.toString() ?? "null"}, totalPoolVotePower=${cur.totalPoolVotePower?.toString() ?? "null"}`
       );
 
-      return { itemsProcessed: result.skippedPrevious ? 1 : 2 };
+      // Surface partial degradation so log aggregators can alert separately
+      // from "step failed entirely". Without these the structured result would
+      // report success even when a downstream hook silently broke.
+      if (result.denormRefreshError) {
+        console.error(
+          `[Epoch Totals] partial: drep-denorm refresh failed — ${result.denormRefreshError}`
+        );
+      }
+      if (result.snapshotRebuildError) {
+        console.error(
+          `[Epoch Totals] partial: snapshot rebuild failed — ${result.snapshotRebuildError}`
+        );
+      }
+      const partialFailure =
+        Boolean(result.denormRefreshError) || Boolean(result.snapshotRebuildError);
+
+      return {
+        itemsProcessed: result.skippedPrevious ? 1 : 2,
+        // Mark the run as "partial" so SyncStatus.lastResult carries the signal
+        // upward to ops dashboards rather than reporting a clean success.
+        lockResult: partialFailure ? ("partial" as const) : undefined,
+      };
     },
   });

@@ -7,6 +7,8 @@ import { prisma } from "../../services";
 import { sendCachedSnapshot } from "./sendCachedSnapshot";
 import { formatAxiosLikeError } from "../../utils/format-http-client-error";
 
+// Strict integer-only — `parseInt("12abc", 10)` returns 12 silently which would
+// let "/snapshot/chunks/12abc-49xyz" pass the chunk-boundary check below.
 const CHUNK_RANGE_RE = /^(\d+)-(\d+)$/;
 
 /**

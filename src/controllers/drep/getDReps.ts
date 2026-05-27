@@ -1,16 +1,15 @@
 import { Request, Response } from "express";
 import { VoterType } from "@prisma/client";
 import { prisma } from "../../services";
-import { GetDRepsResponse, DRepSummary } from "../../responses";
+import {
+  DRepSummary,
+  GetDRepsResponse,
+  toAdaString,
+  toLovelaceString,
+} from "../../responses";
 import { formatAxiosLikeError } from "../../utils/format-http-client-error";
+import { parseIntegerQuery } from "../../utils/query-params";
 
-/**
- * Converts lovelace (BigInt) to ADA string with 6 decimal places
- */
-function lovelaceToAda(lovelace: bigint): string {
-  const ada = Number(lovelace) / 1_000_000;
-  return ada.toFixed(6);
-}
 
 /**
  * GET /dreps
@@ -25,8 +24,21 @@ function lovelaceToAda(lovelace: bigint): string {
  */
 export const getDReps = async (req: Request, res: Response) => {
   try {
-    const page = Math.max(1, parseInt(req.query.page as string) || 1);
-    const pageSize = Math.min(1000, Math.max(1, parseInt(req.query.pageSize as string) || 20));
+    const pageR = parseIntegerQuery(req.query.page, "page", {
+      min: 1,
+      default: 1,
+    });
+    if (!pageR.ok) return res.status(pageR.status).json(pageR);
+    const page = pageR.value;
+
+    const pageSizeR = parseIntegerQuery(req.query.pageSize, "pageSize", {
+      min: 1,
+      max: 1000,
+      default: 20,
+    });
+    if (!pageSizeR.ok) return res.status(pageSizeR.status).json(pageSizeR);
+    const pageSize = pageSizeR.value;
+
     const sortBy = (req.query.sortBy as string) || "votingPower";
     const sortOrder = (req.query.sortOrder as string) === "asc" ? "asc" : "desc";
     const search = (req.query.search as string) || "";
@@ -150,8 +162,8 @@ export const getDReps = async (req: Request, res: Response) => {
       drepId: drep.drepId,
       name: drep.name,
       iconUrl: drep.iconUrl,
-      votingPower: drep.votingPower.toString(),
-      votingPowerAda: lovelaceToAda(drep.votingPower),
+      votingPower: toLovelaceString(drep.votingPower),
+      votingPowerAda: toAdaString(drep.votingPower),
       totalVotesCast: voteCountMap.get(drep.drepId) || 0,
       delegatorCount: drep.delegatorCount,
       firstSeenEpoch:

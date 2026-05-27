@@ -1,6 +1,12 @@
 /**
- * DRep Dashboard Response Types
+ * DRep Dashboard Response Types.
+ *
+ * Convention: this set of authenticated endpoints serialises lovelace as
+ * `LovelaceString` (precision-preserving) and ADA as `AdaString` (6dp string).
+ * See ./lovelace.ts for the project-wide rationale.
  */
+
+import type { LovelaceString, AdaString } from "./lovelace";
 
 /**
  * DRep summary for listing
@@ -9,10 +15,8 @@ export interface DRepSummary {
   drepId: string;
   name: string | null;
   iconUrl: string | null;
-  /** Voting power in lovelace (as string for BigInt serialization) */
-  votingPower: string;
-  /** Voting power in ADA (converted from lovelace) */
-  votingPowerAda: string;
+  votingPower: LovelaceString;
+  votingPowerAda: AdaString;
   /** Total number of votes cast by this DRep */
   totalVotesCast: number;
   /** Number of delegators to this DRep */

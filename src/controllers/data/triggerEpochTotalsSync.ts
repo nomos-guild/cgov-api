@@ -36,14 +36,34 @@ export const postTriggerEpochTotalsSync = async (
       try {
         const result = await syncEpochTotalsStep(prisma);
 
+        // Mirror the cron path: a downstream best-effort hook failure (denorm
+        // refresh, snapshot rebuild) should propagate to SyncStatus.lastResult
+        // as "partial" so monitoring can distinguish a green run from one that
+        // missed an invalidation.
+        const partialFailure =
+          Boolean(result.denormRefreshError)
+          || Boolean(result.snapshotRebuildError);
+        const partialError = [
+          result.denormRefreshError && `denorm: ${result.denormRefreshError}`,
+          result.snapshotRebuildError
+            && `snapshot-rebuild: ${result.snapshotRebuildError}`,
+        ]
+          .filter(Boolean)
+          .join("; ");
+
         await releaseJobLock(
           JOB_NAME,
-          "success",
-          result.skippedPrevious ? 1 : 2
+          partialFailure ? "partial" : "success",
+          result.skippedPrevious ? 1 : 2,
+          partialFailure ? partialError : null
         );
 
-        console.log("[Epoch Totals Sync] Completed successfully:", {
-          currentEpoch: result.currentEpoch, epochToSync: result.epochToSync, skippedPrevious: result.skippedPrevious,
+        console.log("[Epoch Totals Sync] Completed:", {
+          currentEpoch: result.currentEpoch,
+          epochToSync: result.epochToSync,
+          skippedPrevious: result.skippedPrevious,
+          denormRefreshError: result.denormRefreshError ?? null,
+          snapshotRebuildError: result.snapshotRebuildError ?? null,
         });
       } catch (error) {
         console.error("[Epoch Totals Sync] Async processing error:", formatAxiosLikeError(error));

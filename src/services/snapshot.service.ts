@@ -21,6 +21,7 @@ import { prisma } from "./prisma";
 import { cacheGet, cacheSet, cacheInvalidatePrefix } from "./cache";
 import { governanceTypeLabelMap } from "../libs/proposalMapper";
 import {
+  chunkFinality,
   SnapshotChunk,
   SnapshotChunkAction,
   SnapshotChunkMigration,
@@ -29,7 +30,10 @@ import {
   SnapshotManifest,
   SnapshotManifestChunk,
   SnapshotVote,
+  toAda,
+  toKada,
 } from "../responses";
+import { SENTINEL_DREP_IDS } from "../libs/sentinels";
 
 export const SNAPSHOT_SCHEMA_VERSION = "v1" as const;
 export const SNAPSHOT_CHUNK_SIZE = 50;
@@ -50,13 +54,11 @@ async function singleFlight<T>(key: string, loader: () => Promise<T>): Promise<T
   return promise;
 }
 
-function lovelaceToKada(lovelace: bigint): number {
-  return Number(lovelace) / 1_000_000_000;
-}
-
-function lovelaceToAda(lovelace: bigint): number {
-  return Number(lovelace) / 1_000_000;
-}
+// Wire-format converters re-export the branded helpers from responses/lovelace.ts
+// so the conversion happens at exactly one boundary and types stay tight on the
+// composer side. These thin wrappers exist to keep the call sites short.
+const lovelaceToKada = toKada;
+const lovelaceToAda = toAda;
 
 function slugifyForHandle(name: string | null | undefined): string {
   if (!name) return "";
@@ -79,6 +81,17 @@ function lowercaseVote(vote: string | null | undefined): SnapshotVote | null {
   const v = vote.toLowerCase();
   if (v === "yes" || v === "no" || v === "abstain") return v;
   return null;
+}
+
+/**
+ * Round a fraction to 4 decimal places. Matches the precision the denorm
+ * path delivers (drep-denorm.service stores percent rounded to 2 decimals;
+ * dividing by 100 yields a fraction with 4 decimals). Both the denorm and
+ * fallback recompute paths must round identically so the same DRep returns
+ * a stable `participation` regardless of which path serves it.
+ */
+function roundParticipation(fraction: number): number {
+  return Math.round(fraction * 10_000) / 10_000;
 }
 
 function chunkStartFor(epoch: number): number {
@@ -168,7 +181,12 @@ export async function composeDreps(opts: {
     }
     for (const id of drepIds) {
       const distinctVoted = distinctProposalsMap.get(id) ?? 0;
-      participationMap.set(id, totalProposals > 0 ? distinctVoted / totalProposals : 0);
+      participationMap.set(
+        id,
+        totalProposals > 0
+          ? roundParticipation(distinctVoted / totalProposals)
+          : 0
+      );
     }
   }
 
@@ -185,7 +203,7 @@ export async function composeDreps(opts: {
       })
     : [];
 
-  const historyByDrep = new Map<string, Array<{ epoch: number; power: number; delegators: number }>>();
+  const historyByDrep = new Map<string, Array<{ epoch: number; power: ReturnType<typeof toKada>; delegators: number }>>();
   for (const r of historyRows) {
     let arr = historyByDrep.get(r.drepId);
     if (!arr) {
@@ -201,10 +219,13 @@ export async function composeDreps(opts: {
 
   const DREPS: SnapshotDrep[] = drepRows.map((d) => {
     const denormParticipation = d.proposalParticipationPercent;
-    // The denorm column stores percent (0..100); the wire shape is fraction (0..1).
+    // The denorm column stores percent (0..100, 2-decimal precision via SQL ROUND);
+    // dividing by 100 yields a fraction with 4 decimals. Pass through roundParticipation
+    // anyway so floating-point noise from the divide-by-100 doesn't smuggle in an
+    // extra decimal.
     const participation =
       denormParticipation != null
-        ? denormParticipation / 100
+        ? roundParticipation(denormParticipation / 100)
         : participationMap.get(d.drepId) ?? 0;
     const joined = d.firstSeenEpoch ?? firstSeenEpochMap.get(d.drepId) ?? 0;
 
@@ -277,15 +298,19 @@ export async function composeChunk(startEpoch: number): Promise<SnapshotChunk> {
     prisma.migrationAggregate.findMany({
       where: {
         epoch: { gte: chunkStart, lte: chunkEnd },
-        fromDrepId: { notIn: ["drep_always_abstain", "drep_always_no_confidence"] },
-        toDrepId: { notIn: ["drep_always_abstain", "drep_always_no_confidence"] },
+        fromDrepId: { notIn: [...SENTINEL_DREP_IDS] },
+        toDrepId: { notIn: [...SENTINEL_DREP_IDS] },
       },
       orderBy: [{ epoch: "asc" }, { fromDrepId: "asc" }, { toDrepId: "asc" }],
     }),
     readCurrentEpoch(),
-    // Stability check: are ALL changelog rows in this chunk's epoch range
-    // backfilled with amount_at_switch from /account_history? If yes, the
+    // Stability check: are ALL non-sentinel changelog rows in this chunk's epoch
+    // range backfilled with amount_at_switch from /account_history? If yes, the
     // chunk's MIGRATIONS values will never change → safe to serve as immutable.
+    // Sentinels (drep_always_*) are filtered out of the chunk MIGRATIONS payload
+    // (lines 280-282) so they must also be filtered here, otherwise an unbackfilled
+    // sentinel row would pin isStable=false forever despite never appearing in the
+    // payload.
     prisma.$queryRaw<Array<{ unstable: bigint }>>`
       SELECT COUNT(*)::bigint AS unstable
       FROM "stake_delegation_change"
@@ -294,11 +319,13 @@ export async function composeChunk(startEpoch: number): Promise<SnapshotChunk> {
         AND "from_drep_id" <> ''
         AND "to_drep_id"   <> ''
         AND "from_drep_id" <> "to_drep_id"
-        AND "amount_source" IS NULL
-        -- 'unknown' rows are stable: Koios /account_history confirmed no active_stake at
-        -- that epoch start. /account_history responses don't change retroactively, so the
-        -- 0-lovelace contribution is permanent. Only rows still awaiting backfill (NULL)
-        -- block isStable=true.
+        AND "from_drep_id" NOT IN ('drep_always_abstain', 'drep_always_no_confidence')
+        AND "to_drep_id"   NOT IN ('drep_always_abstain', 'drep_always_no_confidence')
+        AND "amount_at_switch" IS NULL
+        -- Stability is keyed off amount_at_switch, not amount_source: 'unknown'
+        -- rows are stable (Koios confirmed zero active_stake; deterministic),
+        -- 'koios-malformed' rows are NOT (amountAtSwitch=NULL until an operator
+        -- clears the tag and re-runs the backfill).
     `,
     // Delegation full-scan watermark: until the first full inventory pass
     // completes, the changelog itself may be missing historical rows for
@@ -309,14 +336,17 @@ export async function composeChunk(startEpoch: number): Promise<SnapshotChunk> {
     }),
   ]);
 
-  const isFinal = chunkEnd < currentEpoch;
-  const allAmountsHistorical = Number(amountStability[0]?.unstable ?? 0) === 0;
-  const fullScanCompleted = !!delegationWatermark?.lastFullAllDrepsScanAt;
   // isStable requires BOTH: every existing row has historical amount AND the
   // changelog itself has been fully scanned at least once. Without the second
   // condition, sync-drep-delegators can still append historical rows after a
-  // chunk has already been served as immutable.
-  const isStable = isFinal && allAmountsHistorical && fullScanCompleted;
+  // chunk has already been served as immutable. The `chunkFinality()` helper
+  // collapses these signals into a discriminated union so the illegal
+  // `{isFinal:false, isStable:true}` cannot be constructed.
+  const finality = chunkFinality({
+    isFinal: chunkEnd < currentEpoch,
+    allAmountsHistorical: Number(amountStability[0]?.unstable ?? 0) === 0,
+    fullScanCompleted: !!delegationWatermark?.lastFullAllDrepsScanAt,
+  });
 
   const ACTIONS: SnapshotChunkAction[] = proposals.map((p) => ({
     id: p.proposalId,
@@ -357,11 +387,10 @@ export async function composeChunk(startEpoch: number): Promise<SnapshotChunk> {
     generatedAt: new Date().toISOString(),
     epochStart: chunkStart,
     epochEnd: chunkEnd,
-    isFinal,
-    isStable,
     ACTIONS,
     votes,
     MIGRATIONS,
+    ...finality,
   };
 }
 
@@ -409,8 +438,8 @@ export async function composeManifest(opts?: {
     _count: { _all: true },
     where: {
       epoch: { gte: firstChunkStart, lte: lastChunkStart + SNAPSHOT_CHUNK_SIZE - 1 },
-      fromDrepId: { notIn: ["drep_always_abstain", "drep_always_no_confidence"] },
-      toDrepId: { notIn: ["drep_always_abstain", "drep_always_no_confidence"] },
+      fromDrepId: { notIn: [...SENTINEL_DREP_IDS] },
+      toDrepId: { notIn: [...SENTINEL_DREP_IDS] },
     },
   });
 
@@ -453,11 +482,13 @@ export async function composeManifest(opts?: {
         AND "from_drep_id" <> ''
         AND "to_drep_id"   <> ''
         AND "from_drep_id" <> "to_drep_id"
-        AND "amount_source" IS NULL
-        -- 'unknown' rows are stable: Koios /account_history confirmed no active_stake at
-        -- that epoch start. /account_history responses don't change retroactively, so the
-        -- 0-lovelace contribution is permanent. Only rows still awaiting backfill (NULL)
-        -- block isStable=true.
+        AND "from_drep_id" NOT IN ('drep_always_abstain', 'drep_always_no_confidence')
+        AND "to_drep_id"   NOT IN ('drep_always_abstain', 'drep_always_no_confidence')
+        AND "amount_at_switch" IS NULL
+        -- See composeChunk above: stability is keyed off amount_at_switch so
+        -- 'koios-malformed' (NULL value, retry pending) blocks isStable while
+        -- 'unknown' (zero confirmed by Koios) does not. Sentinels are excluded to
+        -- match the chunk MIGRATIONS payload — see migrationCountsByEpoch above.
       GROUP BY "delegated_epoch_no"
     `;
   const unstableCountByEpoch = new Map<number, number>();
@@ -485,16 +516,19 @@ export async function composeManifest(opts?: {
       migrationCount += migByEpoch.get(ep) ?? 0;
       unstableInChunk += unstableCountByEpoch.get(ep) ?? 0;
     }
-    const isFinal = e < currentEpoch;
+    const finality = chunkFinality({
+      isFinal: e < currentEpoch,
+      allAmountsHistorical: unstableInChunk === 0,
+      fullScanCompleted,
+    });
     chunks.push({
       startEpoch: s,
       endEpoch: e,
       url: `/snapshot/chunks/${s}-${e}`,
-      isFinal,
-      isStable: isFinal && unstableInChunk === 0 && fullScanCompleted,
       actionCount,
       voteCount,
       migrationCount,
+      ...finality,
     });
   }
 
@@ -532,6 +566,7 @@ async function readCachedRow(cacheKey: string): Promise<{
   generatedAt: Date;
   isFinal: boolean;
   byteSize: number;
+  contentEncoding: string;
 } | null> {
   const row = await prisma.snapshotCache.findUnique({ where: { cacheKey } });
   if (!row) return null;
@@ -543,11 +578,12 @@ async function readCachedRow(cacheKey: string): Promise<{
     })
     .catch(() => undefined);
   return {
-    body: Buffer.from(row.body),
+    body: Buffer.from(row.bodyGzip),
     etag: row.etag,
     generatedAt: row.generatedAt,
     isFinal: row.isFinal,
     byteSize: row.byteSize,
+    contentEncoding: row.contentEncoding,
   };
 }
 
@@ -563,7 +599,8 @@ export async function writeCachedSnapshot(
   await prisma.snapshotCache.upsert({
     where: { cacheKey },
     update: {
-      body: gzippedBody,
+      bodyGzip: gzippedBody,
+      contentEncoding: "gzip",
       generatedAt,
       schemaVersion: SNAPSHOT_SCHEMA_VERSION,
       isFinal: opts.isFinal,
@@ -572,7 +609,8 @@ export async function writeCachedSnapshot(
     },
     create: {
       cacheKey,
-      body: gzippedBody,
+      bodyGzip: gzippedBody,
+      contentEncoding: "gzip",
       generatedAt,
       schemaVersion: SNAPSHOT_SCHEMA_VERSION,
       isFinal: opts.isFinal,
@@ -607,17 +645,38 @@ async function readOrCompose<T>(
     // means the row was written before the epoch boundary and serving it as
     // final would lock in a partial mutable payload.
     if (dbHit && dbHit.isFinal === isFinal) {
-      const data = JSON.parse(gunzipSync(dbHit.body).toString("utf-8")) as T;
-      const cached: CachedSnapshot<T> = {
-        data,
-        etag: dbHit.etag,
-        generatedAt: dbHit.generatedAt,
-        isFinal: dbHit.isFinal,
-        byteSize: dbHit.byteSize,
-        gzippedBody: dbHit.body,
-      };
-      cacheSet(cacheKey, cached, isFinal ? CACHE_TTL_FINAL_MS : CACHE_TTL_FRESH_MS);
-      return cached;
+      try {
+        const data = JSON.parse(gunzipSync(dbHit.body).toString("utf-8")) as T;
+        const cached: CachedSnapshot<T> = {
+          data,
+          etag: dbHit.etag,
+          generatedAt: dbHit.generatedAt,
+          isFinal: dbHit.isFinal,
+          byteSize: dbHit.byteSize,
+          gzippedBody: dbHit.body,
+        };
+        cacheSet(cacheKey, cached, isFinal ? CACHE_TTL_FINAL_MS : CACHE_TTL_FRESH_MS);
+        return cached;
+      } catch (e) {
+        // Self-heal a poisoned L2 row: corrupted gzip / non-JSON body would
+        // otherwise 500 every reader for this key forever. Conditional-delete
+        // by etag so we don't wipe a fresh row that another instance just
+        // wrote between our read and our delete; if the row was already
+        // replaced, deleteMany matches zero rows and we proceed to recompose
+        // (an extra recompose is harmless idempotent work).
+        console.error(
+          `[snapshot.service] L2 cache poison for ${cacheKey} — dropping row and recomposing`,
+          e
+        );
+        await prisma.snapshotCache
+          .deleteMany({ where: { cacheKey, etag: dbHit.etag } })
+          .catch((delErr) => {
+            console.error(
+              `[snapshot.service] failed to evict poisoned L2 row ${cacheKey}`,
+              delErr
+            );
+          });
+      }
     }
   }
 

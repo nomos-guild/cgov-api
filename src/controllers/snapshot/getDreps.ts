@@ -2,21 +2,17 @@ import { Request, Response } from "express";
 import { snapshotService } from "../../services/snapshot.service";
 import { sendCachedSnapshot } from "./sendCachedSnapshot";
 import { formatAxiosLikeError } from "../../utils/format-http-client-error";
-
-function parseIntOpt(value: unknown): number | undefined {
-  if (typeof value !== "string" || !value) return undefined;
-  const n = parseInt(value, 10);
-  return Number.isFinite(n) ? n : undefined;
-}
+import { parseIntegerQueryOpt } from "../../utils/query-params";
 
 /**
  * GET /snapshot/dreps
  */
 export const getSnapshotDreps = async (req: Request, res: Response) => {
   try {
-    const topN = parseIntOpt(req.query.topN);
+    const topNR = parseIntegerQueryOpt(req.query.topN, "topN", { min: 1, max: 10_000 });
+    if (!topNR.ok) return res.status(topNR.status).json(topNR);
     const includeHistory = req.query.includeHistory === "true";
-    const cached = await snapshotService.getDreps({ topN, includeHistory });
+    const cached = await snapshotService.getDreps({ topN: topNR.value, includeHistory });
     sendCachedSnapshot(req, res, cached);
   } catch (error) {
     console.error("Error fetching snapshot dreps", formatAxiosLikeError(error));

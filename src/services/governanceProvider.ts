@@ -308,38 +308,76 @@ export async function getProposalVotingSummary(
   return summaries?.[0] ?? null;
 }
 
+/**
+ * PostgREST/Koios returns 400 when an endpoint doesn't accept a particular
+ * filter shape — the legitimate case `getEpochScopedFirstRow` is built to
+ * fall back from. Anything else (5xx, network/timeout, parse) is a real
+ * failure and must propagate so callers don't treat it as "no data".
+ */
+function isPostgrestFilterRejection(error: unknown): boolean {
+  const status = (error as { response?: { status?: number } })?.response?.status;
+  return status === 400;
+}
+
 async function getEpochScopedFirstRow<T extends { epoch_no: number }>(
   endpoint: string,
   epochNo: number,
   options?: GovernanceProviderOptions
 ): Promise<T | null> {
-  const attempts: Array<() => Promise<T[]>> = [
-    () =>
-      koiosGet<T[]>(
-        endpoint,
-        { _epoch_no: epochNo },
-        toKoiosContext(options)
-      ),
-    () =>
-      koiosGet<T[]>(
-        endpoint,
-        { epoch_no: `eq.${epochNo}` },
-        toKoiosContext(options)
-      ),
+  const attempts: Array<{ label: string; fn: () => Promise<T[]> }> = [
+    {
+      label: "_epoch_no",
+      fn: () =>
+        koiosGet<T[]>(
+          endpoint,
+          { _epoch_no: epochNo },
+          toKoiosContext(options)
+        ),
+    },
+    {
+      label: "epoch_no=eq.",
+      fn: () =>
+        koiosGet<T[]>(
+          endpoint,
+          { epoch_no: `eq.${epochNo}` },
+          toKoiosContext(options)
+        ),
+    },
   ];
 
+  let rejected = false;
   for (const attempt of attempts) {
     try {
-      const rows = await attempt();
+      const rows = await attempt.fn();
       const row = rows?.find((entry) => entry?.epoch_no === epochNo) ?? rows?.[0];
       if (row?.epoch_no === epochNo) {
         return row;
       }
-    } catch {
-      // Try the next filtering style when Koios rejects one form.
+      // Endpoint accepted the filter shape but returned no matching row.
+      // Treat as legitimate "no data" without trying the alternate shape.
+      return null;
+    } catch (e) {
+      if (isPostgrestFilterRejection(e)) {
+        rejected = true;
+        console.warn(
+          `[governanceProvider] ${endpoint} rejected filter style "${attempt.label}" — trying next form`
+        );
+        continue;
+      }
+      // Real failure (5xx, timeout, network, parse): propagate so the caller
+      // doesn't silently persist NULL fields as if Koios said "no data".
+      throw e;
     }
   }
 
+  // Both shapes were rejected by PostgREST — surface that distinctly so the
+  // operator notices the endpoint contract has shifted, rather than silently
+  // returning null forever.
+  if (rejected) {
+    throw new Error(
+      `getEpochScopedFirstRow: all filter shapes rejected by ${endpoint} for epoch ${epochNo}`
+    );
+  }
   return null;
 }
 
@@ -644,7 +682,16 @@ export async function getCurrentEpochFromKoios(
   options?: GovernanceProviderOptions
 ): Promise<number> {
   const tip = await koiosGet<KoiosTip[]>("/tip", undefined, toKoiosContext(options));
-  return tip?.[0]?.epoch_no ?? 0;
+  // A missing tip is a Koios failure (outage / contract drift), NOT epoch 0.
+  // Throw rather than disguise an outage as a fresh chain — `bootRecover` and
+  // similar callers gate on `currentEpoch === 0` and would silently no-op.
+  const epochNo = tip?.[0]?.epoch_no;
+  if (typeof epochNo !== "number" || !Number.isFinite(epochNo)) {
+    throw new Error(
+      `getCurrentEpochFromKoios: /tip returned no epoch_no (response=${JSON.stringify(tip)})`
+    );
+  }
+  return epochNo;
 }
 
 function buildAccountInfoRequestBody(

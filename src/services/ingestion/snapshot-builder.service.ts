@@ -25,6 +25,30 @@ import {
 import { refreshDrepDenormColumnsWithResilience } from "./drep-denorm.service";
 import { backfillAmountAtSwitch } from "./migration-amount-backfill.service";
 import { refreshMigrationAggregateWithResilience } from "./migration-aggregate.service";
+import {
+  acquireJobLock,
+  releaseJobLock,
+  type JobLockReleaseResult,
+} from "./syncLock";
+
+const SNAPSHOT_REBUILD_JOB_NAME = "snapshot-rebuild";
+/**
+ * Lock TTL for snapshot rebuild. Headroom for the worst case: the cron path
+ * runs `backfillAmountAtSwitch` with up to 200 candidate rows, and each row
+ * can fan out to a Koios `/account_history` call subject to the in-process
+ * pressure limiter + retry/backoff on 503/timeout. Allow up to ~30 min before
+ * an apparently-stuck lease is considered expired (which permits another
+ * replica to take over after a crash). Tune via env if a deployment routinely
+ * exceeds this.
+ */
+const SNAPSHOT_REBUILD_LOCK_TTL_MS = (() => {
+  const raw = process.env.SNAPSHOT_REBUILD_LOCK_TTL_MS;
+  const parsed = raw ? Number.parseInt(raw, 10) : NaN;
+  if (Number.isFinite(parsed) && parsed >= 60_000 && parsed <= 60 * 60 * 1000) {
+    return parsed;
+  }
+  return 30 * 60 * 1000;
+})();
 
 export interface SnapshotRebuildResult {
   durationMs: number;
@@ -33,6 +57,12 @@ export interface SnapshotRebuildResult {
   manifestByteSize: number;
   finalisedChunk: { start: number; end: number; byteSize: number } | null;
   currentEpoch: number;
+  /**
+   * True when another replica/process held the snapshot-rebuild lock and
+   * this call returned without doing work. Callers should treat the other
+   * fields as zero/null in this case.
+   */
+  skipped: boolean;
 }
 
 async function readCurrentEpoch(): Promise<number> {
@@ -43,8 +73,58 @@ async function readCurrentEpoch(): Promise<number> {
 export async function rebuildAfterEpoch(
   epochNo?: number
 ): Promise<SnapshotRebuildResult> {
-  const startedAt = Date.now();
+  // Resolve the epoch BEFORE acquiring any lock. If readCurrentEpoch() throws
+  // (e.g. DB outage), we propagate without leaving an unreleased lock behind.
   const currentEpoch = epochNo ?? (await readCurrentEpoch());
+
+  // Distributed lock: prevents two replicas (or the boot path racing the cron
+  // tick) from simultaneously running denorm refresh + amount backfill +
+  // recompose. Without this, an N-replica scale-up means N parallel Koios
+  // floods (~200 calls each from backfillAmountAtSwitch). The acquireJobLock
+  // helper expires stale locks via TTL so a crashed replica can't pin work.
+  const acquired = await acquireJobLock(
+    SNAPSHOT_REBUILD_JOB_NAME,
+    "Snapshot Rebuild",
+    {
+      ttlMs: SNAPSHOT_REBUILD_LOCK_TTL_MS,
+      source: process.env.HOSTNAME ?? "snapshot-builder",
+    }
+  );
+
+  if (!acquired) {
+    console.log(
+      "[snapshot-builder] rebuildAfterEpoch skipped — another replica holds the snapshot-rebuild lock"
+    );
+    return {
+      durationMs: 0,
+      drepsByteSize: 0,
+      chunkByteSize: 0,
+      manifestByteSize: 0,
+      finalisedChunk: null,
+      currentEpoch,
+      skipped: true,
+    };
+  }
+
+  let releaseResult: JobLockReleaseResult = "success";
+  let releaseError: string | null = null;
+  try {
+    return await runRebuild(currentEpoch);
+  } catch (e) {
+    releaseResult = "failed";
+    releaseError = e instanceof Error ? e.message : String(e);
+    throw e;
+  } finally {
+    try {
+      await releaseJobLock(SNAPSHOT_REBUILD_JOB_NAME, releaseResult, undefined, releaseError);
+    } catch (lockErr) {
+      console.error("[snapshot-builder] failed to release snapshot-rebuild lock", lockErr);
+    }
+  }
+}
+
+async function runRebuild(currentEpoch: number): Promise<SnapshotRebuildResult> {
+  const startedAt = Date.now();
 
   const currentChunkStart =
     Math.floor(currentEpoch / SNAPSHOT_CHUNK_SIZE) * SNAPSHOT_CHUNK_SIZE;
@@ -74,10 +154,14 @@ export async function rebuildAfterEpoch(
       });
       if (result.rowsScanned > 0) {
         console.log(
-          `[migration-amount-backfill] scanned=${result.rowsScanned} updated=${result.rowsUpdated} unknown=${result.rowsUnknown} epochs=${result.epochsProcessed} in ${result.durationMs}ms`
+          `[migration-amount-backfill] scanned=${result.rowsScanned} updated=${result.rowsUpdated} unknown=${result.rowsUnknown} malformed=${result.rowsMalformed} epochs=${result.epochsProcessed} in ${result.durationMs}ms`
         );
-        backfillTouchedRows = result.rowsScanned;
-        if (result.epochSpan) backfillMinEpoch = result.epochSpan.min;
+        // Re-aggregation only matters when amount_at_switch actually changed.
+        // Malformed rows leave amountAtSwitch=NULL → MigrationAggregate's COALESCE
+        // already handles them via the current-state proxy, so re-aggregating on
+        // a malformed-only pass is wasted work.
+        backfillTouchedRows = result.rowsUpdated + result.rowsUnknown;
+        if (result.epochSpan && backfillTouchedRows > 0) backfillMinEpoch = result.epochSpan.min;
       }
     } catch (e) {
       console.error("[migration-amount-backfill] tick failed (continuing)", e);
@@ -189,7 +273,51 @@ export async function rebuildAfterEpoch(
     manifestByteSize: manifestWritten.byteSize,
     finalisedChunk,
     currentEpoch,
+    skipped: false,
   };
+}
+
+/**
+ * Boot recovery state — exposed via `getSnapshotBootRecoveryStatus()` so
+ * deployments / readiness probes can detect a sustained Koios failure that
+ * would otherwise leave the API silently empty until the next epoch tick.
+ *
+ * State machine:
+ *   not-started → running → ok        (artifacts present and fresh, or rebuild succeeded)
+ *                       → skipped     (DB had no epoch data yet, or another replica was rebuilding)
+ *                       → fresh       (manifest+dreps already present and < 1h old)
+ *                       → failed      (boot recover threw — readiness probes should mark NOT READY)
+ */
+export type SnapshotBootRecoveryState =
+  | "not-started"
+  | "running"
+  | "ok"
+  | "skipped"
+  | "fresh"
+  | "failed";
+
+export interface SnapshotBootRecoveryStatus {
+  state: SnapshotBootRecoveryState;
+  startedAt: string | null;
+  finishedAt: string | null;
+  durationMs: number | null;
+  /** Last error message if state==="failed". */
+  errorMessage: string | null;
+  /** Whether L2 manifest+dreps are present and within the staleness threshold at the time of this read. */
+  l2Fresh: boolean | null;
+}
+
+let bootRecoveryStatus: SnapshotBootRecoveryStatus = {
+  state: "not-started",
+  startedAt: null,
+  finishedAt: null,
+  durationMs: null,
+  errorMessage: null,
+  l2Fresh: null,
+};
+
+export function getSnapshotBootRecoveryStatus(): SnapshotBootRecoveryStatus {
+  return { ...bootRecoveryStatus };
 }
 
 /**
@@ -198,10 +326,36 @@ export async function rebuildAfterEpoch(
  * one-shot rebuild. Runs in background; never blocks startup.
  */
 export async function bootRecover(): Promise<void> {
+  const startedAt = new Date();
+  bootRecoveryStatus = {
+    state: "running",
+    startedAt: startedAt.toISOString(),
+    finishedAt: null,
+    durationMs: null,
+    errorMessage: null,
+    l2Fresh: null,
+  };
+  const finalize = (
+    state: SnapshotBootRecoveryState,
+    extra: Partial<SnapshotBootRecoveryStatus> = {}
+  ) => {
+    const finishedAt = new Date();
+    bootRecoveryStatus = {
+      state,
+      startedAt: bootRecoveryStatus.startedAt,
+      finishedAt: finishedAt.toISOString(),
+      durationMs: finishedAt.getTime() - startedAt.getTime(),
+      errorMessage: null,
+      l2Fresh: null,
+      ...extra,
+    };
+  };
+
   try {
     const currentEpoch = await readCurrentEpoch();
     if (currentEpoch === 0) {
       console.log("[snapshot-builder] boot-recover skipped — no epoch data yet");
+      finalize("skipped");
       return;
     }
 
@@ -225,15 +379,27 @@ export async function bootRecover(): Promise<void> {
           (now - manifest.generatedAt.getTime()) / 1000
         ).toFixed(0)}s`
       );
+      finalize("fresh", { l2Fresh: true });
       return;
     }
 
     console.log("[snapshot-builder] boot-recover: rebuilding snapshot");
     const result = await rebuildAfterEpoch(currentEpoch);
+    if (result.skipped) {
+      console.log(
+        "[snapshot-builder] boot-recover deferred — another replica is already rebuilding the snapshot"
+      );
+      finalize("skipped");
+      return;
+    }
     console.log(
       `[snapshot-builder] boot-recover complete in ${result.durationMs}ms — dreps ${result.drepsByteSize}B chunk ${result.chunkByteSize}B manifest ${result.manifestByteSize}B`
     );
+    finalize("ok", { l2Fresh: true });
   } catch (e) {
     console.error("[snapshot-builder] boot-recover failed", e);
+    finalize("failed", {
+      errorMessage: e instanceof Error ? e.message : String(e),
+    });
   }
 }
