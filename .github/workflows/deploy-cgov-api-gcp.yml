@@ -92,7 +92,20 @@ jobs:
             --headers="X-API-Key=${{ secrets.SERVER_API_KEY }}" \
             --attempt-deadline=900s \
             --time-zone="UTC" \
-            --description="Sync governance proposals from Koios API every 5 minutes"
+          --description="Sync governance proposals from Koios API every 5 minutes"
+
+      - name: Create/Update CIP-179 Sync Scheduler Job
+        run: |
+          gcloud scheduler jobs delete cip179-sync --location=${{ env.REGION }} --quiet || true
+          gcloud scheduler jobs create http cip179-sync \
+            --location=${{ env.REGION }} \
+            --schedule="3-59/5 * * * *" \
+            --uri="${{ steps.url.outputs.url }}/data/trigger-cip179-sync" \
+            --http-method=POST \
+            --headers="X-API-Key=${{ secrets.SERVER_API_KEY }}" \
+            --attempt-deadline=900s \
+            --time-zone="UTC" \
+            --description="Index CIP-179 label-17 metadata every 5 minutes"
 
       - name: Create/Update Voter Power Sync Scheduler Job
         run: |

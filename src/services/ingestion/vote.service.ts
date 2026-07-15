@@ -5,10 +5,8 @@
 
 import { VoteType, VoterType } from "@prisma/client";
 import { prisma } from "../prisma";
-import { getKoiosPressureState } from "../koios";
 import { listVotes } from "../governanceProvider";
 import { fetchJsonWithBrowserLikeClient } from "../remoteMetadata.service";
-import { fetchTxMetadataByHash } from "../txMetadata.service";
 import {
   ensureVoterExists,
   preloadVotersForVotes,
@@ -20,15 +18,11 @@ import {
   shouldFailFastForDb,
 } from "./dbFailFast";
 import type { KoiosVote } from "../../types/koios.types";
-import {
-  extractSurveyResponse,
-} from "../../libs/surveyMetadata";
 import type { IngestionDbClient } from "./dbSession";
 import { withIngestionDbRead, withIngestionDbWrite } from "./dbSession";
 
 // Cache for vote metadata JSON keyed by anchor URL to avoid duplicate fetches
 const voteMetadataCache = new Map<string, string | null>();
-const voteTxMetadataCache = new Map<string, Record<string, unknown> | Array<Record<string, unknown>> | null>();
 
 export interface VoteIngestionRunCache {
   proposalVotes: Map<string, KoiosVote[]>;
@@ -153,7 +147,6 @@ export interface VoteIngestionResult {
 export interface VoteIngestionOptions {
   useCache?: boolean;
   runCache?: VoteIngestionRunCache;
-  fetchSurveyMetadata?: boolean;
   prefetchedVotes?: KoiosVote[];
 }
 
@@ -253,7 +246,6 @@ function parseCheckpoint(raw: string | null | undefined): VoteIngestionCheckpoin
  */
 export function clearVoteCache() {
   voteMetadataCache.clear();
-  voteTxMetadataCache.clear();
 }
 
 /**
@@ -365,29 +357,6 @@ export async function ingestVotesForProposal(
   };
 
   try {
-    const proposalSurveyContext = await withIngestionDbRead(
-      db,
-      `vote.ingest.proposal-context.${proposalId}`,
-      () =>
-        db.proposal.findUnique({
-          where: { proposalId },
-          select: { linkedSurveyTxId: true },
-        })
-    );
-    const shouldFetchSurveyMetadata =
-      options?.fetchSurveyMetadata !== false &&
-      Boolean(proposalSurveyContext?.linkedSurveyTxId) &&
-      (process.env.KOIOS_SKIP_TX_METADATA_WHEN_DEGRADED === "false" ||
-        !getKoiosPressureState().active);
-    if (
-      proposalSurveyContext?.linkedSurveyTxId &&
-      !shouldFetchSurveyMetadata
-    ) {
-      console.log(
-        `[Vote Ingestion] action=skip proposal=${proposalId} reason=survey-metadata-disabled`
-      );
-    }
-
     console.log(
       `[Vote Ingestion] metric=vote_ingest.db_write_concurrency proposal=${proposalId} concurrency=${VOTE_INGEST_DB_CONCURRENCY}`
     );
@@ -419,7 +388,6 @@ export async function ingestVotesForProposal(
               proposalId,
               db,
               stats,
-              shouldFetchSurveyMetadata,
               preloadedVoters
             )
           )
@@ -822,7 +790,6 @@ async function ingestSingleVote(
   proposalId: string,
   db: IngestionDbClient,
   stats: VoteIngestionStats,
-  shouldFetchSurveyMetadata: boolean,
   preloadedVoters?: Map<string, EnsureVoterResult>
 ): Promise<void> {
   stats.votesProcessed++;
@@ -894,47 +861,6 @@ async function ingestSingleVote(
 
   // 6. Fetch vote rationale/metadata JSON (stored as string in DB)
   const rationaleJson = await getVoteRationaleJson(koiosVote);
-  let txMetadata:
-    | Record<string, unknown>
-    | Array<Record<string, unknown>>
-    | null
-    | undefined;
-  // Guard tx_metadata calls:
-  // 1) proposal must advertise linked survey context, and
-  // 2) vote must have a tx hash.
-  if (shouldFetchSurveyMetadata && koiosVote.vote_tx_hash) {
-    txMetadata = voteTxMetadataCache.get(koiosVote.vote_tx_hash);
-    if (txMetadata === undefined) {
-      stats.metadata.attempts++;
-      try {
-        txMetadata = await fetchTxMetadataByHash(koiosVote.vote_tx_hash);
-        voteTxMetadataCache.set(koiosVote.vote_tx_hash, txMetadata);
-        if (txMetadata) {
-          stats.metadata.success++;
-        } else {
-          // Keep null cached to avoid repeated misses.
-          stats.metadata.failed++;
-        }
-      } catch (error: any) {
-        // Keep null cached to avoid repeated failing calls in this run.
-        voteTxMetadataCache.set(koiosVote.vote_tx_hash, null);
-        stats.metadata.failed++;
-        console.warn(
-          `[Vote Ingestion] Non-fatal tx_metadata failure proposal=${proposalId} tx=${koiosVote.vote_tx_hash}:`,
-          error?.message ?? error
-        );
-        txMetadata = null;
-      }
-    }
-  } else {
-    stats.metadata.skipped++;
-  }
-
-  const surveyResponse = txMetadata ? extractSurveyResponse(txMetadata) : null;
-  const surveyResponseJson = surveyResponse
-    ? JSON.stringify(surveyResponse)
-    : undefined;
-
   // 7. Upsert vote by deterministic ID to avoid an extra read round-trip.
   // This keeps idempotency while handling metadata refreshes for the same tx.
   const voterKey = drepId ?? spoId ?? ccId ?? "unknown";
@@ -945,13 +871,9 @@ async function ingestSingleVote(
     vote: voteType,
     voterType: voterType,
     votingPower: votingPower,
-    responseEpoch: koiosVote.epoch_no ?? undefined,
     anchorUrl: koiosVote.meta_url,
     anchorHash: koiosVote.meta_hash,
     rationale: rationaleJson ?? undefined,
-    surveyResponse: surveyResponseJson,
-    surveyResponseSurveyTxId: surveyResponse?.surveyTxId,
-    surveyResponseResponderRole: surveyResponse?.responderRole,
     votedAt: koiosVote.block_time
       ? new Date(koiosVote.block_time * 1000)
       : undefined,
@@ -1024,9 +946,6 @@ export interface FrontloadVoteInput {
   anchorUrl?: string;
   anchorHash?: string;
   rationale?: string;
-  surveyResponse?: string;
-  surveyResponseSurveyTxId?: string;
-  surveyResponseResponderRole?: string;
 }
 
 /**
@@ -1035,7 +954,7 @@ export interface FrontloadVoteInput {
  *
  * Uses the same deterministic ID format as `ingestSingleVote` so when the
  * cron job eventually processes the same vote from Koios, its upsert merges
- * cleanly — filling in votingPower, responseEpoch, and votedAt.
+ * cleanly, filling in votingPower and votedAt.
  */
 export async function frontloadVote(input: FrontloadVoteInput) {
   const { txHash, proposalId, vote, voterType, voterId } = input;
@@ -1075,12 +994,9 @@ export async function frontloadVote(input: FrontloadVoteInput) {
     anchorUrl: input.anchorUrl ?? null,
     anchorHash: input.anchorHash ?? null,
     rationale: input.rationale ?? null,
-    surveyResponse: input.surveyResponse,
-    surveyResponseSurveyTxId: input.surveyResponseSurveyTxId,
-    surveyResponseResponderRole: input.surveyResponseResponderRole,
   };
 
-  return withIngestionDbWrite(prisma, "vote.frontload-survey-metadata.upsert", () =>
+  return withIngestionDbWrite(prisma, "vote.frontload.upsert", () =>
     prisma.onchainVote.upsert({
       where: { id: onchainVoteId },
       create: {
@@ -1089,23 +1005,11 @@ export async function frontloadVote(input: FrontloadVoteInput) {
       },
       update: {
         // Only update metadata fields — do not overwrite chain-authoritative
-        // fields (votingPower, responseEpoch, votedAt) that the cron may have set
+        // fields (votingPower and votedAt) that the cron may have set
         vote: frontloadData.vote,
         anchorUrl: frontloadData.anchorUrl,
         anchorHash: frontloadData.anchorHash,
         rationale: frontloadData.rationale,
-        ...(frontloadData.surveyResponse !== undefined
-          ? { surveyResponse: frontloadData.surveyResponse }
-          : {}),
-        ...(frontloadData.surveyResponseSurveyTxId !== undefined
-          ? { surveyResponseSurveyTxId: frontloadData.surveyResponseSurveyTxId }
-          : {}),
-        ...(frontloadData.surveyResponseResponderRole !== undefined
-          ? {
-              surveyResponseResponderRole:
-                frontloadData.surveyResponseResponderRole,
-            }
-          : {}),
       },
     })
   );

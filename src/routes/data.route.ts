@@ -27,6 +27,7 @@ import { postTriggerMissingEpochsSync } from "../controllers/data/triggerMissing
 import { postTriggerDrepDelegatorSync } from "../controllers/data/triggerDrepDelegatorSync";
 import { postTriggerSnapshotRebuild } from "../controllers/data/triggerSnapshotRebuild";
 import { postUploadToIpfs } from "../controllers/data/uploadToIpfs";
+import { postTriggerCip179Sync } from "../controllers/data/triggerCip179Sync";
 
 const router = express.Router();
 
@@ -161,13 +162,6 @@ router.post("/proposal/:proposal_hash", postIngestProposal);
  *               rationale:
  *                 type: string
  *                 description: JSON string of vote rationale metadata
- *               surveyResponse:
- *                 type: string
- *                 description: JSON string of survey response
- *               surveyResponseSurveyTxId:
- *                 type: string
- *               surveyResponseResponderRole:
- *                 type: string
  *     responses:
  *       200:
  *         description: Vote metadata stored successfully
@@ -179,6 +173,8 @@ router.post("/proposal/:proposal_hash", postIngestProposal);
  *         description: Server error
  */
 router.post("/vote/frontload", postFrontloadVote);
+
+router.post("/trigger-cip179-sync", postTriggerCip179Sync);
 
 /**
  * @openapi

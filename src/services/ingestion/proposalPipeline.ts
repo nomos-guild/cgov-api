@@ -13,7 +13,6 @@ import {
 } from "./vote.service";
 import type { KoiosVote } from "../../types/koios.types";
 import type { InactivePowerMetrics } from "./inactiveDrepPower.service";
-import { getKoiosPressureState } from "../koios";
 import type { IngestionDbClient } from "./dbSession";
 
 export interface ProposalPipelineContext {
@@ -80,10 +79,6 @@ export async function runProposalDownstreamPipeline(
       useCache: context.useCache !== false,
       prefetchedVotes: context.prefetchedVotes,
       runCache: context.voteRunCache,
-      fetchSurveyMetadata:
-        process.env.KOIOS_SKIP_TX_METADATA_WHEN_DEGRADED !== "false"
-          ? !getKoiosPressureState().active
-          : true,
     }
   );
 
