@@ -32,10 +32,12 @@ const BATCH_SIZE = 10;
 // would coerce to `false`.
 export function deriveKoiosRegistered(info: {
   registered?: boolean | null;
+  drep_status?: string | null;
   active?: boolean | null;
   expires_epoch_no?: number | null;
 }): boolean | null {
   if (info.registered != null) return info.registered;
+  if (info.drep_status != null) return info.drep_status === "registered";
   if (info.active === true && info.expires_epoch_no != null) return true;
   return null;
 }
@@ -67,10 +69,16 @@ export async function getDrepInfoBatch(
       metaHash: true,
     },
   });
-  const foundIds = new Set(dbDreps.map((d) => d.drepId));
+  // Vote ingestion can create a DRep shell before the inventory sync fills in
+  // its registration fields. Do not treat those shells as authoritative.
+  const completeDbDreps = dbDreps.filter(
+    (d) => d.registered !== null || d.active === true
+  );
+  const completeIds = new Set(completeDbDreps.map((d) => d.drepId));
+  const existingIds = new Set(dbDreps.map((d) => d.drepId));
 
-  // 2. Only fetch missing DReps from Koios
-  const missingIds = drepIds.filter((id) => !foundIds.has(id));
+  // 2. Fetch DReps that are missing or only have an incomplete shell row.
+  const missingIds = drepIds.filter((id) => !completeIds.has(id));
   const fetchedDreps: DrepLookupResult[] = [];
 
   if (missingIds.length > 0) {
@@ -96,7 +104,7 @@ export async function getDrepInfoBatch(
           });
         }
 
-        // 3. Insert into DB in bulk so future lookups skip Koios
+        // 3. Persist new rows and refresh incomplete shell rows.
         const createData = koiosResults
           .filter((info): info is NonNullable<typeof info> => Boolean(info?.drep_id))
           .map((info) => ({
@@ -110,15 +118,33 @@ export async function getDrepInfoBatch(
           }));
 
         if (createData.length > 0) {
-          await withIngestionDbWrite(
-            prisma,
-            "drep-lookup.createMany.from-koios",
-            () =>
-              prisma.drep.createMany({
-                data: createData,
-                skipDuplicates: true,
-              })
-          );
+          const newRows = createData.filter((data) => !existingIds.has(data.drepId));
+          const shellRows = createData.filter((data) => existingIds.has(data.drepId));
+
+          if (newRows.length > 0) {
+            await withIngestionDbWrite(
+              prisma,
+              "drep-lookup.createMany.from-koios",
+              () =>
+                prisma.drep.createMany({
+                  data: newRows,
+                  skipDuplicates: true,
+                })
+            );
+          }
+
+          for (const data of shellRows) {
+            const { drepId: refreshedDrepId, ...fields } = data;
+            await withIngestionDbWrite(
+              prisma,
+              "drep-lookup.update-shell.from-koios",
+              () =>
+                prisma.drep.update({
+                  where: { drepId: refreshedDrepId },
+                  data: fields,
+                })
+            );
+          }
         }
       } catch (error: any) {
         console.warn(
@@ -128,5 +154,5 @@ export async function getDrepInfoBatch(
     }
   }
 
-  return [...dbDreps, ...fetchedDreps];
+  return [...completeDbDreps, ...fetchedDreps];
 }

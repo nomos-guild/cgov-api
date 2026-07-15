@@ -240,6 +240,7 @@ export interface KoiosDrepInfo {
   hex?: string;
   has_script?: boolean;
   registered?: boolean;
+  drep_status?: string | null;
   deposit?: string | null;
   active?: boolean;
   expires_epoch_no?: number | null;

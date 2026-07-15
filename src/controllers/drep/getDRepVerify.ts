@@ -28,7 +28,9 @@ export const getDRepVerify = async (req: Request, res: Response) => {
       },
     });
 
-    if (drep) {
+    // Vote ingestion may create a DRep shell without registration data. Let
+    // getDrepInfoBatch refresh that row from Koios before deciding eligibility.
+    if (drep && (drep.registered !== null || drep.active === true)) {
       // Koios sometimes omits `registered` in /drep_info responses even when the
       // DRep has a current registration. In that case the column ends up null
       // and `!!null` would wrongly report "not registered". `active === true`
