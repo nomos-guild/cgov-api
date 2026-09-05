@@ -1,4 +1,4 @@
-FROM node:20 AS builder
+FROM node:22 AS builder
 
 # Working Dir
 WORKDIR /base
@@ -22,7 +22,7 @@ RUN npx prisma generate
 RUN yarn build
 
 # Production stage
-FROM node:20 AS runner
+FROM node:22 AS runner
 
 WORKDIR /usr/src/app
 
