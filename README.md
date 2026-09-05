@@ -32,6 +32,20 @@ This project is built and maintained as a **public good** for the Cardano commun
 
 ## For Developers
 
+### AI assistant connection
+
+Chat and history use `SIDANCLAW_API_URL`, `SIDANCLAW_API_KEY`, and
+`SIDANCLAW_ASSISTANT_ID`. These legacy variable names also support Use Brian:
+set the URL to `https://api.usebrian.ai` and provide the target agent's ID and
+matching API key.
+
+For production, configure the GitHub repository variable `SIDANCLAW_API_URL`
+and repository secrets `SIDANCLAW_API_KEY` and `SIDANCLAW_ASSISTANT_ID` before
+deploying. The workflow defaults to the legacy URL when the variable is unset.
+Keep these values aligned with any direct Cloud Run configuration change so
+the next deployment preserves the connection. Chat history belongs to the
+upstream agent and API key; changing either does not migrate prior sessions.
+
 ## Contributing
 
 We welcome contributions from the Cardano community! Whether it's bug fixes, new features, or documentation improvements.
