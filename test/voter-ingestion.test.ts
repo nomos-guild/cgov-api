@@ -82,11 +82,13 @@ describe("voterIngestion.service", () => {
       voterId: "pool1",
       created: false,
       updated: false,
+      votingPower: null,
     });
 
     expect(tx.sPO.createMany).toHaveBeenCalledTimes(1);
     expect(tx.sPO.findUnique).toHaveBeenCalledWith({
       where: { poolId: "pool1" },
+      select: { poolId: true, votingPower: true },
     });
   });
 
@@ -142,11 +144,13 @@ describe("voterIngestion.service", () => {
       voterId: "drep_existing",
       created: false,
       updated: false,
+      votingPower: null,
     });
     expect(preloaded.get("SPO:pool_existing")).toEqual({
       voterId: "pool_existing",
       created: false,
       updated: false,
+      votingPower: null,
     });
     expect(preloaded.get("ConstitutionalCommittee:cc_new")).toEqual({
       voterId: "cc_new",

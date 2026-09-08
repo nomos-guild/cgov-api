@@ -926,7 +926,7 @@ async function withKoiosConcurrencyLimit<T>(
 
 let koiosInstance: AxiosInstance | null = null;
 
-function getKoiosMaxBodyBytes(): number {
+export function getKoiosMaxBodyBytes(): number {
   const hasApiKey = Boolean(process.env.KOIOS_API_KEY);
   const defaultMax = hasApiKey
     ? KOIOS_REGISTERED_MAX_BODY_BYTES

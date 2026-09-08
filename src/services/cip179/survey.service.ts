@@ -1,3 +1,4 @@
+import { fetchVerifiedAnchor } from "./anchor.service";
 import { prisma } from "../prisma";
 import { koiosGet } from "../koios";
 import { buildProposalLookup } from "../proposalLookup";
@@ -49,6 +50,8 @@ export async function proposalSurvey(
       txHash: true,
       certIndex: true,
       metadata: true,
+      metaUrl: true,
+      metaHash: true,
       expirationEpoch: true,
       linkedSurveyTxId: true,
       linkedSurveyIndex: true,
@@ -56,7 +59,12 @@ export async function proposalSurvey(
   });
   if (!proposal) return null;
 
-  const parsedLink = parseCip179Link(proposal.metadata);
+  let parsedLink = parseCip179Link(proposal.metadata);
+  if (parsedLink.linked || proposal.linkedSurveyTxId) {
+    try { parsedLink = parseCip179Link(await fetchVerifiedAnchor(proposal.metaUrl, proposal.metaHash)); }
+    catch { return unavailable(true, null, ["The governance anchor bytes could not be verified against its on-chain hash."]); }
+    if (!parsedLink.linked) return unavailable(true, null, ["The verified governance anchor has no survey link."]);
+  }
   const surveyRef =
     parsedLink.surveyRef ??
     (proposal.linkedSurveyTxId !== null && proposal.linkedSurveyIndex !== null
@@ -78,8 +86,8 @@ export async function proposalSurvey(
   const definitionTx = await prisma.cip179Transaction.findUnique({
     where: { txHash: surveyRef.txId },
   });
-  if (!definitionTx) {
-    return unavailable(true, surveyRef, ["Referenced survey transaction has not been indexed yet."]);
+  if (!definitionTx?.blockHash) {
+    return unavailable(true, surveyRef, ["Referenced survey native transaction has not been indexed yet."]);
   }
 
   const { codec, domain, tally } = await loadCip179();
@@ -121,9 +129,15 @@ export async function proposalSurvey(
       linkedSurveyIndex: surveyRef.index,
       expirationEpoch: definition.endEpoch + 1,
     },
-    select: { proposalId: true },
+    select: { proposalId: true, metaUrl: true, metaHash: true },
   });
-  const linkedActions = linked.map((item) => item.proposalId);
+  const linkedActions: string[] = [];
+  for (const item of linked) {
+    try {
+      const verified = parseCip179Link(await fetchVerifiedAnchor(item.metaUrl, item.metaHash));
+      if (verified.surveyRef?.txId === surveyRef.txId && verified.surveyRef.index === surveyRef.index) linkedActions.push(item.proposalId);
+    } catch { errors.push("A linked action anchor is unavailable; proof binding is incomplete."); }
+  }
   if (errors.length > 0) {
     return {
       ...unavailable(true, surveyRef, errors),
@@ -132,7 +146,7 @@ export async function proposalSurvey(
   }
 
   const [rows, tips] = await Promise.all([
-    prisma.cip179Transaction.findMany({ orderBy: { absoluteSlot: "asc" } }),
+    prisma.cip179Transaction.findMany({ where: { surveyKeys: { has: `${surveyRef.txId}:${surveyRef.index}` } }, orderBy: { absoluteSlot: "asc" } }),
     koiosGet<TipRow[]>("/tip", undefined, { source: "cip179.survey.tip" }),
   ]);
   const tip = tips[0];
@@ -196,20 +210,15 @@ export async function proposalSurvey(
       govActionLifetime: 0,
     },
   };
-  const aggregate = domain.aggregateSurveys(
-    {
-      surveys: [bundle.survey],
-      responses: responses as never,
-      cancellations: cancellations as never,
-    },
-    bundle.tip
-  )[0];
+  const cancelled = cancellations.some((record) =>
+    (record.epochNo as number) <= definition.endEpoch &&
+    domain.cancellationVerified(definition.owner, record.proof as TxProof | null));
 
   return {
     linked: true,
     surveyRef,
     linkValidation: { valid: true, errors: [], linkedActions },
-    phase: aggregate?.status === "cancelled" ? "cancelled" : definition.endEpoch < tip.epoch_no ? "closed" : "open",
+    phase: cancelled ? "cancelled" : definition.endEpoch < tip.epoch_no ? "closed" : "open",
     bundle: tally.toJsonSafe(bundle),
   };
 }
@@ -226,6 +235,10 @@ export async function proposalSurveyTally(
   if (bundle?.survey?.definition?.submissionMode?.type === "sealed") {
     return { phase: "unsupported", artifact: null, errors: ["Sealed survey finalization is not supported by this CGov release."] };
   }
+  const sync = await prisma.syncStatus.findUnique({ where: { jobName: "cip179-sync" } });
+  if (!sync || sync.isRunning || sync.lastResult !== "success") return { phase: "finalization_pending", artifact: null, errors: ["An authoritative survey sync has not completed."] };
+  const definition = (await loadCip179()).tally.fromJsonSafe(survey.bundle) as import("cip-179/domain", { with: { "resolution-mode": "import" } }).SurveyBundle;
+  if (definition.survey.definition.questions.some((question) => question.type === "custom")) return { phase: "unsupported", artifact: null, errors: ["Custom method validation is not supported by this release."] };
   const row = await prisma.cip179Artifact.findUnique({
     where: { surveyKey: `${survey.surveyRef.txId}:${survey.surveyRef.index}` },
   });

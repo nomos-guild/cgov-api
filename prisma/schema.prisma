@@ -378,6 +378,8 @@ model OnchainVote {
 }
 
 model Proposal {
+  metaUrl String? @map("meta_url")
+  metaHash String? @map("meta_hash")
   id                          Int             @id @default(autoincrement())
   proposalId                  String          @unique @map("proposal_id")
   txHash                      String          @map("tx_hash")
@@ -424,6 +426,8 @@ model Proposal {
 // Immutable CIP-179 label-17 transactions cached from Koios. Payloads use the
 // cip-179 package's JSON-safe wire form so bytes and bigints round-trip exactly.
 model Cip179Transaction {
+  blockHash    String?  @map("block_hash")
+  surveyKeys   String[] @default([]) @map("survey_keys")
   txHash       String   @id @map("tx_hash")
   absoluteSlot BigInt   @map("absolute_slot")
   epochNo      Int      @map("epoch_no")
@@ -435,6 +439,7 @@ model Cip179Transaction {
 
   @@index([absoluteSlot])
   @@index([epochNo])
+  @@index([surveyKeys], type: Gin)
   @@map("cip179_transaction")
 }
 

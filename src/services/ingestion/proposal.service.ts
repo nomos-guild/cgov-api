@@ -1,3 +1,4 @@
+import { fetchVerifiedAnchor } from "../cip179/anchor.service";
 /**
  * Proposal Ingestion Service
  * Handles syncing proposals from Koios API to database
@@ -362,7 +363,17 @@ export async function ingestProposalData(
         preferMetaUrlForMissingFields: shouldBackfillMissingMetadataFields,
         retryMetaUrlFetch: shouldBackfillMissingMetadataFields,
       });
-    const surveyLink = parseCip179Link(metadata);
+    let surveyLink = parseCip179Link(metadata);
+    if (surveyLink.linked) {
+      try {
+        surveyLink = parseCip179Link(await fetchVerifiedAnchor(
+          koiosProposal.meta_url ?? null,
+          koiosProposal.meta_hash ?? null
+        ));
+      } catch {
+        surveyLink = { linked: true, surveyRef: null, errors: ["Anchor verification pending"] };
+      }
+    }
 
   // Always re-inject text fields for active proposals to ensure
   // sanitized data from Koios overwrites any corrupted values.
@@ -402,6 +413,8 @@ export async function ingestProposalData(
             expiredEpoch: koiosProposal.expired_epoch,
             expirationEpoch: koiosProposal.expiration,
             metadata,
+            metaUrl: koiosProposal.meta_url ?? null,
+            metaHash: koiosProposal.meta_hash ?? null,
             linkedSurveyTxId: surveyLink.surveyRef?.txId ?? null,
             linkedSurveyIndex: surveyLink.surveyRef?.index ?? null,
           },
@@ -419,6 +432,8 @@ export async function ingestProposalData(
             expiredEpoch: koiosProposal.expired_epoch,
             expirationEpoch: koiosProposal.expiration,
             metadata,
+            metaUrl: koiosProposal.meta_url ?? null,
+            metaHash: koiosProposal.meta_hash ?? null,
             linkedSurveyTxId: surveyLink.surveyRef?.txId ?? null,
             linkedSurveyIndex: surveyLink.surveyRef?.index ?? null,
             ...updateInfoFields,

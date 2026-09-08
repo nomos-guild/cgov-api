@@ -27,6 +27,7 @@ jest.mock("../src/services/koios", () => ({
   getKoiosPressureState: () => mockGetKoiosPressureState(),
 }));
 
+import { prisma } from "../src/services/prisma";
 import { runProposalDownstreamPipeline } from "../src/services/ingestion/proposalPipeline";
 
 describe("proposal phase 3 koios impact", () => {
@@ -68,6 +69,7 @@ describe("proposal phase 3 koios impact", () => {
     });
 
     const result = await runProposalDownstreamPipeline({
+      db: prisma,
       proposalId: "gov_action1timeout",
       currentEpoch: 600,
       koiosProposal: {
@@ -94,6 +96,7 @@ describe("proposal phase 3 koios impact", () => {
     });
 
     const result = await runProposalDownstreamPipeline({
+      db: prisma,
       proposalId: "gov_action1partial",
       currentEpoch: 600,
       koiosProposal: {

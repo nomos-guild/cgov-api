@@ -14,7 +14,7 @@ export interface Cip179LinkResult {
 
 /** Koios expiration is the first inactive epoch; CIP-179 uses the last active epoch. */
 export function governanceActionEndEpoch(
-  expirationEpoch: number | null
+  expirationEpoch: number | null,
 ): number | null {
   return Number.isInteger(expirationEpoch) && (expirationEpoch as number) > 0
     ? (expirationEpoch as number) - 1
@@ -25,14 +25,20 @@ function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-/** Parse the v5 link from raw CIP-108 JSON. Readers intentionally do not gate on @context. */
+/** Support the inline CIP-108 body-scoped context used by v5 authoring tools.
+ * Remote/compound contexts require a controlled JSON-LD resolver, not guesswork.
+ */
 export function parseCip179Link(metadata: string | unknown): Cip179LinkResult {
   let parsed: unknown = metadata;
   if (typeof metadata === "string") {
     try {
       parsed = JSON.parse(metadata);
     } catch {
-      return { linked: false, surveyRef: null, errors: ["Proposal metadata is not valid JSON."] };
+      return {
+        linked: false,
+        surveyRef: null,
+        errors: ["Proposal metadata is not valid JSON."],
+      };
     }
   }
   if (!isObject(parsed) || !isObject(parsed.body)) {
@@ -43,10 +49,66 @@ export function parseCip179Link(metadata: string | unknown): Cip179LinkResult {
     return { linked: false, surveyRef: null, errors: [] };
   }
   if (!isObject(candidate)) {
-    return { linked: true, surveyRef: null, errors: ["body.cip179 must be an object."] };
+    return {
+      linked: true,
+      surveyRef: null,
+      errors: ["body.cip179 must be an object."],
+    };
   }
 
   const errors: string[] = [];
+  const root = parsed["@context"];
+  const body = isObject(root) && isObject(root.body) ? root.body : null;
+  const bodyContext =
+    body && isObject(body["@context"]) ? body["@context"] : null;
+  const link =
+    bodyContext && isObject(bodyContext.cip179) ? bodyContext.cip179 : null;
+  const context = link && isObject(link["@context"]) ? link["@context"] : null;
+  const prefixes = {
+    ...(isObject(root) ? root : {}),
+    ...(bodyContext ?? {}),
+    ...(context ?? {}),
+  };
+  const expand = (value: unknown): unknown => {
+    if (isObject(value)) value = value["@id"];
+    if (typeof value !== "string") return null;
+    const separator = value.indexOf(":");
+    const prefix = prefixes[value.slice(0, separator)];
+    return separator > 0 && typeof prefix === "string"
+      ? prefix + value.slice(separator + 1)
+      : value;
+  };
+  const cip =
+    "https://github.com/cardano-foundation/CIPs/blob/master/CIP-0179/README.md#";
+  if (
+    expand(body?.["@id"]) !==
+      "https://github.com/cardano-foundation/CIPs/blob/master/CIP-0108/README.md#body" ||
+    expand(link?.["@id"]) !== cip + "link" ||
+    !context ||
+    ["specVersion", "kind", "surveyTxId", "surveyIndex"].some(
+      (key) =>
+        expand(context[key]) !== cip + key ||
+        (isObject(context[key]) &&
+          Object.keys(context[key]).some((term) => term !== "@id")),
+    ) ||
+    !body ||
+    Object.keys(body).some((key) => !["@id", "@context"].includes(key)) ||
+    !link ||
+    Object.keys(link).some((key) => !["@id", "@context"].includes(key)) ||
+    [root, bodyContext, context].some(
+      (scope) =>
+        isObject(scope) &&
+        (Object.hasOwn(scope, "@import") ||
+          Object.hasOwn(scope, "@propagate") ||
+          (Object.hasOwn(scope, "@version") && scope["@version"] !== 1.1)),
+    ) ||
+    Object.keys(parsed.body).some((key) => key.startsWith("@")) ||
+    Object.keys(candidate).some((key) => key.startsWith("@"))
+  ) {
+    errors.push(
+      "CIP-179 link requires a supported inline body-scoped context without local overrides.",
+    );
+  }
   if (candidate.specVersion !== CIP179_SPEC_VERSION) {
     errors.push("body.cip179.specVersion must be 5.");
   }
@@ -55,11 +117,17 @@ export function parseCip179Link(metadata: string | unknown): Cip179LinkResult {
   }
   const txId = candidate.surveyTxId;
   if (typeof txId !== "string" || !/^[0-9a-fA-F]{64}$/.test(txId)) {
-    errors.push("body.cip179.surveyTxId must be a 64-character hexadecimal transaction ID.");
+    errors.push(
+      "body.cip179.surveyTxId must be a 64-character hexadecimal transaction ID.",
+    );
   }
   const index = candidate.surveyIndex;
-  if (!Number.isInteger(index) || (index as number) < 0) {
-    errors.push("body.cip179.surveyIndex must be a non-negative integer.");
+  if (
+    !Number.isSafeInteger(index) ||
+    (index as number) < 0 ||
+    (index as number) > 65535
+  ) {
+    errors.push("body.cip179.surveyIndex must be a uint16 integer (0..65535).");
   }
 
   return {

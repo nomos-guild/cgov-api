@@ -1,14 +1,13 @@
+import { cip179Network } from "./network";
 import { prisma } from "../prisma";
-import { koiosGet, koiosPost } from "../koios";
+import { koiosGet, koiosPost, getKoiosMaxBodyBytes } from "../koios";
 import { acquireJobLock, releaseJobLock } from "../ingestion/syncLock";
-import { koiosJsonToMetadatum, type KoiosMetadatum } from "./metadatum";
 import { finalizeLinkedSurveys } from "./finalize.service";
 import { transactionProof } from "./proof.service";
 
 const JOB_NAME = "cip179-sync";
 const PAGE_SIZE = 1000;
 const MAX_PAGES = 50;
-const METADATA_BATCH_SIZE = 50;
 
 async function loadCip179() {
   return (await import("../../libs/cip179Package.mjs")).loadCip179();
@@ -17,6 +16,7 @@ async function loadCip179() {
 interface KoiosTip {
   abs_slot: number;
   block_time: number;
+  hash: string;
 }
 
 interface LabelRow {
@@ -25,9 +25,9 @@ interface LabelRow {
   epoch_no: number;
 }
 
-interface MetadataRow {
-  tx_hash: string;
-  metadata: Record<string, KoiosMetadatum> | null;
+interface NativeRow extends LabelRow {
+  cbor: string | null;
+  block_hash: string;
 }
 
 interface TxInfoRow {
@@ -44,6 +44,17 @@ function configuredSinceUnix(): number {
   return Math.floor(parsed / 1000);
 }
 
+export function hashBatchSize(): number {
+  // Account for the exact JSON envelope, quotes and comma for each 64-char hash.
+  return Math.max(
+    1,
+    Math.floor(
+      (getKoiosMaxBodyBytes() - Buffer.byteLength('{"_tx_hashes":[]}') + 1) /
+        67,
+    ),
+  );
+}
+
 function chunk<T>(values: T[], size: number): T[][] {
   const result: T[][] = [];
   for (let index = 0; index < values.length; index += size) {
@@ -52,14 +63,18 @@ function chunk<T>(values: T[], size: number): T[][] {
   return result;
 }
 
-async function scanLabelRows(): Promise<{ rows: LabelRow[]; complete: boolean }> {
+async function scanLabelRows(): Promise<{
+  rows: LabelRow[];
+  complete: boolean;
+  tipHash: string;
+}> {
   const [tip] = await koiosGet<KoiosTip[]>("/tip", undefined, {
     source: "cip179.tip",
   });
   if (!tip) throw new Error("Koios tip is unavailable");
   const sinceSlot = Math.max(
     0,
-    Math.floor(tip.abs_slot - (tip.block_time - configuredSinceUnix()))
+    Math.floor(tip.abs_slot - (tip.block_time - configuredSinceUnix())),
   );
 
   const byHash = new Map<string, LabelRow>();
@@ -69,61 +84,77 @@ async function scanLabelRows(): Promise<{ rows: LabelRow[]; complete: boolean }>
       {
         _label: 17,
         select: "tx_hash,absolute_slot,epoch_no",
-        absolute_slot: `gte.${sinceSlot}`,
-        order: "absolute_slot.desc",
+        and: `(absolute_slot.gte.${sinceSlot},absolute_slot.lte.${tip.abs_slot})`,
+        order: "absolute_slot.desc,tx_hash.desc",
         limit: PAGE_SIZE,
         offset: page * PAGE_SIZE,
       },
-      { source: "cip179.label-scan" }
+      { source: "cip179.label-scan" },
     );
     for (const row of rows) byHash.set(row.tx_hash, row);
     if (rows.length < PAGE_SIZE) {
-      return { rows: [...byHash.values()], complete: true };
+      return { rows: [...byHash.values()], complete: true, tipHash: tip.hash };
     }
   }
-  return { rows: [...byHash.values()], complete: false };
+  return { rows: [...byHash.values()], complete: false, tipHash: tip.hash };
 }
 
 async function cacheBatch(
-  batch: LabelRow[]
+  batch: LabelRow[],
+  assertLease: () => void,
 ): Promise<{ stored: number; resolved: number }> {
-  const { codec, tally } = await loadCip179();
-  const rows = await koiosPost<MetadataRow[]>(
-    "/tx_metadata?select=tx_hash,metadata",
-    { _tx_hashes: batch.map((row) => row.tx_hash) },
-    { source: "cip179.metadata" }
+  const { tally, domain } = await loadCip179();
+  const { decodeNativeTransaction } = await import(
+    "../../libs/cip179Package.mjs"
   );
-  const position = new Map(batch.map((row) => [row.tx_hash, row]));
+  const rows = await koiosPost<NativeRow[]>(
+    "/tx_cbor",
+    { _tx_hashes: batch.map((row) => row.tx_hash) },
+    { source: "cip179.native" },
+  );
+  const positions = new Map(batch.map((row) => [row.tx_hash, row]));
+  const resolved = new Set<string>();
   let stored = 0;
-  let resolved = 0;
-
   for (const row of rows) {
-    const raw = row.metadata?.["17"];
-    const chain = position.get(row.tx_hash);
-    if (raw === undefined || !chain) continue;
-    resolved += 1;
-    try {
-      const payload = codec.decodePayload(koiosJsonToMetadatum(raw));
-      await prisma.cip179Transaction.upsert({
-        where: { txHash: row.tx_hash },
-        create: {
-          txHash: row.tx_hash,
-          absoluteSlot: BigInt(chain.absolute_slot),
-          epochNo: chain.epoch_no,
-          payload: JSON.stringify(tally.toJsonSafe(payload)),
-        },
-        update: {
-          absoluteSlot: BigInt(chain.absolute_slot),
-          epochNo: chain.epoch_no,
-          payload: JSON.stringify(tally.toJsonSafe(payload)),
-        },
-      });
-      stored += 1;
-    } catch (error) {
-      console.warn(`[CIP-179] Ignoring malformed label-17 tx ${row.tx_hash}:`, error);
-    }
+    const chain = positions.get(row.tx_hash);
+    if (!chain || !row.cbor || resolved.has(row.tx_hash)) continue;
+    if (
+      chain.absolute_slot !== row.absolute_slot ||
+      chain.epoch_no !== row.epoch_no
+    )
+      throw new Error("Chain moved during metadata resolution");
+    const { payload, proof } = await decodeNativeTransaction(
+      row.cbor,
+      row.tx_hash,
+    );
+    const surveyKeys =
+      payload?.type === "definitions"
+        ? payload.definitions.map((_, index) => `${row.tx_hash}:${index}`)
+        : payload?.type === "responses"
+          ? payload.responses.map((r) => domain.refKey(r.surveyRef))
+          : payload?.type === "cancellations"
+            ? payload.cancellations.map(domain.refKey)
+            : [];
+    const data = {
+      absoluteSlot: BigInt(chain.absolute_slot),
+      epochNo: chain.epoch_no,
+      blockHash: row.block_hash,
+      txBlockIndex: null,
+      payload: JSON.stringify(tally.toJsonSafe(payload ?? { type: "invalid" })),
+      proof: proof ? JSON.stringify(tally.toJsonSafe(proof)) : null,
+      surveyKeys: [...new Set(surveyKeys)],
+    };
+    assertLease();
+    // Storage failure must propagate; it is never a malformed-payload outcome.
+    await prisma.cip179Transaction.upsert({
+      where: { txHash: row.tx_hash },
+      create: { txHash: row.tx_hash, ...data },
+      update: data,
+    });
+    stored++;
+    resolved.add(row.tx_hash);
   }
-  return { stored, resolved };
+  return { stored, resolved: resolved.size };
 }
 
 async function removeRolledBackTransactions(rows: LabelRow[]): Promise<void> {
@@ -137,7 +168,7 @@ async function removeRolledBackTransactions(rows: LabelRow[]): Promise<void> {
   });
 }
 
-async function enrichBlockIndexes(): Promise<void> {
+async function enrichBlockIndexes(assertLease: () => void): Promise<void> {
   const pending = await prisma.cip179Transaction.findMany({
     where: {
       txBlockIndex: null,
@@ -145,13 +176,14 @@ async function enrichBlockIndexes(): Promise<void> {
     },
     select: { txHash: true },
   });
-  for (const batch of chunk(pending, METADATA_BATCH_SIZE)) {
+  for (const batch of chunk(pending, hashBatchSize())) {
     try {
       const rows = await koiosPost<TxInfoRow[]>(
         "/tx_info?select=tx_hash,tx_block_index",
         { _tx_hashes: batch.map((row) => row.txHash) },
-        { source: "cip179.block-index" }
+        { source: "cip179.block-index" },
       );
+      assertLease();
       await prisma.$transaction(
         rows.flatMap((row) =>
           row.tx_block_index === null
@@ -161,13 +193,13 @@ async function enrichBlockIndexes(): Promise<void> {
                   where: { txHash: row.tx_hash },
                   data: { txBlockIndex: row.tx_block_index },
                 }),
-              ]
-        )
+              ],
+        ),
       );
     } catch (error) {
       console.warn(
         "[CIP-179] Transaction block-index enrichment will be retried:",
-        error
+        error,
       );
     }
   }
@@ -180,8 +212,8 @@ async function enrichLinkedDefinitionProofs(): Promise<void> {
   });
   const txHashes = new Set(
     proposals.flatMap((proposal) =>
-      proposal.linkedSurveyTxId ? [proposal.linkedSurveyTxId] : []
-    )
+      proposal.linkedSurveyTxId ? [proposal.linkedSurveyTxId] : [],
+    ),
   );
   for (const txHash of txHashes) await transactionProof(txHash);
 }
@@ -205,52 +237,75 @@ export interface Cip179SyncResult {
 }
 
 export async function syncCip179Metadata(): Promise<Cip179SyncResult> {
+  cip179Network();
   const acquired = await acquireJobLock(JOB_NAME, "CIP-179 Metadata Sync", {
     ttlMs: 15 * 60 * 1000,
   });
-  if (!acquired) return { complete: false, discovered: 0, stored: 0, skipped: true };
+  if (!acquired)
+    return { complete: false, discovered: 0, stored: 0, skipped: true };
 
+  const deadline = Date.now() + 12 * 60 * 1000;
+  const assertLease = () => {
+    if (Date.now() >= deadline)
+      throw new Error(
+        "CIP-179 sync exceeded its work budget; retry before finalizing",
+      );
+  };
   try {
     const scan = await scanLabelRows();
-    const existing = await prisma.cip179Transaction.findMany({
-      where: { txHash: { in: scan.rows.map((row) => row.tx_hash) } },
-      select: { txHash: true },
-    });
-    const known = new Set(existing.map((row) => row.txHash));
-    const missing = scan.rows.filter((row) => !known.has(row.tx_hash));
+    // An artifact is derived data. Rebuild it from every complete authoritative scan.
+    // Readers are gated on this job's successful completion, including after a crash.
+    assertLease();
+    await prisma.cip179Artifact.deleteMany();
     let stored = 0;
     let complete = scan.complete;
 
-    for (const batch of chunk(missing, METADATA_BATCH_SIZE)) {
+    for (const batch of chunk(scan.rows, hashBatchSize())) {
       try {
-        const result = await cacheBatch(batch);
+        const result = await cacheBatch(batch, assertLease);
         stored += result.stored;
         if (result.resolved !== batch.length) complete = false;
       } catch (error) {
         complete = false;
-        console.warn("[CIP-179] Metadata batch failed; finalization is suspended:", error);
+        console.warn(
+          "[CIP-179] Metadata batch failed; finalization is suspended:",
+          error,
+        );
       }
     }
 
-    if (scan.complete) await removeRolledBackTransactions(scan.rows);
-    await enrichBlockIndexes();
+    assertLease();
+    const checkpoints = await koiosPost<Array<{ hash: string }>>(
+      "/block_info",
+      { _block_hashes: [scan.tipHash] },
+      { source: "cip179.checkpoint" },
+    );
+    if (
+      !scan.tipHash ||
+      !checkpoints.some((block) => block.hash === scan.tipHash)
+    )
+      complete = false;
+    if (complete) await removeRolledBackTransactions(scan.rows);
+    await enrichBlockIndexes(assertLease);
     await enrichLinkedDefinitionProofs();
     await enrichCancellationProofs();
-    if (complete) await finalizeLinkedSurveys();
+    if (complete) await finalizeLinkedSurveys(assertLease);
+    assertLease();
     await releaseJobLock(
       JOB_NAME,
       complete ? "success" : "partial",
       stored,
-      complete ? null : "Label-17 scan or metadata resolution was incomplete"
+      complete ? null : "Label-17 scan or metadata resolution was incomplete",
     );
     return { complete, discovered: scan.rows.length, stored, skipped: false };
   } catch (error) {
-    await releaseJobLock(
-      JOB_NAME,
-      "failed",
-      0,
-      error instanceof Error ? error.message : String(error)
-    );
+    if (Date.now() < deadline + 3 * 60 * 1000)
+      await releaseJobLock(
+        JOB_NAME,
+        "failed",
+        0,
+        error instanceof Error ? error.message : String(error),
+      );
     throw error;
   }
 }

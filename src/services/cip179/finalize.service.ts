@@ -4,7 +4,9 @@ import { proposalSurvey } from "./survey.service";
 import { transactionProof } from "./proof.service";
 import type { ProposalSurveyResponse } from "../../types/cip179.types";
 
-const SECONDS_PER_EPOCH = 432_000;
+import { responseProven } from "./binding.service";
+import { responderMembership } from "./membership.service";
+import { cip179Network } from "./network";
 const FINALIZATION_MARGIN_SECONDS = 600;
 
 async function loadCip179() {
@@ -27,9 +29,7 @@ async function drepWeight(
     { _drep_id: drepId, epoch_no: `eq.${epoch}` },
     { source: "cip179.finalize.drep-weight" }
   );
-  return rows[0]
-    ? { registered: true, weight: BigInt(rows[0].amount) }
-    : { registered: false, weight: BigInt(0) };
+  return { registered: true, weight: rows[0] ? BigInt(rows[0].amount) : 0n };
 }
 
 async function stakeholderWeight(
@@ -37,25 +37,11 @@ async function stakeholderWeight(
   epoch: number
 ): Promise<{ registered: boolean; weight: bigint }> {
   const { evolution } = await loadCip179();
-  const address = evolution.evolutionCodec.stakeAddress(credential, "mainnet");
-  const [updates, stakes] = await Promise.all([
-    koiosPost<Array<{ action_type: string; absolute_slot: number }>>(
-      `/account_update_history?epoch_no=lte.${epoch}&action_type=in.(registration,deregistration)&select=action_type,absolute_slot`,
-      { _stake_addresses: [address] },
-      { source: "cip179.finalize.stake-registration" }
-    ),
-    koiosPost<Array<{ active_stake: string }>>(
-      `/account_stake_history?epoch_no=eq.${epoch}&select=active_stake`,
-      { _stake_addresses: [address] },
-      { source: "cip179.finalize.stake-weight" }
-    ),
-  ]);
-  updates.sort((left, right) => left.absolute_slot - right.absolute_slot);
-  const registered = updates.length > 0 && updates[updates.length - 1].action_type !== "deregistration";
-  return {
-    registered,
-    weight: registered && stakes[0] ? BigInt(stakes[0].active_stake) : BigInt(0),
-  };
+  const address = evolution.evolutionCodec.stakeAddress(credential, cip179Network().name);
+  const stakes = await koiosPost<Array<{ active_stake: string }>>(
+    `/account_stake_history?epoch_no=eq.${epoch}&select=active_stake`,
+    { _stake_addresses: [address] }, { source: "cip179.finalize.stake-weight" });
+  return { registered: true, weight: stakes[0] ? BigInt(stakes[0].active_stake) : 0n };
 }
 
 async function roleTotal(role: number, epoch: number): Promise<bigint | null> {
@@ -109,7 +95,8 @@ async function weightedResponders(
 }
 
 async function finalizeSurvey(
-  survey: ProposalSurveyResponse
+  survey: ProposalSurveyResponse,
+  assertLease: () => void
 ): Promise<boolean> {
   if (
     !survey.surveyRef ||
@@ -121,11 +108,11 @@ async function finalizeSurvey(
   const { codec, domain, tally } = await loadCip179();
   const bundle = tally.fromJsonSafe(survey.bundle) as SurveyBundle;
   const definition = bundle.survey.definition;
-  if (definition.submissionMode.type === "sealed") return false;
+  if (definition.submissionMode.type === "sealed" || definition.questions.some((q) => q.type === "custom")) return false;
   const deadline = domain.voteDeadlineUnix(
     definition.endEpoch,
     bundle.tip,
-    SECONDS_PER_EPOCH
+    cip179Network().secondsPerEpoch
   );
   if (Math.floor(Date.now() / 1000) < deadline + FINALIZATION_MARGIN_SECONDS) {
     return false;
@@ -136,7 +123,9 @@ async function finalizeSurvey(
   const coveredRoles = new Set<number>(tally.RULESET_DESCRIPTOR.coveredRoles);
   const candidates = bundle.responses.filter(
     (record) =>
+      record.slot >= bundle.survey.slot &&
       record.epochNo <= definition.endEpoch &&
+      record.response.answers.type === "public" && record.response.answers.answers.length > 0 &&
       coveredRoles.has(record.response.role) &&
       codec.validateResponse(definition, record.response).length === 0
   );
@@ -163,10 +152,12 @@ async function finalizeSurvey(
   let perRole: import("cip-179/tally", { with: { "resolution-mode": "import" } }).ArtifactRoleTally[] = [];
   if (!verifiedCancellation) {
     const proven: ResponseRecord[] = [];
+    const membership = new Map();
     for (const record of candidates) {
       const proof = await transactionProof(record.txHash);
       if (!proof) return false;
-      if (domain.responseCredentialProven(record.response, proof, survey.linkValidation.linkedActions)) {
+      assertLease();
+      if (await responseProven(record.response, proof, definition.endEpoch, survey.linkValidation.linkedActions) && await responderMembership(record, definition.endEpoch, membership)) {
         proven.push(record);
       }
     }
@@ -191,7 +182,7 @@ async function finalizeSurvey(
 
   const body: import("cip-179/tally", { with: { "resolution-mode": "import" } }).TallyBody = {
     rulesetHash: tally.rulesetHash(),
-    network: "mainnet",
+    network: cip179Network().name,
     survey: {
       txId: survey.surveyRef.txId,
       index: survey.surveyRef.index,
@@ -228,6 +219,7 @@ async function finalizeSurvey(
       })),
     },
   };
+  assertLease();
   await prisma.cip179Artifact.create({
     data: {
       surveyKey,
@@ -241,7 +233,7 @@ async function finalizeSurvey(
   return true;
 }
 
-export async function finalizeLinkedSurveys(): Promise<number> {
+export async function finalizeLinkedSurveys(assertLease: () => void = () => {}): Promise<number> {
   const [proposals, artifacts] = await Promise.all([
     prisma.proposal.findMany({
       where: { linkedSurveyTxId: { not: null }, linkedSurveyIndex: { not: null } },
@@ -260,7 +252,7 @@ export async function finalizeLinkedSurveys(): Promise<number> {
     if (seen.has(storedKey)) continue;
     seen.add(storedKey);
     const survey = await proposalSurvey(proposal.proposalId);
-    if (survey && (await finalizeSurvey(survey))) finalized += 1;
+    if (survey && (await finalizeSurvey(survey, assertLease))) finalized += 1;
   }
   return finalized;
 }
