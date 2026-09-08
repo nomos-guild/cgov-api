@@ -13,14 +13,10 @@ import {
   clearVoteCache,
 } from "./vote.service";
 import { clearVoterKoiosCaches } from "./voterIngestion.service";
-import {
-  GOVERNANCE_SURVEY_LINK_KIND,
-  parseGovernanceSurveyLink,
-} from "../../libs/surveyMetadata";
+import { parseCip179Link } from "../../libs/cip179Link";
 import { getKoiosCurrentEpoch } from "./sync-utils";
 import {
   extractProposalMetadata,
-  fetchLinkedSurveyDetails,
   hasMissingProposalInfoFields,
 } from "./proposalMetadata.service";
 import {
@@ -366,16 +362,7 @@ export async function ingestProposalData(
         preferMetaUrlForMissingFields: shouldBackfillMissingMetadataFields,
         retryMetaUrlFetch: shouldBackfillMissingMetadataFields,
       });
-    const surveyLink = parseGovernanceSurveyLink(metadata);
-    const linkedSurveyDetails = surveyLink.surveyTxId
-      && surveyLink.kind === GOVERNANCE_SURVEY_LINK_KIND
-      && surveyLink.specVersion === "1.0.0"
-      ? await fetchLinkedSurveyDetails(surveyLink.surveyTxId)
-      : null;
-    const serializedLinkedSurveyDetails = linkedSurveyDetails
-      ? JSON.stringify(linkedSurveyDetails)
-      : null;
-    const shouldClearSurveyDetails = !surveyLink.surveyTxId;
+    const surveyLink = parseCip179Link(metadata);
 
   // Always re-inject text fields for active proposals to ensure
   // sanitized data from Koios overwrites any corrupted values.
@@ -415,8 +402,8 @@ export async function ingestProposalData(
             expiredEpoch: koiosProposal.expired_epoch,
             expirationEpoch: koiosProposal.expiration,
             metadata,
-            linkedSurveyTxId: surveyLink.surveyTxId,
-            surveyDetails: serializedLinkedSurveyDetails,
+            linkedSurveyTxId: surveyLink.surveyRef?.txId ?? null,
+            linkedSurveyIndex: surveyLink.surveyRef?.index ?? null,
           },
           update: {
             // Only update mutable fields
@@ -432,12 +419,8 @@ export async function ingestProposalData(
             expiredEpoch: koiosProposal.expired_epoch,
             expirationEpoch: koiosProposal.expiration,
             metadata,
-            linkedSurveyTxId: surveyLink.surveyTxId,
-            ...(serializedLinkedSurveyDetails !== null
-              ? { surveyDetails: serializedLinkedSurveyDetails }
-              : shouldClearSurveyDetails
-              ? { surveyDetails: null }
-              : {}),
+            linkedSurveyTxId: surveyLink.surveyRef?.txId ?? null,
+            linkedSurveyIndex: surveyLink.surveyRef?.index ?? null,
             ...updateInfoFields,
           },
         })

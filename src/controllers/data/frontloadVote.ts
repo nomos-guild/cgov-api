@@ -24,9 +24,6 @@ export const postFrontloadVote = async (req: Request, res: Response) => {
       anchorUrl,
       anchorHash,
       rationale,
-      surveyResponse,
-      surveyResponseSurveyTxId,
-      surveyResponseResponderRole,
     } = req.body;
 
     // ── Validate required fields ────────────────────────────────────────
@@ -65,9 +62,6 @@ export const postFrontloadVote = async (req: Request, res: Response) => {
       anchorUrl,
       anchorHash,
       rationale,
-      surveyResponse,
-      surveyResponseSurveyTxId,
-      surveyResponseResponderRole,
     });
 
     console.log(`[Frontload Vote] Created/updated vote id=${result.id}`);

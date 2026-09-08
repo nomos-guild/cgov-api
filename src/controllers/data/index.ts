@@ -9,5 +9,6 @@ export * from "./triggerDrepLifecycleSync";
 export * from "./triggerPoolGroupsSync";
 export * from "./triggerMissingEpochsSync";
 export * from "./triggerDrepDelegatorSync";
+export * from "./triggerCip179Sync";
 export * from "./triggerGithub";
 export * from "./frontloadVote";

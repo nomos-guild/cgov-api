@@ -1,7 +1,6 @@
 const mockListVotes = jest.fn();
 const mockEnsureVoterExists = jest.fn();
 const mockPreloadVotersForVotes = jest.fn();
-const mockGetKoiosPressureState = jest.fn();
 const mockShouldFailFastForDb = jest.fn();
 const mockRecordDbFailureForFailFast = jest.fn();
 
@@ -15,16 +14,8 @@ jest.mock("../src/services/ingestion/voterIngestion.service", () => ({
     mockPreloadVotersForVotes(...args),
 }));
 
-jest.mock("../src/services/koios", () => ({
-  getKoiosPressureState: (...args: unknown[]) => mockGetKoiosPressureState(...args),
-}));
-
 jest.mock("../src/services/remoteMetadata.service", () => ({
   fetchJsonWithBrowserLikeClient: jest.fn(),
-}));
-
-jest.mock("../src/services/txMetadata.service", () => ({
-  fetchTxMetadataByHash: jest.fn(),
 }));
 
 jest.mock("../src/services/ingestion/dbFailFast", () => ({
@@ -57,9 +48,6 @@ import { prisma, withDbRead, withDbWrite } from "../src/services/prisma";
 function createDbMock() {
   return {
     $transaction: jest.fn(),
-    proposal: {
-      findUnique: jest.fn().mockResolvedValue({ linkedSurveyTxId: null }),
-    },
     drep: {
       findUnique: jest.fn().mockResolvedValue({ votingPower: BigInt(100) }),
     },
@@ -84,11 +72,9 @@ describe("vote ingestion streaming/preload behavior", () => {
     mockListVotes.mockReset();
     mockEnsureVoterExists.mockReset();
     mockPreloadVotersForVotes.mockReset();
-    mockGetKoiosPressureState.mockReset();
     mockShouldFailFastForDb.mockReset();
     mockRecordDbFailureForFailFast.mockReset();
 
-    mockGetKoiosPressureState.mockReturnValue({ active: false });
     mockShouldFailFastForDb.mockReturnValue(false);
     mockPreloadVotersForVotes.mockResolvedValue(
       new Map([
@@ -146,7 +132,7 @@ describe("vote ingestion streaming/preload behavior", () => {
     expect(mockEnsureVoterExists).not.toHaveBeenCalled();
     expect(db.onchainVote.upsert).toHaveBeenCalledTimes(2);
     expect(db.drep.findUnique).not.toHaveBeenCalled();
-    expect(withDbRead).toHaveBeenCalledWith(
+    expect(withDbRead).not.toHaveBeenCalledWith(
       "vote.ingest.proposal-context.proposal1",
       expect.any(Function)
     );
@@ -258,4 +244,3 @@ describe("vote ingestion streaming/preload behavior", () => {
     expect(joinedResult.stats.votesUpserted).toBe(1);
   });
 });
-

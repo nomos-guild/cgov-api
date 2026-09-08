@@ -1,10 +1,5 @@
-import { fetchTxMetadataByHash } from "../txMetadata.service";
 import { fetchJsonWithBrowserLikeClient } from "../remoteMetadata.service";
 import { withRetry } from "./utils";
-import {
-  extractSurveyDetails,
-  type SurveyDetails,
-} from "../../libs/surveyMetadata";
 import type { KoiosProposal } from "../../types/koios.types";
 
 export interface ExtractProposalMetadataOptions {
@@ -125,17 +120,6 @@ async function fetchMetadataFromUrl(
     console.warn(`[Metadata] ${errorMsg}`);
     return null;
   }
-}
-
-export async function fetchLinkedSurveyDetails(
-  surveyTxId: string
-): Promise<SurveyDetails | null> {
-  const metadata = await fetchTxMetadataByHash(surveyTxId);
-  if (!metadata) {
-    return null;
-  }
-
-  return extractSurveyDetails(metadata);
 }
 
 function sanitizeText(value: string | null | undefined): string | null {

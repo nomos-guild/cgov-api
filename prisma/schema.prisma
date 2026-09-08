@@ -354,13 +354,9 @@ model OnchainVote {
   vote        VoteType?
   voterType   VoterType @map("voter_type")
   votingPower BigInt?   @map("voting_power")
-  responseEpoch Int?    @map("response_epoch")
   anchorUrl   String?   @map("anchor_url")
   anchorHash  String?   @map("anchor_hash")
   rationale   String?
-  surveyResponse              String?   @map("survey_response")
-  surveyResponseSurveyTxId    String?   @map("survey_response_survey_tx_id")
-  surveyResponseResponderRole String?   @map("survey_response_responder_role")
   votedAt     DateTime? @default(now()) @map("voted_at")
   createdAt   DateTime? @default(now()) @map("created_at")
   updatedAt   DateTime? @map("updated_at")
@@ -414,7 +410,7 @@ model Proposal {
   spoNoVotePower              BigInt?         @map("spo_no_vote_power") // Koios pool_no_vote_power (includes notVoted)
   metadata                    String?
   linkedSurveyTxId            String?         @map("linked_survey_tx_id")
-  surveyDetails               String?         @map("survey_details")
+  linkedSurveyIndex           Int?            @map("linked_survey_index")
   createdAt                   DateTime?       @default(now()) @map("created_at")
   updatedAt                   DateTime?       @map("updated_at")
   onchainVotes                OnchainVote[]
@@ -423,6 +419,36 @@ model Proposal {
   @@index([txHash])
   @@index([submissionEpoch])
   @@map("proposal")
+}
+
+// Immutable CIP-179 label-17 transactions cached from Koios. Payloads use the
+// cip-179 package's JSON-safe wire form so bytes and bigints round-trip exactly.
+model Cip179Transaction {
+  txHash       String   @id @map("tx_hash")
+  absoluteSlot BigInt   @map("absolute_slot")
+  epochNo      Int      @map("epoch_no")
+  txBlockIndex Int?     @map("tx_block_index")
+  payload      String
+  proof        String?
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  @@index([absoluteSlot])
+  @@index([epochNo])
+  @@map("cip179_transaction")
+}
+
+model Cip179Artifact {
+  surveyKey    String   @id @map("survey_key")
+  surveyTxId   String   @map("survey_tx_id")
+  surveyIndex  Int      @map("survey_index")
+  endEpoch     Int      @map("end_epoch")
+  artifactHash String   @unique @map("artifact_hash")
+  artifact     String
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  @@index([endEpoch])
+  @@map("cip179_artifact")
 }
 
 model ProposalDraft {

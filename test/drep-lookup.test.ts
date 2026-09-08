@@ -12,6 +12,7 @@ function createPrismaMock() {
     drep: {
       findMany: jest.fn(),
       createMany: jest.fn(),
+      update: jest.fn(),
     },
   } as any;
 }
@@ -90,6 +91,63 @@ describe("drep-lookup", () => {
         expiresEpoch: 201,
         metaUrl: "https://example.com/2",
         metaHash: "hash2",
+      },
+    ]);
+  });
+
+  it("refreshes an incomplete DRep shell from Koios", async () => {
+    const prisma = createPrismaMock();
+    prisma.drep.findMany.mockResolvedValue([
+      {
+        drepId: "drep1",
+        votingPower: BigInt(0),
+        registered: null,
+        active: false,
+        expiresEpoch: 1268,
+        metaUrl: null,
+        metaHash: null,
+      },
+    ]);
+    prisma.drep.update.mockResolvedValue({});
+    mockGetDrepInfoBatchFromKoios.mockResolvedValue([
+      {
+        drep_id: "drep1",
+        amount: "10",
+        drep_status: "registered",
+        active: false,
+        expires_epoch_no: 1268,
+        meta_url: "https://example.com/1",
+        meta_hash: "hash1",
+      },
+    ]);
+
+    const results = await getDrepInfoBatch(prisma, ["drep1"]);
+
+    expect(mockGetDrepInfoBatchFromKoios).toHaveBeenCalledWith(
+      ["drep1"],
+      { source: "drep-lookup.drep-info" }
+    );
+    expect(prisma.drep.createMany).not.toHaveBeenCalled();
+    expect(prisma.drep.update).toHaveBeenCalledWith({
+      where: { drepId: "drep1" },
+      data: {
+        votingPower: BigInt(10),
+        registered: true,
+        active: false,
+        expiresEpoch: 1268,
+        metaUrl: "https://example.com/1",
+        metaHash: "hash1",
+      },
+    });
+    expect(results).toEqual([
+      {
+        drepId: "drep1",
+        votingPower: BigInt(10),
+        registered: true,
+        active: false,
+        expiresEpoch: 1268,
+        metaUrl: "https://example.com/1",
+        metaHash: "hash1",
       },
     ]);
   });
